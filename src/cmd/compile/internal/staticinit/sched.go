@@ -341,9 +341,10 @@ func (s *Schedule) StaticAssign(l *ir.Name, loff int64, r ir.Node, typ *types.Ty
 			// Emit itab, advance offset.
 			staticdata.InitAddr(l, loff, itab.(*ir.AddrExpr).X.(*ir.LinksymOffsetExpr).Linksym)
 		} else {
-			itab = reflectdata.ITabAddr(val.Type(), typ)
+			itab = reflectdata.ITabAddr1(val.Type(), typ)
 			//staticdata.InitAddr(l, loff, itab.(*ir.LinksymOffsetExpr).Linksym)
-			staticdata.InitAddr(l, loff, itab.(*ir.AddrExpr).X.(*ir.LinksymOffsetExpr).Linksym)
+			assign(base.Pos, l, loff, itab)
+			//staticdata.InitAddr(l, loff, itab.(*ir.AddrExpr).X.(*ir.LinksymOffsetExpr).Linksym)
 		}
 
 		// Create a copy of l to modify while we emit data.
