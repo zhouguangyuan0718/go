@@ -5130,6 +5130,8 @@ func (s *state) maybeNilCheckClosure(closure *ssa.Value, k callKind) {
 func (s *state) getClosureAndRcvr(fn *ir.SelectorExpr) (*ssa.Value, *ssa.Value) {
 	i := s.expr(fn.X)
 	itab := s.newValue1(ssa.OpITab, types.Types[types.TUINTPTR], i)
+	//s.nilCheck(itabaddr)
+	//itab := s.load(types.Types[types.TUINTPTR], itabaddr)
 	s.nilCheck(itab)
 	itabidx := fn.Offset() + 2*int64(types.PtrSize) + 8 // offset of fun field in runtime.itab
 	closure := s.newValue1I(ssa.OpOffPtr, s.f.Config.Types.UintptrPtr, itabidx, itab)

@@ -334,17 +334,22 @@ func (s *Schedule) StaticAssign(l *ir.Name, loff int64, r ir.Node, typ *types.Ty
 
 		reflectdata.MarkTypeUsedInInterface(val.Type(), l.Linksym())
 
-		var itab *ir.AddrExpr
+		var itab ir.Node
+		//var itab *ir.AddrExpr
 		if typ.IsEmptyInterface() {
 			itab = reflectdata.TypePtr(val.Type())
+			// Emit itab, advance offset.
+			staticdata.InitAddr(l, loff, itab.(*ir.AddrExpr).X.(*ir.LinksymOffsetExpr).Linksym)
 		} else {
 			itab = reflectdata.ITabAddr(val.Type(), typ)
+			//staticdata.InitAddr(l, loff, itab.(*ir.LinksymOffsetExpr).Linksym)
+			staticdata.InitAddr(l, loff, itab.(*ir.AddrExpr).X.(*ir.LinksymOffsetExpr).Linksym)
 		}
 
 		// Create a copy of l to modify while we emit data.
 
 		// Emit itab, advance offset.
-		staticdata.InitAddr(l, loff, itab.X.(*ir.LinksymOffsetExpr).Linksym)
+		//staticdata.InitAddr(l, loff, itab.X.(*ir.LinksymOffsetExpr).Linksym)
 
 		// Emit data.
 		if types.IsDirectIface(val.Type()) {

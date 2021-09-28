@@ -64,7 +64,11 @@ func plugin_lastmoduleinit() (path string, syms map[string]interface{}, errstr s
 
 	lock(&itabLock)
 	for _, i := range md.itablinks {
-		itabAdd(i)
+		if oldIt := itabTable.find((*i).inter, (*i)._type); oldIt != nil {
+			*i = oldIt
+			continue
+		}
+		itabAdd(*i)
 	}
 	unlock(&itabLock)
 

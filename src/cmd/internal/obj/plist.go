@@ -180,6 +180,7 @@ func toFuncFlag(flag int) objabi.FuncFlag {
 	return out
 }
 
+//bss符号生成
 func (ctxt *Link) Globl(s *LSym, size int64, flag int) {
 	if s.OnList() {
 		ctxt.Diag("symbol %s listed multiple times", s.Name)

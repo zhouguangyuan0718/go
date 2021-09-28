@@ -72,7 +72,7 @@ func getitab(inter *interfacetype, typ *_type, canfail bool) *itab {
 	// in itabsinit). The dynamically-generated itab's never participate in type switches,
 	// and thus the hash is irrelevant.
 	// Note: m.hash is _not_ the hash used for the runtime itabTable hash table.
-	m.hash = 0
+	m.hash = typ.hash
 	m.init()
 	itabAdd(m)
 	unlock(&itabLock)
@@ -248,7 +248,7 @@ func itabsinit() {
 	lock(&itabLock)
 	for _, md := range activeModules() {
 		for _, i := range md.itablinks {
-			itabAdd(i)
+			itabAdd(*i)
 		}
 	}
 	unlock(&itabLock)

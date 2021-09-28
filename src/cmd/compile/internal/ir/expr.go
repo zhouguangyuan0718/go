@@ -658,7 +658,7 @@ type TypeAssertExpr struct {
 
 	// Runtime type information provided by walkDotType for
 	// assertions from non-empty interface to concrete type.
-	Itab *AddrExpr `mknode:"-"` // *runtime.itab for Type implementing X's type
+	Itab *LinksymOffsetExpr `mknode:"-"` // *runtime.itab for Type implementing X's type
 }
 
 func NewTypeAssertExpr(pos src.XPos, x Node, typ Ntype) *TypeAssertExpr {
