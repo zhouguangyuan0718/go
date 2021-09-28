@@ -95,8 +95,19 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	ir.Pkgs.Runtime.Prefix = "runtime"
 
 	// pseudo-packages used in symbol tables
+	// itab 符号生成
 	ir.Pkgs.Itab = types.NewPkg("go.itab", "go.itab")
 	ir.Pkgs.Itab.Prefix = "go.itab" // not go%2eitab
+
+	// pseudo-packages used in symbol tables
+	// itab 符号生成
+	ir.Pkgs.ItabAddr = types.NewPkg("go.itabaddr", "go.itabaddr")
+	ir.Pkgs.ItabAddr.Prefix = "go.itabaddr" // not go%2eitab
+
+	// pseudo-packages used in symbol tables
+	// itab 符号生成
+	ir.Pkgs.TypeAddr = types.NewPkg("go.typeaddr", "go.typeaddr")
+	ir.Pkgs.TypeAddr.Prefix = "go.typeaddr" // not go%2eitab
 
 	// pseudo-package used for methods with anonymous receivers
 	ir.Pkgs.Go = types.NewPkg("go", "")

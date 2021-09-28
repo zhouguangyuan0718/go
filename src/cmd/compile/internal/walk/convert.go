@@ -54,7 +54,7 @@ func walkConvInterface(n *ir.ConvExpr, init *ir.Nodes) ir.Node {
 		if toType.IsEmptyInterface() {
 			typeWord = reflectdata.TypePtr(fromType)
 		} else {
-			typeWord = reflectdata.ITabAddr(fromType, toType)
+			typeWord = reflectdata.ITabAddr1(fromType, toType)
 		}
 		l := ir.NewBinaryExpr(base.Pos, ir.OEFACE, typeWord, dataWord(n.Pos(), n.X, init, n.Esc() != ir.EscNone))
 		l.SetType(toType)

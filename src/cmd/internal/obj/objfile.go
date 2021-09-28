@@ -337,12 +337,18 @@ func (w *writer) Sym(s *LSym) {
 	if s.UsedInIface() {
 		flag2 |= goobj.SymFlagUsedInIface
 	}
-	if strings.HasPrefix(s.Name, "go.itab.") && s.Type == objabi.SRODATA {
+	if strings.HasPrefix(s.Name, "go.itabaddr.") && s.Type == objabi.SNOPTRDATA {
 		flag2 |= goobj.SymFlagItab
 	}
+
 	if strings.HasPrefix(s.Name, w.ctxt.Pkgpath) && strings.HasPrefix(s.Name[len(w.ctxt.Pkgpath):], ".") && strings.HasPrefix(s.Name[len(w.ctxt.Pkgpath)+1:], objabi.GlobalDictPrefix) {
 		flag2 |= goobj.SymFlagDict
 	}
+
+	//if strings.HasPrefix(s.Name, "go.itab.") && s.Type == objabi.SRODATA {
+	//	flag2 |= goobj.SymFlagItab
+	//}
+
 	name := s.Name
 	if strings.HasPrefix(name, "gofile..") {
 		name = filepath.ToSlash(name)

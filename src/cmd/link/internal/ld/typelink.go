@@ -34,6 +34,10 @@ func (ctxt *Link) typelink() {
 			continue
 		}
 		if ldr.IsTypelink(s) {
+			//reloc := ldr.Relocs(s)
+			//typ := reloc.At(0).Sym()
+			//typelinks = append(typelinks, typelinkSortKey{decodetypeStr(ldr, ctxt.Arch, typ), s})
+
 			typelinks = append(typelinks, typelinkSortKey{decodetypeStr(ldr, ctxt.Arch, s), s})
 		} else if ldr.IsItab(s) {
 			itabs = append(itabs, s)

@@ -408,7 +408,7 @@ type moduledata struct {
 
 	textsectmap []textsect
 	typelinks   []int32 // offsets from types
-	itablinks   []*itab
+	itablinks   []**itab
 
 	ptab []ptabEntry
 
