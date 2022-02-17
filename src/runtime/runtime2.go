@@ -481,11 +481,12 @@ type g struct {
 	ancestors      *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
 	startpc        uintptr         // pc of goroutine function
 	racectx        uintptr
-	waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
-	cgoCtxt        []uintptr      // cgo traceback context
-	labels         unsafe.Pointer // profiler labels
-	timer          *timer         // cached timer for time.Sleep
-	selectDone     uint32         // are we participating in a select and did someone win the race?
+	waiting        *sudog           // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
+	cgoCtxt        []uintptr        // cgo traceback context
+	labels         unsafe.Pointer   // profiler labels
+	timer          *timer           // cached timer for time.Sleep
+	stackPointers  []unsafe.Pointer // record Pointer in stack
+	selectDone     uint32           // are we participating in a select and did someone win the race?
 
 	// Per-G GC state
 

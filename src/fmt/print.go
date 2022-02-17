@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
 	"sync"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Strings for use with buffer.WriteString.
@@ -106,10 +108,12 @@ type pp struct {
 	buf buffer
 
 	// arg holds the current item, as an interface{}.
-	arg any
+	arg       any
+	argptridx int
 
 	// value is used instead of arg for reflect values.
-	value reflect.Value
+	value       reflect.Value
+	valueptridx int
 
 	// fmt is used to format basic items such as integers or strings.
 	fmt fmt
@@ -139,7 +143,26 @@ func newPrinter() *pp {
 	p.erroring = false
 	p.wrapErrs = false
 	p.fmt.init(&p.buf)
+	runtime.RecordStackPointer(unsafe.Pointer(&efaceOf(&p.arg).data))
+	runtime.RecordStackPointer(unsafe.Pointer(&valueOf(&p.value).ptr))
 	return p
+}
+
+type value struct {
+	typ unsafe.Pointer
+	ptr unsafe.Pointer
+}
+type eface struct {
+	_type unsafe.Pointer
+	data  unsafe.Pointer
+}
+
+func efaceOf(ep *any) *eface {
+	return (*eface)(unsafe.Pointer(ep))
+}
+
+func valueOf(ep *reflect.Value) *value {
+	return (*value)(unsafe.Pointer(ep))
 }
 
 // free saves used pp structs in ppFree; avoids an allocation per invocation.
@@ -158,6 +181,8 @@ func (p *pp) free() {
 	p.arg = nil
 	p.value = reflect.Value{}
 	p.wrappedErr = nil
+	runtime.RemoveStackPointer()
+	runtime.RemoveStackPointer()
 	ppFree.Put(p)
 }
 
@@ -201,7 +226,7 @@ func (p *pp) WriteString(s string) (ret int, err error) {
 // It returns the number of bytes written and any write error encountered.
 func Fprintf(w io.Writer, format string, a ...any) (n int, err error) {
 	p := newPrinter()
-	p.doPrintf(format, a)
+	p.doPrintf(format, *(*[]any)(noescape(unsafe.Pointer(&a))))
 	n, err = w.Write(p.buf)
 	p.free()
 	return
@@ -216,7 +241,7 @@ func Printf(format string, a ...any) (n int, err error) {
 // Sprintf formats according to a format specifier and returns the resulting string.
 func Sprintf(format string, a ...any) string {
 	p := newPrinter()
-	p.doPrintf(format, a)
+	p.doPrintf(format, *(*[]any)(noescape(unsafe.Pointer(&a))))
 	s := string(p.buf)
 	p.free()
 	return s
@@ -229,7 +254,7 @@ func Sprintf(format string, a ...any) string {
 // It returns the number of bytes written and any write error encountered.
 func Fprint(w io.Writer, a ...any) (n int, err error) {
 	p := newPrinter()
-	p.doPrint(a)
+	p.doPrint(*(*[]any)(noescape(unsafe.Pointer(&a))))
 	n, err = w.Write(p.buf)
 	p.free()
 	return
@@ -246,7 +271,7 @@ func Print(a ...any) (n int, err error) {
 // Spaces are added between operands when neither is a string.
 func Sprint(a ...any) string {
 	p := newPrinter()
-	p.doPrint(a)
+	p.doPrint(*(*[]any)(noescape(unsafe.Pointer(&a))))
 	s := string(p.buf)
 	p.free()
 	return s
@@ -261,7 +286,7 @@ func Sprint(a ...any) string {
 // It returns the number of bytes written and any write error encountered.
 func Fprintln(w io.Writer, a ...any) (n int, err error) {
 	p := newPrinter()
-	p.doPrintln(a)
+	p.doPrintln(*(*[]any)(noescape(unsafe.Pointer(&a))))
 	n, err = w.Write(p.buf)
 	p.free()
 	return
@@ -278,7 +303,7 @@ func Println(a ...any) (n int, err error) {
 // Spaces are always added between operands and a newline is appended.
 func Sprintln(a ...any) string {
 	p := newPrinter()
-	p.doPrintln(a)
+	p.doPrintln(*(*[]any)(noescape(unsafe.Pointer(&a))))
 	s := string(p.buf)
 	p.free()
 	return s
@@ -1170,3 +1195,16 @@ func (p *pp) doPrintln(a []any) {
 	}
 	p.buf.writeByte('\n')
 }
+
+//go:nosplit
+//go:nocheckptr
+func noescape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	return unsafe.Pointer(x ^ 0)
+}
+
+//go:linkname cachePrinter runtime.cachePrinter
+func cachePrinter(p unsafe.Pointer)
+
+//go:linkname getPrinter runtime.getPrinter
+func getPrinter() (p unsafe.Pointer)

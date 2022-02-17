@@ -4,7 +4,10 @@
 
 package fmt
 
-import "errors"
+import (
+	"errors"
+	"unsafe"
+)
 
 // Errorf formats according to a format specifier and returns the string as a
 // value that satisfies error.
@@ -17,7 +20,7 @@ import "errors"
 func Errorf(format string, a ...any) error {
 	p := newPrinter()
 	p.wrapErrs = true
-	p.doPrintf(format, a)
+	p.doPrintf(format, *(*[]any)(noescape(unsafe.Pointer(&a))))
 	s := string(p.buf)
 	var err error
 	if p.wrappedErr == nil {

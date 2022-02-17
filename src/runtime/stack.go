@@ -928,6 +928,11 @@ func copystack(gp *g, newsize uintptr) {
 
 	// Adjust pointers in the new stack.
 	gentraceback(^uintptr(0), ^uintptr(0), 0, gp, 0, nil, 0x7fffffff, adjustframe, noescape(unsafe.Pointer(&adjinfo)), 0)
+	if len(gp.stackPointers) != 0 {
+		for _, ptr := range gp.stackPointers {
+			adjustpointer(&adjinfo, ptr)
+		}
+	}
 
 	// free old stack
 	if stackPoisonCopy != 0 {
