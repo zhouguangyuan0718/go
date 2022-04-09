@@ -1654,3 +1654,84 @@ func IsDWARFEnabledOnAIXLd(extld string) (bool, error) {
 	}
 	return true, nil
 }
+
+//Type represents a type info will be used in generating dwarf type info.
+type Type interface {
+	// DwarfName return the name should put to the data of dwarf sym.
+	// It must be expanded.
+	DwarfName() string
+
+	// Name return the type name without any prefix, such as `int`, `"".MyType`.
+	Name() string
+	Size() int64
+	Kind() objabi.SymKind
+
+	// RuntimeType return the runtime type description.
+	RuntimeType() Sym
+
+	// Key return the type of key if the Type is a map.
+	Key() Type
+
+	// Elem can return different info for different type.
+	// For map, type of value;
+	// For pointer, type of it pointer to;
+	// For array, slice and chan, it is the elem type of them.
+	// Other invalid.
+	Elem() Type
+
+	// NumElem has different meaning of different type.
+	// For array, it is length;
+	// For struct, it is num of fields;
+	// For function, it is num of the PARAMETER of the function.
+	// Others are invalid.
+	NumElem() int64
+
+	// NumResult is only for function, it is the result num.
+	// Others are invalid.
+	NumResult() int64
+
+	// IsDDD report the function type is variadic.
+	IsDDD() bool
+
+	// FieldName and FieldType has different meaning of different type and FieldsGroup.
+	// GroupFields: this type must be a struct, and report the name and type of field i.
+	// GroupParams: this type must be a function, and report the name and type of param i.
+	// GroupResults: this type must a function, and report the name and type of result i.
+	FieldName(g FieldsGroup, i int) string
+	FieldType(g FieldsGroup, i int) Type
+
+	// FieldIsEmbed report the field i of a struct type is Embed.
+	FieldIsEmbed(i int) bool
+
+	// FieldOffset report the offset of field i in a struct type.
+	FieldOffset(i int) int64
+
+	// IsEface report is this type an interface with no methods.
+	IsEface() bool
+}
+
+type FieldsGroup int
+
+const (
+	GroupFields FieldsGroup = iota
+	GroupParams
+	GroupResults
+)
+
+type TypeContext interface {
+	// Reference not really generate a dwarf type info now,
+	// it generates a sym for reloc. We hope only the type defined in
+	// current compile unit will be generated.
+	// TODO: it can be extended to support generating entire type info for dynlink.
+	Reference(t Type) Sym
+
+	// ReferencePtr will generate a dwarf type die for the pointer of dwtype,
+	// because we can't tell the ptr type will be generated in other package or not.
+	ReferencePtr(dwtype Sym) Sym
+
+	// LookupDwarfSym will create a sym that type is SDWARFTYPE.
+	LookupDwarfSym(name string) (s Sym, exist bool)
+
+	// DiagLog is used to report error
+	DiagLog(info string)
+}
