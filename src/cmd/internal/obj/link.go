@@ -918,6 +918,8 @@ type Link struct {
 	// to Data.
 	constSyms []*LSym
 
+	dwtypes dwarf.DWDie
+
 	// pkgIdx maps package path to index. The index is used for
 	// symbol reference in the object file.
 	pkgIdx map[string]int32

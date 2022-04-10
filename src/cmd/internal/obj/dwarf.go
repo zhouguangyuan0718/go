@@ -752,3 +752,54 @@ type BySymName []*LSym
 func (s BySymName) Len() int           { return len(s) }
 func (s BySymName) Less(i, j int) bool { return s[i].Name < s[j].Name }
 func (s BySymName) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+func (ctxt *Link) PopulateDWARFType(typ dwarf.Type, dupok bool) {
+	kind := typ.Kind()
+	if kind == objabi.KindMap || kind == objabi.KindChan || kind == objabi.KindSlice || kind == objabi.KindString {
+		// can't synthesize these types now. So skip them.
+		return
+	}
+
+	dwsym := ctxt.Lookup(dwarf.InfoPrefix + typ.Name())
+	if dwsym.Type == objabi.SDWARFTYPE {
+		return
+	}
+
+	dwsym.Set(AttrDuplicateOK, dupok)
+
+	dwctxt := dwCtxt{ctxt}
+	_, _, err := dwarf.NewType(typ, dwctxt, &ctxt.dwtypes)
+	if err != nil {
+		ctxt.Diag(err.Error())
+		return
+	}
+}
+
+// todo: synthesize types here.
+func (ctxt *Link) DumpDwarfTypes() {
+	dwarf.ReverseTree(&ctxt.dwtypes.Child)
+	for die := ctxt.dwtypes.Child; die != nil; die = die.Link {
+		ctxt.Data = ctxt.putdie(ctxt.Data, die)
+	}
+}
+
+// todo: unify putdie with linker
+func (ctxt *Link) putdie(syms []*LSym, die *dwarf.DWDie) []*LSym {
+	dwctxt := dwCtxt{ctxt}
+	s := die.Sym
+	if s == nil {
+		s = syms[len(syms)-1]
+	} else {
+		syms = append(syms, s.(*LSym))
+	}
+	dwarf.Uleb128put(dwctxt, s, int64(die.Abbrev))
+	dwarf.PutAttrs(dwctxt, s, die.Abbrev, die.Attr)
+	if dwarf.HasChildren(die) {
+		for die := die.Child; die != nil; die = die.Link {
+			syms = dwctxt.putdie(syms, die)
+		}
+		lastsym := syms[len(syms)-1]
+		lastsym.WriteInt(ctxt, lastsym.Size, 1, 0)
+	}
+	return syms
+}

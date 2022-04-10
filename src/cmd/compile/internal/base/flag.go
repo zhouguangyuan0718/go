@@ -91,6 +91,7 @@ type CmdFlags struct {
 	Complete           bool         "help:\"compiling complete package (no C or assembly)\""
 	ClobberDead        bool         "help:\"clobber dead stack slots (for debugging)\""
 	ClobberDeadReg     bool         "help:\"clobber dead registers (for debugging)\""
+	DwarfType          bool         "help:\"generate DWARF type info symbols\""
 	Dwarf              bool         "help:\"generate DWARF symbols\""
 	DwarfBASEntries    *bool        "help:\"use base address selection entries in DWARF\""                        // &Ctxt.UseBASEntries, set below
 	DwarfLocationLists *bool        "help:\"add location lists to DWARF in optimized mode\""                      // &Ctxt.Flag_locationlists, set below

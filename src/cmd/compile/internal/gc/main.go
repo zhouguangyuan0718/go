@@ -303,6 +303,9 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// Write object data to disk.
 	base.Timer.Start("be", "dumpobj")
 	dumpdata()
+	if base.Flag.DwarfType {
+		base.Ctxt.DumpDwarfTypes()
+	}
 	base.Ctxt.NumberSyms()
 	dumpobj()
 	if base.Flag.AsmHdr != "" {
