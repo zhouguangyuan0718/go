@@ -1655,7 +1655,7 @@ func IsDWARFEnabledOnAIXLd(extld string) (bool, error) {
 	return true, nil
 }
 
-//Type represents a type info will be used in generating dwarf type info.
+// Type represents a type info will be used in generating dwarf type info.
 type Type interface {
 	// DwarfName return the name should put to the data of dwarf sym.
 	// It must be expanded.
@@ -1795,27 +1795,28 @@ func newMemberOffsetAttr(die *DWDie, offs int32) {
 	NewAttr(die, DW_AT_data_member_location, DW_CLS_CONSTANT, int64(offs), nil)
 }
 
-func doTypeDef(parent *DWDie, symName string, dwarfName string, def *DWDie, d TypeContext) (*DWDie, error) {
+func doTypeDef(parent *DWDie, symName string, dwarfName string, def *DWDie, d TypeContext) *DWDie {
 	// Only emit typedefs for real names.
 	if strings.HasPrefix(symName, "map[") {
-		return nil, nil
+		return nil
 	}
 	if strings.HasPrefix(symName, "struct {") {
-		return nil, nil
+		return nil
 	}
 	// cmd/compile uses "noalg.struct {...}" as type name when hash and eq algorithm generation of
 	// this struct type is suppressed.
 	if strings.HasPrefix(symName, "noalg.struct {") {
-		return nil, nil
+		return nil
 	}
 	if strings.HasPrefix(symName, "chan ") {
-		return nil, nil
+		return nil
 	}
 	if symName[0] == '[' || symName[0] == '*' {
-		return nil, nil
+		return nil
 	}
 	if def == nil {
-		return nil, errors.New("dwarf: bad def in dotypedef")
+		d.DiagLog(errors.New("dwarf: bad def in dotypedef").Error())
+		return nil
 	}
 
 	ds, _ := d.LookupDwarfSym("")
@@ -1828,7 +1829,167 @@ func doTypeDef(parent *DWDie, symName string, dwarfName string, def *DWDie, d Ty
 
 	NewRefAttr(die, DW_AT_type, ds)
 
-	return die, nil
+	return die
+}
+
+func NewType(gotype Type, tc TypeContext, parent *DWDie) (*DWDie, *DWDie, error) {
+	name := gotype.Name()
+	dwarfName := gotype.DwarfName()
+	kind := gotype.Kind()
+	bytesize := gotype.Size()
+
+	var die, typedefdie *DWDie
+	switch kind {
+	case objabi.KindBool:
+		die = NewTypeDie(parent, DW_ABRV_BASETYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_boolean, 0)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+
+	case objabi.KindInt,
+		objabi.KindInt8,
+		objabi.KindInt16,
+		objabi.KindInt32,
+		objabi.KindInt64:
+		die = NewTypeDie(parent, DW_ABRV_BASETYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_signed, 0)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+
+	case objabi.KindUint,
+		objabi.KindUint8,
+		objabi.KindUint16,
+		objabi.KindUint32,
+		objabi.KindUint64,
+		objabi.KindUintptr:
+		die = NewTypeDie(parent, DW_ABRV_BASETYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_unsigned, 0)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+
+	case objabi.KindFloat32,
+		objabi.KindFloat64:
+		die = NewTypeDie(parent, DW_ABRV_BASETYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_float, 0)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+
+	case objabi.KindComplex64,
+		objabi.KindComplex128:
+		die = NewTypeDie(parent, DW_ABRV_BASETYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_complex_float, 0)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+
+	case objabi.KindArray:
+		die = NewTypeDie(parent, DW_ABRV_ARRAYTYPE, name, dwarfName, tc)
+		typedefdie = doTypeDef(parent, name, dwarfName, die, tc)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+		s := gotype.Elem()
+		NewRefAttr(die, DW_AT_type, tc.Reference(s))
+		fld := NewTypeDie(die, DW_ABRV_ARRAYRANGE, "", "range", tc)
+
+		// use actual length not upper bound; correct for 0-length arrays.
+		NewAttr(fld, DW_AT_count, DW_CLS_CONSTANT, gotype.NumElem(), 0)
+		u, _ := tc.LookupDwarfSym("uintptr")
+		NewRefAttr(fld, DW_AT_type, u)
+
+	case objabi.KindChan:
+		die = NewTypeDie(parent, DW_ABRV_CHANTYPE, name, dwarfName, tc)
+		s := gotype.Elem()
+		NewRefAttr(die, DW_AT_go_elem, tc.Reference(s))
+		// Save elem type for synthesizechantypes. We could synthesize here
+		// but that would change the order of DIEs we output.
+		NewAttr(die, DW_AT_type, DW_CLS_REFERENCE, 0, s)
+
+	case objabi.KindFunc:
+		die = NewTypeDie(parent, DW_ABRV_FUNCTYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+		typedefdie = doTypeDef(parent, name, dwarfName, die, tc)
+
+		nfields := gotype.NumElem()
+		for i := 0; i < int(nfields); i++ {
+			s := gotype.FieldName(GroupParams, i)
+			fld := NewTypeDie(die, DW_ABRV_FUNCTYPEPARAM, "", s, tc)
+			t := gotype.FieldType(GroupParams, i)
+			NewRefAttr(fld, DW_AT_type, tc.Reference(t))
+		}
+
+		if gotype.IsDDD() {
+			NewTypeDie(die, DW_ABRV_DOTDOTDOT, "", "...", tc)
+		}
+		nfields = gotype.NumResult()
+		for i := 0; i < int(nfields); i++ {
+			s := gotype.FieldName(GroupResults, i)
+			fld := NewTypeDie(die, DW_ABRV_FUNCTYPEPARAM, "", s, tc)
+			t := gotype.FieldType(GroupResults, i)
+			NewRefAttr(fld, DW_AT_type, tc.ReferencePtr(tc.Reference(t)))
+		}
+
+	case objabi.KindInterface:
+		die = NewTypeDie(parent, DW_ABRV_IFACETYPE, name, dwarfName, tc)
+		typedefdie = doTypeDef(parent, name, dwarfName, die, tc)
+		if gotype.IsEface() {
+			s, _ := tc.LookupDwarfSym("runtime.eface")
+			NewRefAttr(die, DW_AT_type, s)
+		} else {
+			s, _ := tc.LookupDwarfSym("runtime.iface")
+			NewRefAttr(die, DW_AT_type, s)
+		}
+
+	case objabi.KindMap:
+		die = NewTypeDie(parent, DW_ABRV_MAPTYPE, name, dwarfName, tc)
+		s := gotype.Key()
+		NewRefAttr(die, DW_AT_go_key, tc.Reference(s))
+		s = gotype.Elem()
+		NewRefAttr(die, DW_AT_go_elem, tc.Reference(s))
+		// Save gotype for use in synthesizemaptypes. We could synthesize here,
+		// but that would change the order of the DIEs.
+		NewAttr(die, DW_AT_type, DW_CLS_REFERENCE, 0, gotype)
+
+	case objabi.KindPtr:
+		die = NewTypeDie(parent, DW_ABRV_PTRTYPE, name, dwarfName, tc)
+		typedefdie = doTypeDef(parent, name, dwarfName, die, tc)
+		s := gotype.Elem()
+		NewRefAttr(die, DW_AT_type, tc.Reference(s))
+
+	case objabi.KindSlice:
+		die = NewTypeDie(parent, DW_ABRV_SLICETYPE, name, dwarfName, tc)
+		typedefdie = doTypeDef(parent, name, dwarfName, die, tc)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+		s := gotype.Elem()
+		elem := tc.Reference(s)
+		NewRefAttr(die, DW_AT_go_elem, elem)
+
+	case objabi.KindString:
+		die = NewTypeDie(parent, DW_ABRV_STRINGTYPE, name, dwarfName, tc)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+
+	case objabi.KindStruct:
+		die = NewTypeDie(parent, DW_ABRV_STRUCTTYPE, name, dwarfName, tc)
+		typedefdie = doTypeDef(parent, name, dwarfName, die, tc)
+		NewAttr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
+		nfields := gotype.NumElem()
+		for i := 0; i < int(nfields); i++ {
+			f := gotype.FieldName(GroupFields, i)
+			s := gotype.FieldType(GroupFields, i)
+			if f == "" {
+				f = s.Name()
+			}
+			fld := NewTypeDie(die, DW_ABRV_STRUCTFIELD, "", f, tc)
+			NewRefAttr(fld, DW_AT_type, tc.Reference(s))
+			offset := gotype.FieldOffset(i)
+			newMemberOffsetAttr(fld, int32(offset))
+			if gotype.FieldIsEmbed(i) {
+				NewAttr(fld, DW_AT_go_embedded_field, DW_CLS_FLAG, 1, 0)
+			}
+		}
+
+	case objabi.KindUnsafePointer:
+		die = NewTypeDie(parent, DW_ABRV_BARE_PTRTYPE, name, dwarfName, tc)
+
+	default:
+		return nil, nil, fmt.Errorf("dwarf: definition of unknown kind %d", kind)
+	}
+
+	NewAttr(die, DW_AT_go_kind, DW_CLS_CONSTANT, int64(kind), 0)
+	NewAttr(die, DW_AT_go_runtime_type, DW_CLS_GO_TYPEREF, 0, gotype.RuntimeType())
+	return die, typedefdie, nil
 }
 
 func reverseList(list **DWDie) {
