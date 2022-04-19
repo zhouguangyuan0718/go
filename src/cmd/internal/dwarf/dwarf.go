@@ -2013,3 +2013,110 @@ func ReverseTree(list **DWDie) {
 		}
 	}
 }
+
+// Find child by AT_name using hashtable if available or linear scan
+// if not.
+func (die *DWDie) findChild(name string) *DWDie {
+	var prev *DWDie
+	for ; die != prev; prev, die = die, die.WalkTypeDef() {
+		for a := die.Child; a != nil; a = a.Link {
+			if name == getAttr(a, DW_AT_name).Data {
+				return a
+			}
+		}
+		continue
+	}
+	return nil
+}
+
+func (die *DWDie) WalkTypeDef() *DWDie {
+	if die == nil {
+		return nil
+	}
+	// Resolve typedef if present.
+	if die.Abbrev == DW_ABRV_TYPEDECL {
+		for attr := die.Attr; attr != nil; attr = attr.Link {
+			if attr.Atr == DW_AT_type && attr.Cls == DW_CLS_REFERENCE && attr.Data != nil {
+				return attr.Data.(*DWDie)
+			}
+		}
+	}
+
+	return die
+}
+
+// Each DIE (except the root ones) has at least 1 attribute: its
+// name. getAttr moves the desired one to the front so
+// frequently searched ones are found faster.
+func getAttr(die *DWDie, attr uint16) *DWAttr {
+	if die.Attr.Atr == attr {
+		return die.Attr
+	}
+	a := die.Attr
+	b := a.Link
+	for b != nil {
+		if b.Atr == attr {
+			a.Link = b.Link
+			b.Link = die.Attr
+			die.Attr = b
+			return b
+		}
+
+		a = b
+		b = b.Link
+	}
+	return nil
+}
+
+func mkInternalTypename(base string, arg1 string, arg2 string) string {
+	if arg2 == "" {
+		return fmt.Sprintf("%s<%s>", base, arg1)
+	}
+	return fmt.Sprintf("%s<%s,%s>", base, arg1, arg2)
+}
+
+func MkInternalType(parent *DWDie, ctx TypeContext, abbrev int, typename, keyname, valname string, f func(*DWDie)) Sym {
+	name := mkInternalTypename(typename, keyname, valname)
+	s, exist := ctx.LookupDwarfSym(name)
+	if exist {
+		return s
+	}
+	die := NewTypeDie(parent, abbrev, name, name, ctx)
+	f(die)
+	return die.Sym
+}
+
+// Copies src's children into dst. Copies attributes by value.
+// DWAttr.data is copied as pointer only. If except is one of
+// the top-level children, it will not be copied.
+func copyChildrenExcept(d TypeContext, dst *DWDie, src *DWDie, except *DWDie) {
+	for src = src.Child; src != nil; src = src.Link {
+		if src == except {
+			continue
+		}
+		name := getAttr(src, DW_AT_name).Data.(string)
+		c := NewTypeDie(dst, src.Abbrev, name, name, d)
+		for a := src.Attr; a != nil; a = a.Link {
+			NewAttr(c, a.Atr, int(a.Cls), a.Value, a.Data)
+		}
+		copyChildrenExcept(d, c, src, nil)
+	}
+
+	reverseList(&dst.Child)
+}
+
+func copyChildren(d TypeContext, dst *DWDie, src *DWDie) {
+	copyChildrenExcept(d, dst, src, nil)
+}
+
+// Search children (assumed to have TAG_member) for the one named
+// field and set its AT_type to dwtype
+func substituteType(structdie *DWDie, field string, dwtype Sym) {
+	child := structdie.findChild(field)
+	a := getAttr(child, DW_AT_type)
+	if a != nil {
+		a.Data = dwtype
+	} else {
+		NewRefAttr(child, DW_AT_type, dwtype)
+	}
+}
