@@ -1023,22 +1023,6 @@ func dwarfGenerateDebugInfo(ctxt *Link) {
 		dwsectCUSize = make(map[string]uint64)
 	}
 
-	// Needed by the prettyprinter code for interface inspection.
-	for _, typ := range []string{
-		"type.runtime._type",
-		"type.runtime.arraytype",
-		"type.runtime.chantype",
-		"type.runtime.functype",
-		"type.runtime.maptype",
-		"type.runtime.ptrtype",
-		"type.runtime.slicetype",
-		"type.runtime.structtype",
-		"type.runtime.interfacetype",
-		"type.runtime.itab",
-		"type.runtime.imethod"} {
-		d.markTypeInfo(d.lookupOrDiag(typ))
-	}
-
 	// fake root DIE for compile unit DIEs
 	var dwroot dwarf.DWDie
 	flagVariants := make(map[string]bool)
@@ -1107,6 +1091,24 @@ func dwarfGenerateDebugInfo(ctxt *Link) {
 			for _, s := range unit.Textp {
 				d.dwarfVisitFunction(loader.Sym(s), unit)
 			}
+		}
+	}
+
+	if !ctxt.IsSharedGoLink() || ctxt.runtimeCU != nil {
+		// Needed by the prettyprinter code for interface inspection.
+		for _, typ := range []string{
+			"type.runtime._type",
+			"type.runtime.arraytype",
+			"type.runtime.chantype",
+			"type.runtime.functype",
+			"type.runtime.maptype",
+			"type.runtime.ptrtype",
+			"type.runtime.slicetype",
+			"type.runtime.structtype",
+			"type.runtime.interfacetype",
+			"type.runtime.itab",
+			"type.runtime.imethod"} {
+			d.markTypeInfo(d.lookupOrDiag(typ))
 		}
 	}
 
@@ -1243,7 +1245,12 @@ func (d *dwctxt) dwarfGenerateDebugSyms() {
 		dwarf.ReverseTree(&u.DWInfo.Child)
 	}
 
-	d.linkctxt.runtimeCU.TypeDIES = keeptypeinfo
+	if d.linkctxt.IsSharedGoLink() && d.linkctxt.runtimeCU == nil {
+		d.linkctxt.compUnits[0].TypeDIES = keeptypeinfo
+	} else {
+		d.linkctxt.runtimeCU.TypeDIES = keeptypeinfo
+	}
+
 	mkSecSym := func(name string) loader.Sym {
 		s := d.ldr.CreateSymForUpdate(name, 0)
 		s.SetType(sym.SDWARFSECT)

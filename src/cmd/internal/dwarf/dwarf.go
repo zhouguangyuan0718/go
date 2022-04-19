@@ -1733,6 +1733,9 @@ type TypeContext interface {
 	// LookupDwarfSym will create a sym that type is SDWARFTYPE.
 	LookupDwarfSym(name string) (s Sym, exist bool)
 
+	// LookupDwarfSymDupOk will create or lookup a dupok sym that type is SDWARFTYPE.
+	LookupDwarfSymDupOk(name string) (s Sym, exist bool)
+
 	// DiagLog is used to report error
 	DiagLog(info string)
 }
@@ -2078,7 +2081,7 @@ func mkInternalTypename(base string, arg1 string, arg2 string) string {
 
 func MkInternalType(parent *DWDie, ctx TypeContext, abbrev int, typename, keyname, valname string, f func(*DWDie)) Sym {
 	name := mkInternalTypename(typename, keyname, valname)
-	s, exist := ctx.LookupDwarfSym(name)
+	s, exist := ctx.LookupDwarfSymDupOk(name)
 	if exist {
 		return s
 	}
