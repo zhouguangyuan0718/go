@@ -242,9 +242,20 @@ func (c dwCtxt) AddCURelativeAddress(s dwarf.Sym, data interface{}, value int64)
 	rsym := data.(*LSym)
 	ls.WriteCURelativeAddr(c.Link, ls.Size, rsym, value)
 }
+
 func (c dwCtxt) AddSectionOffset(s dwarf.Sym, size int, t interface{}, ofs int64) {
-	panic("should be used only in the linker")
+	ds := s.(*LSym)
+	tds := t.(*LSym)
+	switch size {
+	default:
+		c.Diag("invalid size %d in adddwarfref\n", size)
+	case c.PtrSize(), 4:
+	}
+	ds.WriteAddr(c.Link, ds.Size, size, tds, ofs)
+	r := &ds.R[len(ds.R)-1]
+	r.Type = objabi.R_WEAKADDROFF
 }
+
 func (c dwCtxt) AddDWARFAddrSectionOffset(s dwarf.Sym, t interface{}, ofs int64) {
 	size := 4
 	if isDwarf64(c.Link) {
@@ -271,6 +282,32 @@ func (c dwCtxt) AddFileRef(s dwarf.Sym, f interface{}) {
 func (c dwCtxt) CurrentOffset(s dwarf.Sym) int64 {
 	ls := s.(*LSym)
 	return ls.Size
+}
+
+func (c dwCtxt) LookupDwarfSym(name string) (s dwarf.Sym, exist bool) {
+	if len(name) != 0 {
+		ds := c.Link.Lookup(dwarf.InfoPrefix + name)
+		if ds.Type == objabi.SDWARFTYPE {
+			return ds, true
+		}
+		ds.Type = objabi.SDWARFTYPE
+		return ds, false
+	}
+	return &LSym{
+		Type: objabi.SDWARFTYPE,
+	}, false
+}
+
+func (c dwCtxt) Reference(t dwarf.Type) dwarf.Sym {
+	return c.Link.Lookup(dwarf.InfoPrefix + t.Name())
+}
+
+func (c dwCtxt) ReferencePtr(dwtype dwarf.Sym) dwarf.Sym {
+	return c.Link.Lookup(dwarf.InfoPrefix + "*" + dwtype.(*LSym).Name[len(dwarf.InfoPrefix):])
+}
+
+func (c dwCtxt) DiagLog(info string) {
+	c.Link.Diag(info)
 }
 
 // Here "from" is a symbol corresponding to an inlined or concrete
