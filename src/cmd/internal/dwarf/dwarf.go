@@ -2149,6 +2149,11 @@ func SynthesizeChanTypes(ctxt TypeContext, chanDie *DWDie, root *DWDie, lookupPr
 	dwss := MkInternalType(root, ctxt, DW_ABRV_STRUCTTYPE, "sudog", elemname, "", func(dws *DWDie) {
 		copyChildren(ctxt, dws, sudog)
 		substituteType(dws, "elem", ctxt.ReferencePtr(elemtype))
+		substituteType(dws, "next", ctxt.ReferencePtr(dws.Sym))
+		substituteType(dws, "prev", ctxt.ReferencePtr(dws.Sym))
+		substituteType(dws, "parent", ctxt.ReferencePtr(dws.Sym))
+		substituteType(dws, "waitlink", ctxt.ReferencePtr(dws.Sym))
+		substituteType(dws, "waittail", ctxt.ReferencePtr(dws.Sym))
 		NewAttr(dws, DW_AT_byte_size, DW_CLS_CONSTANT, int64(sudogsize), nil)
 	})
 

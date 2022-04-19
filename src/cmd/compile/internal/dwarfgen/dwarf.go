@@ -6,6 +6,7 @@ package dwarfgen
 
 import (
 	"bytes"
+	"cmd/compile/internal/typecheck"
 	"flag"
 	"fmt"
 	"internal/buildcfg"
@@ -561,4 +562,13 @@ func RecordPackageName() {
 	s.Set(obj.AttrDuplicateOK, true)
 	base.Ctxt.Data = append(base.Ctxt.Data, s)
 	s.P = []byte(types.LocalPkg.Name)
+}
+
+func lookupRuntime(name string) dwarf.Type {
+	t := typecheck.LookupRuntime(name[len("runtime."):])
+	return reflectdata.DwarfType{Type: t.Type()}
+}
+
+func DumpDwarfTypes() {
+	base.Ctxt.DumpDwarfTypes(lookupRuntime, reflectdata.DwarfType{Type: types.Types[types.TUINTPTR]})
 }

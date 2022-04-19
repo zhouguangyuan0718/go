@@ -12,6 +12,7 @@ import (
 	"cmd/internal/src"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -303,7 +304,23 @@ func (c dwCtxt) Reference(t dwarf.Type) dwarf.Sym {
 }
 
 func (c dwCtxt) ReferencePtr(dwtype dwarf.Sym) dwarf.Sym {
-	return c.Link.Lookup(dwarf.InfoPrefix + "*" + dwtype.(*LSym).Name[len(dwarf.InfoPrefix):])
+	ptrname := "*" + dwtype.(*LSym).Name[len(dwarf.InfoPrefix):]
+	sym := c.Link.Lookup(dwarf.InfoPrefix + ptrname)
+
+	// The named ptr type is always defined by PopulateDWARFType.
+	// It is always unnamed ptr type here.
+	sym.Set(AttrDuplicateOK, true)
+
+	if sym.Type == objabi.SDWARFTYPE {
+		return sym
+	}
+	dwarfname := strings.Replace(ptrname, `"".`, objabi.PathToPrefix(c.Pkgpath)+".", -1)
+	pdie := dwarf.NewTypeDie(&c.dwtypes, dwarf.DW_ABRV_PTRTYPE, ptrname, dwarfname, c)
+	dwarf.NewRefAttr(pdie, dwarf.DW_AT_type, dwtype)
+	// not a good way to lookup by type name.
+	dwarf.NewAttr(pdie, dwarf.DW_AT_go_runtime_type, dwarf.DW_CLS_GO_TYPEREF, 0, c.Link.Lookup("type."+ptrname))
+	dwarf.NewAttr(pdie, dwarf.DW_AT_go_kind, dwarf.DW_CLS_CONSTANT, objabi.KindPtr, 0)
+	return sym
 }
 
 func (c dwCtxt) DiagLog(info string) {
@@ -753,30 +770,77 @@ func (s BySymName) Len() int           { return len(s) }
 func (s BySymName) Less(i, j int) bool { return s[i].Name < s[j].Name }
 func (s BySymName) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
-func (ctxt *Link) PopulateDWARFType(typ dwarf.Type, dupok bool) {
-	kind := typ.Kind()
-	if kind == objabi.KindMap || kind == objabi.KindChan || kind == objabi.KindSlice || kind == objabi.KindString {
-		// can't synthesize these types now. So skip them.
-		return
-	}
+var prototypes = map[string]*dwarf.DWDie{
+	"runtime.stringStructDWARF": nil,
+	"runtime.slice":             nil,
+	"runtime.hmap":              nil,
+	"runtime.bmap":              nil,
+	"runtime.sudog":             nil,
+	"runtime.waitq":             nil,
+	"runtime.hchan":             nil,
+	"runtime.eface":             nil,
+	"runtime.iface":             nil,
+}
 
+func (ctxt *Link) PopulateDWARFType(typ dwarf.Type, dupok bool) dwarf.Sym {
 	dwsym := ctxt.Lookup(dwarf.InfoPrefix + typ.Name())
 	if dwsym.Type == objabi.SDWARFTYPE {
-		return
+		return dwsym
 	}
 
 	dwsym.Set(AttrDuplicateOK, dupok)
 
 	dwctxt := dwCtxt{ctxt}
-	_, _, err := dwarf.NewType(typ, dwctxt, &ctxt.dwtypes)
+	def, _, err := dwarf.NewType(typ, dwctxt, &ctxt.dwtypes)
 	if err != nil {
 		ctxt.Diag(err.Error())
-		return
+		return nil
 	}
+	if ctxt.Pkgpath == "runtime" {
+		name := typ.DwarfName()
+		if _, ok := prototypes[name]; ok {
+			prototypes[name] = def
+		}
+	}
+
+	return dwsym
 }
 
-// todo: synthesize types here.
-func (ctxt *Link) DumpDwarfTypes() {
+func (ctxt *Link) DumpDwarfTypes(lookupRuntime func(name string) dwarf.Type, Uintptr dwarf.Type) {
+	uintptrSym := ctxt.Lookup(dwarf.InfoPrefix + Uintptr.Name())
+
+	// We don't expect this type in the package out of runtime.
+	// So use another temp root, we can avoid dumping them when dwtypes is traversed.
+	prototypeRoot := new(dwarf.DWDie)
+	lookupPrototype := func(name string) *dwarf.DWDie {
+		die := prototypes[name]
+		if die != nil {
+			return die
+		}
+		t := lookupRuntime(name)
+		die, _, err := dwarf.NewType(t, dwCtxt{ctxt}, prototypeRoot)
+		if err != nil {
+			ctxt.Diag(err.Error())
+			return nil
+		}
+		prototypes[name] = die
+		return die
+	}
+	for die := ctxt.dwtypes.Child; die != nil; die = die.Link {
+		switch die.Abbrev {
+		case dwarf.DW_ABRV_STRINGTYPE:
+			dwarf.SynthesizeStringTypes(dwCtxt{ctxt}, die, lookupPrototype)
+		case dwarf.DW_ABRV_SLICETYPE:
+			dwarf.SynthesizeSliceTypes(dwCtxt{ctxt}, die, lookupPrototype)
+		case dwarf.DW_ABRV_MAPTYPE:
+			dwarf.SynthesizeMapTypes(dwCtxt{ctxt}, die, &ctxt.dwtypes, lookupPrototype, uintptrSym, ctxt.Arch.Arch)
+		case dwarf.DW_ABRV_CHANTYPE:
+			dwarf.SynthesizeChanTypes(dwCtxt{ctxt}, die, &ctxt.dwtypes, lookupPrototype)
+		case dwarf.DW_ABRV_IFACETYPE:
+			// runtime must dump iface and eface, do anything
+		}
+	}
+
 	dwarf.ReverseTree(&ctxt.dwtypes.Child)
 	for die := ctxt.dwtypes.Child; die != nil; die = die.Link {
 		ctxt.Data = ctxt.putdie(ctxt.Data, die)

@@ -304,7 +304,7 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	base.Timer.Start("be", "dumpobj")
 	dumpdata()
 	if base.Flag.DwarfType {
-		base.Ctxt.DumpDwarfTypes()
+		dwarfgen.DumpDwarfTypes()
 	}
 	base.Ctxt.NumberSyms()
 	dumpobj()
