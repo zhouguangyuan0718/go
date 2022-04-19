@@ -9,6 +9,7 @@ package dwarf
 
 import (
 	"bytes"
+	"cmd/internal/sys"
 	"errors"
 	"fmt"
 	"internal/buildcfg"
@@ -2119,4 +2120,150 @@ func substituteType(structdie *DWDie, field string, dwtype Sym) {
 	} else {
 		NewRefAttr(child, DW_AT_type, dwtype)
 	}
+}
+
+func SynthesizeStringTypes(ctxt TypeContext, stringDie *DWDie, lookupPrototypes func(name string) *DWDie) {
+	copyChildren(ctxt, stringDie, lookupPrototypes("runtime.stringStructDWARF"))
+
+}
+
+func SynthesizeSliceTypes(ctxt TypeContext, sliceDie *DWDie, lookupPrototypes func(name string) *DWDie) {
+	copyChildren(ctxt, sliceDie, lookupPrototypes("runtime.slice"))
+	elem := getAttr(sliceDie, DW_AT_go_elem).Data.(Sym)
+	substituteType(sliceDie, "array", ctxt.ReferencePtr(elem))
+
+}
+
+func SynthesizeChanTypes(ctxt TypeContext, chanDie *DWDie, root *DWDie, lookupPrototypes func(name string) *DWDie) {
+	sudog := lookupPrototypes("runtime.sudog")
+	waitq := lookupPrototypes("runtime.waitq")
+	hchan := lookupPrototypes("runtime.hchan")
+
+	sudogsize := int(getAttr(sudog, DW_AT_byte_size).Value)
+
+	elemgotype := getAttr(chanDie, DW_AT_type).Data.(Type)
+	elemname := elemgotype.DwarfName()
+	elemtype := ctxt.Reference(elemgotype)
+
+	// sudog<T>
+	dwss := MkInternalType(root, ctxt, DW_ABRV_STRUCTTYPE, "sudog", elemname, "", func(dws *DWDie) {
+		copyChildren(ctxt, dws, sudog)
+		substituteType(dws, "elem", ctxt.ReferencePtr(elemtype))
+		NewAttr(dws, DW_AT_byte_size, DW_CLS_CONSTANT, int64(sudogsize), nil)
+	})
+
+	// waitq<T>
+	dwws := MkInternalType(root, ctxt, DW_ABRV_STRUCTTYPE, "waitq", elemname, "", func(dww *DWDie) {
+
+		copyChildren(ctxt, dww, waitq)
+		substituteType(dww, "first", ctxt.ReferencePtr(dwss))
+		substituteType(dww, "last", ctxt.ReferencePtr(dwss))
+		NewAttr(dww, DW_AT_byte_size, DW_CLS_CONSTANT, getAttr(waitq, DW_AT_byte_size).Value, nil)
+	})
+
+	// hchan<T>
+	dwhs := MkInternalType(root, ctxt, DW_ABRV_STRUCTTYPE, "hchan", elemname, "", func(dwh *DWDie) {
+		copyChildren(ctxt, dwh, hchan)
+		substituteType(dwh, "recvq", dwws)
+		substituteType(dwh, "sendq", dwws)
+		NewAttr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getAttr(hchan, DW_AT_byte_size).Value, nil)
+	})
+
+	NewRefAttr(chanDie, DW_AT_type, ctxt.ReferencePtr(dwhs))
+
+	return
+}
+
+// SynthesizeMapTypes is way too closely married to runtime/hashmap.c
+const (
+	maxKeySize = 128
+	maxValSize = 128
+	bucketSize = 8
+)
+
+func SynthesizeMapTypes(ctxt TypeContext, mapDie *DWDie, root *DWDie, lookupPrototypes func(name string) *DWDie, uintptr Sym, arch *sys.Arch) {
+	hash := lookupPrototypes("runtime.hmap")
+	bucket := lookupPrototypes("runtime.bmap")
+
+	gotype := getAttr(mapDie, DW_AT_type).Data.(Type)
+	key := gotype.Key()
+	val := gotype.Elem()
+	keysize, valsize := key.Size(), val.Size()
+	keytype, valtype := ctxt.Reference(key), ctxt.Reference(val)
+
+	// compute size info like hashmap.c does.
+	indirectKey, indirectVal := false, false
+	if keysize > maxKeySize {
+		keysize = int64(arch.PtrSize)
+		indirectKey = true
+	}
+	if valsize > maxValSize {
+		valsize = int64(arch.PtrSize)
+		indirectVal = true
+	}
+
+	// Construct type to represent an array of bucketSize keys
+	keyname := key.DwarfName()
+	dwhks := MkInternalType(root, ctxt, DW_ABRV_ARRAYTYPE, "[]key", keyname, "", func(dwhk *DWDie) {
+		NewAttr(dwhk, DW_AT_byte_size, DW_CLS_CONSTANT, bucketSize*keysize, 0)
+		t := keytype
+		if indirectKey {
+			t = ctxt.ReferencePtr(keytype)
+		}
+		NewRefAttr(dwhk, DW_AT_type, t)
+		fld := NewTypeDie(dwhk, DW_ABRV_ARRAYRANGE, "size", "", ctxt)
+		NewAttr(fld, DW_AT_count, DW_CLS_CONSTANT, bucketSize, 0)
+		NewRefAttr(fld, DW_AT_type, uintptr)
+	})
+
+	// Construct type to represent an array of bucketSize values
+	valname := val.DwarfName()
+	dwhvs := MkInternalType(root, ctxt, DW_ABRV_ARRAYTYPE, "[]val", valname, "", func(dwhv *DWDie) {
+		NewAttr(dwhv, DW_AT_byte_size, DW_CLS_CONSTANT, bucketSize*valsize, 0)
+		t := valtype
+		if indirectVal {
+			t = ctxt.ReferencePtr(valtype)
+		}
+		NewRefAttr(dwhv, DW_AT_type, t)
+		fld := NewTypeDie(dwhv, DW_ABRV_ARRAYRANGE, "size", "", ctxt)
+		NewAttr(fld, DW_AT_count, DW_CLS_CONSTANT, bucketSize, 0)
+		NewRefAttr(fld, DW_AT_type, uintptr)
+	})
+
+	// Construct bucket<K,V>
+	dwhbs := MkInternalType(root, ctxt, DW_ABRV_STRUCTTYPE, "bucket", keyname, valname, func(dwhb *DWDie) {
+		// Copy over all fields except the field "data" from the generic
+		// bucket. "data" will be replaced with keys/values below.
+		copyChildrenExcept(ctxt, dwhb, bucket, bucket.findChild("data"))
+
+		fld := NewTypeDie(dwhb, DW_ABRV_STRUCTFIELD, "keys", "", ctxt)
+		NewRefAttr(fld, DW_AT_type, dwhks)
+		newMemberOffsetAttr(fld, bucketSize)
+		fld = NewTypeDie(dwhb, DW_ABRV_STRUCTFIELD, "values", "", ctxt)
+		NewRefAttr(fld, DW_AT_type, dwhvs)
+		newMemberOffsetAttr(fld, bucketSize+bucketSize*int32(keysize))
+		fld = NewTypeDie(dwhb, DW_ABRV_STRUCTFIELD, "overflow", "", ctxt)
+		NewRefAttr(fld, DW_AT_type, ctxt.ReferencePtr(dwhb.Sym))
+		newMemberOffsetAttr(fld, bucketSize+bucketSize*(int32(keysize)+int32(valsize)))
+		if arch.RegSize > arch.PtrSize {
+			fld = NewTypeDie(dwhb, DW_ABRV_STRUCTFIELD, "pad", "", ctxt)
+			NewRefAttr(fld, DW_AT_type, uintptr)
+			newMemberOffsetAttr(fld, bucketSize+bucketSize*(int32(keysize)+int32(valsize))+int32(arch.PtrSize))
+		}
+
+		NewAttr(dwhb, DW_AT_byte_size, DW_CLS_CONSTANT, bucketSize+bucketSize*keysize+bucketSize*valsize+int64(arch.RegSize), 0)
+	})
+
+	// Construct hash<K,V>
+	dwhs := MkInternalType(root, ctxt, DW_ABRV_STRUCTTYPE, "hash", keyname, valname, func(dwh *DWDie) {
+		copyChildren(ctxt, dwh, hash)
+		substituteType(dwh, "buckets", ctxt.ReferencePtr(dwhbs))
+		substituteType(dwh, "oldbuckets", ctxt.ReferencePtr(dwhbs))
+		NewAttr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getAttr(hash, DW_AT_byte_size).Value, nil)
+	})
+
+	// make map type a pointer to hash<K,V>
+	NewRefAttr(mapDie, DW_AT_type, ctxt.ReferencePtr(dwhs))
+
+	return
 }
