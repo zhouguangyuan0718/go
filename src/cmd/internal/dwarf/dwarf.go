@@ -1735,3 +1735,120 @@ type TypeContext interface {
 	// DiagLog is used to report error
 	DiagLog(info string)
 }
+
+// newattr attaches a new attribute to the specified DIE.
+//
+// FIXME: at the moment attributes are stored in a linked list in a
+// fairly space-inefficient way -- it might be better to instead look
+// up all attrs in a single large table, then store indices into the
+// table in the DIE. This would allow us to common up storage for
+// attributes that are shared by many DIEs (ex: byte size of N).
+func NewAttr(die *DWDie, attr uint16, cls int, value int64, data interface{}) {
+	a := new(DWAttr)
+	a.Link = die.Attr
+	die.Attr = a
+	a.Atr = attr
+	a.Cls = uint8(cls)
+	a.Value = value
+	a.Data = data
+}
+
+// Every DIE manufactured by the linker has at least an AT_name
+// attribute (but it will only be written out if it is listed in the abbrev).
+// The compiler does create nameless DWARF DIEs (ex: concrete subprogram
+// instance).
+// FIXME: it would be more efficient to bulk-allocate DIEs.
+func NewTypeDie(parent *DWDie, abbrev int, symName string, dwarfName string, ctx TypeContext) *DWDie {
+	die := new(DWDie)
+	die.Abbrev = abbrev
+	die.Link = parent.Child
+	parent.Child = die
+
+	NewAttr(die, DW_AT_name, DW_CLS_STRING, int64(len(dwarfName)), dwarfName)
+
+	switch abbrev {
+	case DW_ABRV_FUNCTYPEPARAM, DW_ABRV_DOTDOTDOT, DW_ABRV_STRUCTFIELD, DW_ABRV_ARRAYRANGE:
+		// There are no relocations against these dies, and their names
+		// are not unique, so don't create a symbol.
+		return die
+	default:
+		// Sanity check: all DIEs created in this function should be named.
+		if symName == "" {
+			panic("nameless DWARF DIE")
+		}
+		// Everything else is assigned a type of SDWARFTYPE.
+		ds, _ := ctx.LookupDwarfSym(symName)
+		die.Sym = ds
+		return die
+	}
+
+}
+
+func NewRefAttr(die *DWDie, attr uint16, ref Sym) {
+	if ref == nil {
+		return
+	}
+	NewAttr(die, attr, DW_CLS_REFERENCE, 0, ref)
+}
+
+func newMemberOffsetAttr(die *DWDie, offs int32) {
+	NewAttr(die, DW_AT_data_member_location, DW_CLS_CONSTANT, int64(offs), nil)
+}
+
+func doTypeDef(parent *DWDie, symName string, dwarfName string, def *DWDie, d TypeContext) (*DWDie, error) {
+	// Only emit typedefs for real names.
+	if strings.HasPrefix(symName, "map[") {
+		return nil, nil
+	}
+	if strings.HasPrefix(symName, "struct {") {
+		return nil, nil
+	}
+	// cmd/compile uses "noalg.struct {...}" as type name when hash and eq algorithm generation of
+	// this struct type is suppressed.
+	if strings.HasPrefix(symName, "noalg.struct {") {
+		return nil, nil
+	}
+	if strings.HasPrefix(symName, "chan ") {
+		return nil, nil
+	}
+	if symName[0] == '[' || symName[0] == '*' {
+		return nil, nil
+	}
+	if def == nil {
+		return nil, errors.New("dwarf: bad def in dotypedef")
+	}
+
+	ds, _ := d.LookupDwarfSym("")
+	def.Sym = ds
+	// The typedef entry must be created after the def,
+	// so that future lookups will find the typedef instead
+	// of the real definition. This hooks the typedef into any
+	// circular definition loops, so that gdb can understand them.
+	die := NewTypeDie(parent, DW_ABRV_TYPEDECL, symName, dwarfName, d)
+
+	NewRefAttr(die, DW_AT_type, ds)
+
+	return die, nil
+}
+
+func reverseList(list **DWDie) {
+	curr := *list
+	var prev *DWDie
+	for curr != nil {
+		next := curr.Link
+		curr.Link = prev
+		prev = curr
+		curr = next
+	}
+
+	*list = prev
+}
+
+func ReverseTree(list **DWDie) {
+	reverseList(list)
+	for die := *list; die != nil; die = die.Link {
+		if HasChildren(die) {
+			ReverseTree(&die.Child)
+		}
+	}
+}
