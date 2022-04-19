@@ -303,7 +303,7 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// Write object data to disk.
 	base.Timer.Start("be", "dumpobj")
 	dumpdata()
-	if base.Flag.DwarfType {
+	if base.Flag.Dwarf {
 		dwarfgen.DumpDwarfTypes()
 	}
 	base.Ctxt.NumberSyms()
