@@ -11,6 +11,7 @@ import (
 	"cmd/compile/internal/objw"
 	"cmd/compile/internal/pkginit"
 	"cmd/compile/internal/reflectdata"
+	"cmd/compile/internal/ssa"
 	"cmd/compile/internal/staticdata"
 	"cmd/compile/internal/typecheck"
 	"cmd/compile/internal/types"
@@ -42,6 +43,13 @@ const (
 )
 
 func dumpobj() {
+	if base.Flag.EnableLLVM {
+		err := ssa.Output(base.Flag.LowerO + ".ll")
+		if err != nil {
+			fmt.Printf("error while Output file %s: %v\n", base.Flag.LinkObj+".bc", err)
+			base.ErrorExit()
+		}
+	}
 	if base.Flag.LinkObj == "" {
 		dumpobj1(base.Flag.LowerO, modeCompilerObj|modeLinkerObj)
 		return
