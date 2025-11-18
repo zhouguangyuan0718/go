@@ -5,6 +5,7 @@
 package ssa
 
 import (
+	"cmd/compile/internal/base"
 	"cmd/internal/src"
 	"fmt"
 	"hash/crc32"
@@ -28,6 +29,9 @@ import (
 //   - the order of b.Values is the order to emit the Values in each Block
 //   - f has a non-nil regAlloc field
 func Compile(f *Func) {
+	if base.Flag.EnableLLVM {
+		LLVMCompile(f)
+	}
 	// TODO: debugging - set flags to control verbosity of compiler,
 	// which phases to dump IR before/after, etc.
 	if f.Log() {

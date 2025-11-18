@@ -202,6 +202,10 @@ func compileFunctions(profile *pgoir.Profile) {
 	compilequeue = nil
 	wg.Wait()
 
+	if base.Flag.EnableLLVM {
+		// TODO Assemble
+	}
+
 	base.Ctxt.InParallel = false
 	types.CalcSizeDisabled = false
 }

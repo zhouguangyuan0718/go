@@ -281,7 +281,9 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	ir.CurFunc = nil
 
 	reflectdata.WriteBasicTypes()
-
+	if base.Flag.EnableLLVM {
+		ssa.InitModule(types.LocalPkg)
+	}
 	// Compile top-level declarations.
 	//
 	// There are cyclic dependencies between all of these phases, so we

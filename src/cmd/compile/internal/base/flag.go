@@ -127,7 +127,7 @@ type CmdFlags struct {
 	WB                 bool         "help:\"enable write barrier\"" // TODO: remove
 	PgoProfile         string       "help:\"read profile or pre-process profile from `file`\""
 	ErrorURL           bool         "help:\"print explanatory URL with error message if applicable\""
-
+	EnableLLVM         bool         "help:\"enable llvm backend\""
 	// Configuration derived from flags; not a flag itself.
 	Cfg struct {
 		Embed struct { // set by -embedcfg
@@ -175,6 +175,7 @@ func ParseFlags() {
 	Flag.LinkShared = &Ctxt.Flag_linkshared
 	Flag.Shared = &Ctxt.Flag_shared
 	Flag.WB = true
+	Flag.EnableLLVM = false
 
 	Debug.ConcurrentOk = true
 	Debug.MaxShapeLen = 500
@@ -468,7 +469,7 @@ func concurrentFlagOk() bool {
 		Flag.LowerH == 0 &&
 		Flag.LowerJ == 0 &&
 		Flag.LowerM == 0 &&
-		Flag.LowerR == 0
+		Flag.LowerR == 0 && !Flag.EnableLLVM
 }
 
 func concurrentBackendAllowed() bool {
