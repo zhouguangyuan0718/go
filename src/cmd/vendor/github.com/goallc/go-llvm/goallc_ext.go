@@ -27,3 +27,8 @@ func LLVMSetValueName2(value Value, name string)  {
 	defer C.free(unsafe.Pointer(namestr))
 	C.LLVMSetValueName2(value.C, namestr, C.size_t(len(name)))
 }
+
+func (c Context) PointerType(AddressSpace uint32) (t Type) {
+	t.C = C.LLVMPointerTypeInContext(c.C, C.unsigned(AddressSpace))
+	return
+}
