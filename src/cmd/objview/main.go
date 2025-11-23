@@ -33,8 +33,10 @@ package main
 
 import (
 	"cmd/internal/archive"
+	"cmd/internal/disasm"
 	"cmd/internal/goobj"
 	"cmd/internal/objabi"
+	"cmd/internal/objfile"
 	"cmd/internal/telemetry/counter"
 	"encoding/binary"
 	"encoding/hex"
@@ -75,6 +77,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	objf, err := objfile.Open(flag.Arg(0))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer objf.Close()
+
+	dis, err := disasm.DisasmForFile(objf)
+
 	for _, e := range a.Entries {
 		switch e.Type {
 		case archive.EntryPkgDef, archive.EntrySentinelNonObj:
@@ -94,7 +105,7 @@ func main() {
 			//		break
 			//	}
 			//}
-			dumpGoObj(r, b)
+			dumpGoObj(r, b, dis)
 
 		}
 	}
@@ -122,7 +133,7 @@ var blk2str = map[int]string{
 	goobj.BlkEnd:         "End",
 }
 
-func dumpGoObj(r *goobj.Reader, b []byte) {
+func dumpGoObj(r *goobj.Reader, b []byte, dis *disasm.Disasm) {
 	var h goobj.Header
 	err := h.Read(r)
 	if err != nil {
@@ -141,7 +152,7 @@ func dumpGoObj(r *goobj.Reader, b []byte) {
 	offset += headerLength
 
 	for blk := goobj.BlkAutolib; blk < goobj.BlkEnd; blk++ {
-		header, content := extractBlock(blk, r, &h, b)
+		header, content := extractBlock(blk, r, &h, b, dis)
 		printHexdumpWithText(b[h.Offsets[blk]:h.Offsets[blk+1]], content, offset, blk2str[blk], "", header, "")
 		offset += int(h.Offsets[blk+1] - h.Offsets[blk])
 		fmt.Println()
@@ -163,12 +174,16 @@ type Sym struct {
 	Align uint32
 }
 
-type SymRef struct {
-	PkgIdx uint32
-	SymIdx uint32
+type Reloc struct {
+	sym    goobj.SymRef
+	offset int32
+	size   uint8
+	typ    objabi.RelocType
+	add    int64
 }
+
 type RefFlags struct {
-	Sym   SymRef
+	Sym   goobj.SymRef
 	Flag  uint8
 	Flag2 uint8
 }
@@ -177,11 +192,9 @@ func readUint32(b []byte) uint32 {
 	return binary.LittleEndian.Uint32(b)
 }
 
-func readUint16(b []byte) uint16 {
-	return binary.LittleEndian.Uint16(b)
-}
+var symIdx = 0
 
-func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (string, string) {
+func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte, dis *disasm.Disasm) (string, string) {
 	switch block {
 	case goobj.BlkAutolib:
 		var libs string
@@ -222,7 +235,7 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (str
 	case goobj.BlkHashed64def:
 		var symdefs string
 		start := int(h.Offsets[goobj.BlkHashed64def])
-		header := fmt.Sprintf("%-40v %-20v %-15v %-8v %v\n", "name", "value", "symkind", "size", "rawdata")
+		header := fmt.Sprintf("%-10v %-40v %-20v %-15v %-8v %v\n", "index", "name", "value", "symkind", "size", "rawdata")
 		for i := 0; i < r.NHashed64def(); i++ {
 			sym := (*goobj.Sym)(unsafe.Pointer(&data[start+i*goobj.SymSize]))
 			symdata := Sym{
@@ -237,13 +250,14 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (str
 				Siz:   sym.Siz(),
 				Align: sym.Align(),
 			}
-			symdefs += fmt.Sprintf("%-40v %-20x %-15v %-8v %v\n", sym.Name(r), r.Hash64(uint32(i)), objabi.SymKind(sym.Type()), sym.Siz(), symdata)
+			symdefs += fmt.Sprintf("%-10v %-40v %-20x %-15v %-8v %v\n", symIdx, sym.Name(r), r.Hash64(uint32(i)), objabi.SymKind(sym.Type()), sym.Siz(), symdata)
+			symIdx++
 		}
 		return header, fmt.Sprintf("%+v", symdefs)
 	case goobj.BlkHasheddef:
 		var symdefs string
 		start := int(h.Offsets[goobj.BlkHasheddef])
-		header := fmt.Sprintf("%-50v %-35v %-15v %-8v %v\n", "name", "value", "symkind", "size", "rawdata")
+		header := fmt.Sprintf("%-10v %-50v %-35v %-15v %-8v %v\n", "index", "name", "value", "symkind", "size", "rawdata")
 		for i := 0; i < r.NHasheddef(); i++ {
 			sym := (*goobj.Sym)(unsafe.Pointer(&data[start+i*goobj.SymSize]))
 			symdata := Sym{
@@ -258,13 +272,14 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (str
 				Siz:   sym.Siz(),
 				Align: sym.Align(),
 			}
-			symdefs += fmt.Sprintf("%-50v %-35x %-15v %-8v %v\n", sym.Name(r), *r.Hash(uint32(i)), objabi.SymKind(sym.Type()), sym.Siz(), symdata)
+			symdefs += fmt.Sprintf("%-10v %-50v %-35x %-15v %-8v %v\n", symIdx, sym.Name(r), *r.Hash(uint32(i)), objabi.SymKind(sym.Type()), sym.Siz(), symdata)
+			symIdx++
 		}
 		return header, fmt.Sprintf("%+v", symdefs)
 	case goobj.BlkNonpkgdef, goobj.BlkNonpkgref, goobj.BlkSymdef:
 		var symrefs string
 		start := int(h.Offsets[block])
-		header := fmt.Sprintf("%-50v %-15v %-8v %v\n", "name", "symkind", "size", "rawdata")
+		header := fmt.Sprintf("%-10v %-50v %-15v %-8v %v\n", "index", "name", "symkind", "size", "rawdata")
 		var num int
 		switch block {
 		case goobj.BlkNonpkgref:
@@ -288,7 +303,8 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (str
 				Siz:   sym.Siz(),
 				Align: sym.Align(),
 			}
-			symrefs += fmt.Sprintf("%-50v %-15v %-8v %v\n", sym.Name(r), objabi.SymKind(sym.Type()), sym.Siz(), symdata)
+			symrefs += fmt.Sprintf("%-10v %-50v %-15v %-8v %v\n", symIdx, sym.Name(r), objabi.SymKind(sym.Type()), sym.Siz(), symdata)
+			symIdx++
 		}
 		return header, fmt.Sprintf("%+v", symrefs)
 	case goobj.BlkRefFlags:
@@ -298,7 +314,7 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (str
 		for i, n := 0, r.NRefFlags(); i < n; i++ {
 			rf := (*goobj.RefFlags)(unsafe.Pointer(&data[start+i*goobj.RefFlagsSize]))
 			rfdata := RefFlags{
-				Sym: SymRef{
+				Sym: goobj.SymRef{
 					PkgIdx: readUint32(data[start+i*goobj.RefFlagsSize:]),
 					SymIdx: readUint32(data[start+i*goobj.RefFlagsSize+4:]),
 				},
@@ -309,13 +325,89 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte) (str
 		}
 		return header, fmt.Sprintf("%+v", symrefs)
 	case goobj.BlkHash64:
+		var hash64s string
+		header := fmt.Sprintf("%v\n", "value")
+		for i := 0; i < r.NHashed64def(); i++ {
+			hash64s += fmt.Sprintf("%-20x\n", r.Hash64(uint32(i)))
+		}
+		return header, hash64s
 	case goobj.BlkHash:
-	case goobj.BlkRelocIdx:
-	case goobj.BlkAuxIdx:
-	case goobj.BlkDataIdx:
+		var hashs string
+		header := fmt.Sprintf("%v\n", "value")
+		for i := 0; i < r.NHasheddef(); i++ {
+			hashs += fmt.Sprintf("%-32x\n", *r.Hash(uint32(i)))
+		}
+		return header, hashs
+	case goobj.BlkRelocIdx, goobj.BlkAuxIdx, goobj.BlkDataIdx:
+		var header string
+		if block == goobj.BlkRelocIdx {
+			header = fmt.Sprintf("%-10v %-10v %-10v | %-10v %-10v %-10v | %-10v %-10v %-10v\n", "symidx", "relocNum", "relocStart", "symidx", "relocNum", "relocStart", "symidx", "relocNum", "relocStart")
+		} else if block == goobj.BlkAuxIdx {
+			header = fmt.Sprintf("%-10v %-10v %-10v | %-10v %-10v %-10v | %-10v %-10v %-10v\n", "symidx", "auxNum", "auxStart", "symidx", "auxNum", "auxStart", "symidx", "auxNum", "auxStart")
+		} else {
+			header = fmt.Sprintf("%-10v %-10v %-10v | %-10v %-10v %-10v | %-10v %-10v %-10v\n", "symidx", "size", "offset", "symidx", "size", "offset", "symidx", "size", "offset")
+		}
+		ndef := r.NSym() + r.NHashed64def() + r.NHasheddef() + r.NNonpkgdef()
+		start := int(h.Offsets[block])
+		var content string
+		preRelocIdx := readUint32(data[start:])
+		for i := 1; i < ndef; i++ {
+			relocStart := readUint32(data[start+i*4:])
+			content += fmt.Sprintf("%-10v %-10v %-10v | ", i-1, relocStart-preRelocIdx, preRelocIdx)
+			preRelocIdx = relocStart
+			if i%3 == 0 {
+				content += "\n"
+			}
+		}
+
+		return header, content
 	case goobj.BlkReloc:
+		var relocs string
+		start := uint32(h.Offsets[block])
+		header := fmt.Sprintf("%-10v %-10v %-10v %-15v %-10v %v\n", "index", "offset", "size", "typ", "add", "symbol")
+		num := (h.Offsets[block+1] - h.Offsets[block]) / goobj.RelocSize
+		for i := uint32(0); i < num; i++ {
+			reloc := (*goobj.Reloc)(unsafe.Pointer(&data[start+i*goobj.RelocSize]))
+			symdata := Reloc{
+				offset: reloc.Off(),
+				size:   reloc.Siz(),
+				typ:    objabi.RelocType(reloc.Type()) &^ objabi.R_WEAK,
+				add:    reloc.Add(),
+				sym:    reloc.Sym(),
+			}
+			relocs += fmt.Sprintf("%-10v %-10v %-10v %-15v %-10v %v\n", i, symdata.offset, symdata.size, symdata.typ, symdata.add, symdata.sym)
+		}
+		return header, fmt.Sprintf("%+v", relocs)
 	case goobj.BlkAux:
+		var auxs string
+		start := uint32(h.Offsets[block])
+		header := fmt.Sprintf("%-15v %v\n", "type", "symbol")
+		num := (h.Offsets[block+1] - h.Offsets[block]) / goobj.AuxSize
+		for i := uint32(0); i < num; i++ {
+			aux := (*goobj.Aux)(unsafe.Pointer(&data[start+i*goobj.AuxSize]))
+			auxs += fmt.Sprintf("%-15v %v\n", aux.Type(), aux.Sym())
+		}
+		return header, fmt.Sprintf("%+v", auxs)
 	case goobj.BlkData:
+		var content string
+		offset := h.Offsets[block]
+		for i := uint32(0); i < uint32(r.NSym()); i++ {
+			switch objabi.SymKind(r.Sym(i).Type()) {
+			case objabi.SDATA:
+			case objabi.STEXT:
+				var sb strings.Builder
+				dis.Print(&sb, nil, uint64(offset), uint64(offset)+uint64(r.Sym(i).Siz()), false, false)
+				content += fmt.Sprintf("%v\n", sb.String())
+			case objabi.Sxxx:
+			case objabi.SRODATA:
+			case objabi.SNOPTRDATA:
+			case objabi.SBSS:
+			case objabi.SNOPTRBSS:
+			}
+			offset += r.Sym(i).Siz()
+		}
+
+		return "", content
 	case goobj.BlkRefName:
 	case goobj.BlkEnd:
 	case goobj.NBlk:
