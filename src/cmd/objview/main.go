@@ -42,6 +42,8 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"internal/abi"
+	"internal/goarch"
 	"log"
 	"math"
 	"os"
@@ -186,6 +188,12 @@ type RefFlags struct {
 	Sym   goobj.SymRef
 	Flag  uint8
 	Flag2 uint8
+}
+
+type StackMap struct {
+	n        int32   // number of bitmaps
+	nbit     int32   // number of bits in each bitmap
+	bytedata [1]byte // bitmaps, each starting on a byte boundary
 }
 
 func readUint32(b []byte) uint32 {
@@ -359,7 +367,6 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte, dis 
 				content += "\n"
 			}
 		}
-
 		return header, content
 	case goobj.BlkReloc:
 		var relocs string
@@ -381,32 +388,77 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte, dis 
 	case goobj.BlkAux:
 		var auxs string
 		start := uint32(h.Offsets[block])
-		header := fmt.Sprintf("%-15v %v\n", "type", "symbol")
+		header := fmt.Sprintf("%-15v %-15v %v\n", "type", "pkg", "sym")
 		num := (h.Offsets[block+1] - h.Offsets[block]) / goobj.AuxSize
+		funcdataCount := 0
 		for i := uint32(0); i < num; i++ {
 			aux := (*goobj.Aux)(unsafe.Pointer(&data[start+i*goobj.AuxSize]))
-			auxs += fmt.Sprintf("%-15v %v\n", aux.Type(), aux.Sym())
+			symref := aux.Sym()
+			var sym *goobj.Sym
+			switch symref.PkgIdx {
+			case goobj.PkgIdxInvalid:
+			case goobj.PkgIdxNone:
+				start := uint32(h.Offsets[goobj.BlkNonpkgdef])
+				sym = (*goobj.Sym)(unsafe.Pointer(&data[start+aux.Sym().SymIdx*goobj.SymSize]))
+				sym2aux[sym] = aux.Type()
+			case goobj.PkgIdxHashed64:
+				start := uint32(h.Offsets[goobj.BlkHashed64def])
+				sym = (*goobj.Sym)(unsafe.Pointer(&data[start+aux.Sym().SymIdx*goobj.SymSize]))
+
+				sym2aux[sym] = aux.Type()
+			case goobj.PkgIdxHashed:
+				start := uint32(h.Offsets[goobj.BlkHasheddef])
+				sym = (*goobj.Sym)(unsafe.Pointer(&data[start+aux.Sym().SymIdx*goobj.SymSize]))
+				sym2aux[sym] = aux.Type()
+			case goobj.PkgIdxBuiltin:
+			case goobj.PkgIdxSelf:
+				start := uint32(h.Offsets[goobj.BlkSymdef])
+				sym = (*goobj.Sym)(unsafe.Pointer(&data[start+aux.Sym().SymIdx*goobj.SymSize]))
+
+				sym2aux[sym] = aux.Type()
+			default:
+			}
+			if _, ok := pkg2str[aux.Sym().PkgIdx]; !ok {
+				auxs += fmt.Sprintf("%-15v %-15v %v\n", aux2str[aux.Type()], aux.Sym().PkgIdx, aux.Sym().SymIdx)
+			} else {
+				auxs += fmt.Sprintf("%-15v %-15v %v\n", aux2str[aux.Type()], pkg2str[aux.Sym().PkgIdx], aux.Sym().SymIdx)
+			}
+			if aux.Type() == goobj.AuxFuncdata {
+				sym2funcdata[sym] = funcdataCount
+				funcdataCount++
+			} else {
+				funcdataCount = 0
+			}
 		}
 		return header, fmt.Sprintf("%+v", auxs)
 	case goobj.BlkData:
 		var content string
 		offset := h.Offsets[block]
-		for i := uint32(0); i < uint32(r.NSym()); i++ {
-			switch objabi.SymKind(r.Sym(i).Type()) {
-			case objabi.SDATA:
-			case objabi.STEXT:
-				var sb strings.Builder
-				dis.Print(&sb, nil, uint64(offset), uint64(offset)+uint64(r.Sym(i).Siz()), false, false)
-				content += fmt.Sprintf("%v\n", sb.String())
-			case objabi.Sxxx:
-			case objabi.SRODATA:
-			case objabi.SNOPTRDATA:
-			case objabi.SBSS:
-			case objabi.SNOPTRBSS:
-			}
-			offset += r.Sym(i).Siz()
-		}
 
+		for i := uint32(0); i < uint32(r.NSym()); i++ {
+			start := uint32(h.Offsets[goobj.BlkSymdef])
+			sym := (*goobj.Sym)(unsafe.Pointer(&data[start+i*goobj.SymSize]))
+			content = extractSymData(r, i, sym, content, dis, offset)
+			offset += sym.Siz()
+		}
+		for i := uint32(0); i < uint32(r.NHashed64def()); i++ {
+			start := uint32(h.Offsets[goobj.BlkHashed64def])
+			sym := (*goobj.Sym)(unsafe.Pointer(&data[start+i*goobj.SymSize]))
+			content = extractSymData(r, i+uint32(r.NSym()), sym, content, dis, offset)
+			offset += sym.Siz()
+		}
+		for i := uint32(0); i < uint32(r.NHasheddef()); i++ {
+			start := uint32(h.Offsets[goobj.BlkHasheddef])
+			sym := (*goobj.Sym)(unsafe.Pointer(&data[start+i*goobj.SymSize]))
+			content = extractSymData(r, i+uint32(r.NSym()+r.NHashed64def()), sym, content, dis, offset)
+			offset += sym.Siz()
+		}
+		for i := uint32(0); i < uint32(r.NNonpkgdef()); i++ {
+			start := uint32(h.Offsets[goobj.BlkNonpkgdef])
+			sym := (*goobj.Sym)(unsafe.Pointer(&data[start+i*goobj.SymSize]))
+			content = extractSymData(r, i+uint32(r.NSym()+r.NHashed64def()+r.NHasheddef()), sym, content, dis, offset)
+			offset += sym.Siz()
+		}
 		return "", content
 	case goobj.BlkRefName:
 	case goobj.BlkEnd:
@@ -414,6 +466,174 @@ func extractBlock(block int, r *goobj.Reader, h *goobj.Header, data []byte, dis 
 	}
 	return "", ""
 }
+
+func extractSymData(r *goobj.Reader, i uint32, sym *goobj.Sym, content string, dis *disasm.Disasm, offset uint32) string {
+	switch objabi.SymKind(sym.Type()) {
+	case objabi.SDATA, objabi.SRODATA, objabi.SNOPTRDATA:
+		b := r.Data(i)
+		content = tryAux(sym, content, i, b)
+	case objabi.STEXT:
+		var sb strings.Builder
+		dis.Print(&sb, nil, uint64(offset), uint64(offset)+uint64(sym.Siz()), false, false)
+		content += fmt.Sprintf("%v %v\n", i, sb.String())
+	case objabi.Sxxx:
+	case objabi.SBSS:
+	case objabi.SNOPTRBSS:
+	case objabi.STEXTFIPS:
+	case objabi.SRODATAFIPS:
+	case objabi.SNOPTRDATAFIPS:
+	case objabi.SDATAFIPS:
+	case objabi.STLSBSS:
+	case objabi.SDWARFCUINFO:
+	case objabi.SDWARFCONST:
+	case objabi.SDWARFFCN:
+	case objabi.SDWARFABSFCN:
+	case objabi.SDWARFTYPE:
+	case objabi.SDWARFVAR:
+	case objabi.SDWARFRANGE:
+	case objabi.SDWARFLOC:
+	case objabi.SDWARFLINES:
+	case objabi.SDWARFADDR:
+	case objabi.SLIBFUZZER_8BIT_COUNTER:
+	case objabi.SCOVERAGE_COUNTER:
+	case objabi.SCOVERAGE_AUXVAR:
+	case objabi.SSEHUNWINDINFO:
+	}
+	return content
+}
+
+type stackObjectRecord struct {
+	// offset in frame
+	// if negative, offset from varp
+	// if non-negative, offset from argp
+	off       int32
+	size      int32
+	ptrBytes  int32
+	gcdataoff uint32 // offset to gcdata from moduledata.rodata
+}
+
+type InlTreeNode struct {
+	Parent   int32
+	File     uint32
+	Line     int32
+	Func     goobj.SymRef
+	ParentPC int32
+}
+
+func tryAux(sym *goobj.Sym, content string, i uint32, b []byte) string {
+	if typ, ok := sym2aux[sym]; ok {
+		switch typ {
+		case goobj.AuxGotype:
+			content += fmt.Sprintf("%v %v\n", i, "Gotype")
+		case goobj.AuxFuncInfo:
+			fi := FuncInfo{}
+			fi.Args = readUint32(b)
+			fi.Locals = readUint32(b[4:])
+			fi.FuncID = abi.FuncID(b[8])
+			fi.FuncFlag = abi.FuncFlag(b[9])
+			fi.StartLine = readUint32(b[12:])
+
+			const numfileOff = 16
+			fi.NumFile = readUint32(b[numfileOff:])
+			fi.FileOff = numfileOff + 4
+
+			numinltreeOff := fi.FileOff + 4*fi.NumFile
+			fi.NumInlTree = binary.LittleEndian.Uint32(b[numinltreeOff:])
+			fi.InlTreeOff = numinltreeOff + 4
+			content += fmt.Sprintf("%v Funcinfo: %+v\n", i, fi)
+			b = b[fi.InlTreeOff:]
+			for inlIdx := range fi.NumInlTree {
+				itn := InlTreeNode{}
+				itn.Parent = int32(readUint32(b))
+				itn.File = uint32(readUint32(b[4:]))
+				itn.Line = int32(readUint32(b[8:]))
+				itn.Func = goobj.SymRef{readUint32(b[12:]), readUint32(b[16:])}
+				itn.ParentPC = int32(readUint32(b[20:]))
+				content += fmt.Sprintf("inlTree: %v %+v\n", inlIdx, itn)
+			}
+
+		case goobj.AuxFuncdata:
+			switch sym2funcdata[sym] {
+			case abi.FUNCDATA_ArgsPointerMaps:
+				sm := (*StackMap)(unsafe.Pointer(unsafe.SliceData(b)))
+				content += fmt.Sprintf("%v Funcdata args pointer maps: %+v\n", i, *sm)
+			case abi.FUNCDATA_LocalsPointerMaps:
+				sm := (*StackMap)(unsafe.Pointer(unsafe.SliceData(b)))
+				content += fmt.Sprintf("%v Funcdata locals pointer maps: %+v\n", i, *sm)
+			case abi.FUNCDATA_StackObjects:
+				p := unsafe.Pointer(unsafe.SliceData(b))
+				n := *(*uintptr)(p)
+				p = unsafe.Add(p, goarch.PtrSize)
+				r0 := (*stackObjectRecord)(p)
+				content += fmt.Sprintf("%v Funcdata stack objects: %v %+v\n", i, n, *r0)
+			case abi.FUNCDATA_InlTree:
+				//p := unsafe.Pointer(unsafe.SliceData(b))
+				//ic := unsafe.Slice((*inlinedCall)(p), uintptr(len(b))/unsafe.Sizeof(inlinedCall{}))
+				//content += fmt.Sprintf("%v Funcdata inline call: %+v\n", i, ic)
+			case abi.FUNCDATA_OpenCodedDeferInfo:
+			case abi.FUNCDATA_ArgInfo:
+			case abi.FUNCDATA_ArgLiveInfo:
+			case abi.FUNCDATA_WrapInfo:
+			}
+
+		case goobj.AuxDwarfInfo:
+		case goobj.AuxDwarfLoc:
+		case goobj.AuxDwarfRanges:
+		case goobj.AuxDwarfLines:
+		case goobj.AuxPcsp:
+		case goobj.AuxPcfile:
+		case goobj.AuxPcline:
+		case goobj.AuxPcinline:
+		case goobj.AuxPcdata:
+		case goobj.AuxWasmImport:
+		case goobj.AuxWasmType:
+		case goobj.AuxSehUnwindInfo:
+		}
+	}
+	return content
+}
+
+type FuncInfo struct {
+	Args       uint32
+	Locals     uint32
+	FuncID     abi.FuncID
+	FuncFlag   abi.FuncFlag
+	StartLine  uint32
+	NumFile    uint32
+	FileOff    uint32
+	NumInlTree uint32
+	InlTreeOff uint32
+}
+
+var aux2str = map[uint8]string{
+	goobj.AuxGotype:        "Gotype",
+	goobj.AuxFuncInfo:      "FuncInfo",
+	goobj.AuxFuncdata:      "Funcdata",
+	goobj.AuxDwarfInfo:     "DwarfInfo",
+	goobj.AuxDwarfLoc:      "DwarfLoc",
+	goobj.AuxDwarfRanges:   "DwarfRanges",
+	goobj.AuxDwarfLines:    "DwarfLines",
+	goobj.AuxPcsp:          "Pcsp",
+	goobj.AuxPcfile:        "Pcfile",
+	goobj.AuxPcline:        "Pcline",
+	goobj.AuxPcinline:      "Pcinline",
+	goobj.AuxPcdata:        "Pcdata",
+	goobj.AuxWasmImport:    "WasmImport",
+	goobj.AuxWasmType:      "WasmType",
+	goobj.AuxSehUnwindInfo: "SehUnwindInfo",
+}
+
+var pkg2str = map[uint32]string{
+	goobj.PkgIdxNone:     "None",
+	goobj.PkgIdxHashed64: "Hashed64",
+	goobj.PkgIdxHashed:   "Hashed",
+	goobj.PkgIdxBuiltin:  "Builtin",
+	goobj.PkgIdxSelf:     "Self",
+	goobj.PkgIdxInvalid:  "Invalid ",
+}
+
+var sym2aux = map[*goobj.Sym]uint8{}
+var sym2funcdata = map[*goobj.Sym]int{}
 
 func printHexdumpWithText(data []byte, text string, startOffset int, binTitle, binHeader, txtTitle, txtHeader string) {
 	const bytesPerLine = 32
