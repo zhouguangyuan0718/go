@@ -20,6 +20,34 @@ type LLVMFuncContext struct {
 	ArgIdx     int
 }
 
+func callReturnInfo(callType *types.Type) (retType llvm.Type, nonMemFields int, isAggregate bool) {
+	if callType.Kind() != types.TSTRUCT {
+		if callType.Kind() == types.TMEM {
+			return GlobalCtxt.VoidType(), 0, false
+		}
+		return getLLVMType(callType), 1, false
+	}
+
+	var fields []llvm.Type
+	for i := 0; i < callType.NumFields(); i++ {
+		ft := callType.FieldType(i)
+		if ft.Kind() == types.TMEM {
+			continue
+		}
+		fields = append(fields, getLLVMType(ft))
+	}
+
+	nonMemFields = len(fields)
+	switch nonMemFields {
+	case 0:
+		return GlobalCtxt.VoidType(), 0, false
+	case 1:
+		return fields[0], 1, false
+	default:
+		return llvm.StructType(fields, false), nonMemFields, true
+	}
+}
+
 func (lfc *LLVMFuncContext) FinishPhi() {
 	for _, BB := range lfc.F.Blocks {
 		for _, v := range BB.Values {
@@ -184,6 +212,74 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateGEP(getLLVMType(v.Type.Elem()), arg0(), []llvm.Value{arg1()}, v.String())
 	case OpAddr:
 		lVal = arg0()
+	case OpStaticCall, OpStaticLECall, OpClosureCall, OpClosureLECall, OpInterCall, OpInterLECall, OpTailCall, OpTailLECall:
+		retType, _, _ := callReturnInfo(v.Type)
+		isVoidCall := retType.TypeKind() == llvm.VoidTypeKind
+
+		var nonMemArgs []llvm.Value
+		var fn llvm.Value
+		switch v.Op {
+		case OpStaticCall, OpStaticLECall, OpTailCall, OpTailLECall:
+			for i := 0; i < len(v.Args)-1; i++ {
+				nonMemArgs = append(nonMemArgs, lfc.GenLV(v.Args[i]))
+			}
+			auxCall := auxToCall(v.Aux)
+			if auxCall == nil || auxCall.Fn == nil {
+				panic(fmt.Sprintf("call without static target: %v", v))
+			}
+			fnName := auxCall.Fn.Name
+			fn = CurrentModule.NamedFunction(fnName)
+			if fn.IsNil() {
+				var argTypes []llvm.Type
+				for _, a := range nonMemArgs {
+					argTypes = append(argTypes, a.Type())
+				}
+				fn = llvm.AddFunction(CurrentModule, fnName, llvm.FunctionType(retType, argTypes, false))
+			}
+		case OpClosureCall, OpClosureLECall:
+			for i := 1; i < len(v.Args)-1; i++ {
+				nonMemArgs = append(nonMemArgs, lfc.GenLV(v.Args[i]))
+			}
+			fn = lfc.GenLV(v.Args[0])
+		case OpInterCall, OpInterLECall:
+			for i := 1; i < len(v.Args)-1; i++ {
+				nonMemArgs = append(nonMemArgs, lfc.GenLV(v.Args[i]))
+			}
+			fn = lfc.GenLV(v.Args[0])
+		}
+
+		fnTypeIsPtr := fn.Type().TypeKind() == llvm.PointerTypeKind
+		fnTypeIsFnPtr := fnTypeIsPtr && fn.Type().ElementType().TypeKind() == llvm.FunctionTypeKind
+		if !fnTypeIsFnPtr {
+			var argTypes []llvm.Type
+			for _, a := range nonMemArgs {
+				argTypes = append(argTypes, a.Type())
+			}
+			fn = lfc.b.CreateBitCast(fn, llvm.PointerType(llvm.FunctionType(retType, argTypes, false), 0), v.String()+".fn")
+		}
+
+		if isVoidCall {
+			lfc.b.CreateCall(GlobalCtxt.VoidType(), fn, nonMemArgs, "")
+			lVal = llvm.Value{}
+		} else {
+			lVal = lfc.b.CreateCall(retType, fn, nonMemArgs, v.String())
+		}
+	case OpSelectN:
+		sel := int(auxIntToInt64(v.AuxInt))
+		src := v.Args[0]
+		switch src.Op {
+		case OpStaticCall, OpStaticLECall, OpClosureCall, OpClosureLECall, OpInterCall, OpInterLECall, OpTailCall, OpTailLECall:
+			_, nonMemFields, aggregate := callReturnInfo(src.Type)
+			if sel >= nonMemFields {
+				lVal = lfc.GenLV(src.Args[len(src.Args)-1])
+			} else if nonMemFields == 1 && !aggregate {
+				lVal = lfc.GenLV(src)
+			} else {
+				lVal = lfc.b.CreateExtractValue(lfc.GenLV(src), sel, v.String())
+			}
+		default:
+			lVal = lfc.b.CreateExtractValue(lfc.GenLV(src), sel, v.String())
+		}
 	case OpMakeResult:
 		switch len(v.Args) {
 		case 1:
