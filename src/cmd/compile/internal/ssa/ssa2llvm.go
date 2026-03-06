@@ -48,6 +48,52 @@ func callReturnInfo(callType *types.Type) (retType llvm.Type, nonMemFields int, 
 	}
 }
 
+func getOrInsertFunction(name string, retType llvm.Type, argTypes []llvm.Type) llvm.Value {
+	fn := CurrentModule.NamedFunction(name)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(CurrentModule, name, llvm.FunctionType(retType, argTypes, false))
+	}
+	return fn
+}
+
+func runtimeOrBuiltinCall(b llvm.Builder, name string, args []llvm.Value) (llvm.Value, []llvm.Value, llvm.Type, bool) {
+	ptr8 := llvm.PointerType(GlobalCtxt.Int8Type(), 0)
+	boolTy := GlobalCtxt.Int1Type()
+
+	switch name {
+	case "runtime.memmove":
+		if len(args) != 3 {
+			return llvm.Value{}, nil, llvm.Type{}, false
+		}
+		intrinRet := GlobalCtxt.VoidType()
+		intrinArgs := []llvm.Type{ptr8, ptr8, getLLVMType(types.Types[types.TUINTPTR]), boolTy}
+		fn := getOrInsertFunction("llvm.memmove.p0.p0.i64", intrinRet, intrinArgs)
+		callArgs := []llvm.Value{
+			b.CreateBitCast(args[0], ptr8, ""),
+			b.CreateBitCast(args[1], ptr8, ""),
+			args[2],
+			llvm.ConstInt(boolTy, 0, false),
+		}
+		return fn, callArgs, intrinRet, true
+	case "runtime.memclrNoHeapPointers", "runtime.memclrHasPointers":
+		if len(args) != 2 {
+			return llvm.Value{}, nil, llvm.Type{}, false
+		}
+		intrinRet := GlobalCtxt.VoidType()
+		intrinArgs := []llvm.Type{ptr8, GlobalCtxt.Int8Type(), getLLVMType(types.Types[types.TUINTPTR]), boolTy}
+		fn := getOrInsertFunction("llvm.memset.p0.i64", intrinRet, intrinArgs)
+		callArgs := []llvm.Value{
+			b.CreateBitCast(args[0], ptr8, ""),
+			llvm.ConstInt(GlobalCtxt.Int8Type(), 0, false),
+			args[1],
+			llvm.ConstInt(boolTy, 0, false),
+		}
+		return fn, callArgs, intrinRet, true
+	default:
+		return llvm.Value{}, nil, llvm.Type{}, false
+	}
+}
+
 func (lfc *LLVMFuncContext) FinishPhi() {
 	for _, BB := range lfc.F.Blocks {
 		for _, v := range BB.Values {
@@ -228,13 +274,18 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 				panic(fmt.Sprintf("call without static target: %v", v))
 			}
 			fnName := auxCall.Fn.Name
-			fn = CurrentModule.NamedFunction(fnName)
-			if fn.IsNil() {
+
+			if intrinFn, intrinArgs, intrinRet, ok := runtimeOrBuiltinCall(lfc.b, fnName, nonMemArgs); ok {
+				fn = intrinFn
+				nonMemArgs = intrinArgs
+				retType = intrinRet
+				isVoidCall = retType.TypeKind() == llvm.VoidTypeKind
+			} else {
 				var argTypes []llvm.Type
 				for _, a := range nonMemArgs {
 					argTypes = append(argTypes, a.Type())
 				}
-				fn = llvm.AddFunction(CurrentModule, fnName, llvm.FunctionType(retType, argTypes, false))
+				fn = getOrInsertFunction(fnName, retType, argTypes)
 			}
 		case OpClosureCall, OpClosureLECall:
 			for i := 1; i < len(v.Args)-1; i++ {
