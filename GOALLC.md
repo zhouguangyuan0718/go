@@ -42,6 +42,9 @@ Remote：
 - 当前社区基线提交 `b7cc93a369`，版本为 `go1.27rc2`
 - 原 `personal/go1.25.master` 的 6 笔提交已经重放到该基线上：vendor
   `go-llvm`、初版 SSA lowering 和 `cmd/objview`
+- GitHub ruleset 继续禁止删除和 non-fast-forward 更新；已移除与官方 Go
+  历史不兼容的 linear-history 限制，因为 release branch 本身包含 merge
+  commit
 
 另有一个更新的 SSA lowering 实验分支：
 
