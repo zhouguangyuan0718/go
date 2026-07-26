@@ -547,7 +547,10 @@ func tryAux(sym *goobj.Sym, content string, i uint32, b []byte) string {
 				itn.Parent = int32(readUint32(b))
 				itn.File = uint32(readUint32(b[4:]))
 				itn.Line = int32(readUint32(b[8:]))
-				itn.Func = goobj.SymRef{readUint32(b[12:]), readUint32(b[16:])}
+				itn.Func = goobj.SymRef{
+					PkgIdx: readUint32(b[12:]),
+					SymIdx: readUint32(b[16:]),
+				}
 				itn.ParentPC = int32(readUint32(b[20:]))
 				content += fmt.Sprintf("inlTree: %v %+v\n", inlIdx, itn)
 			}

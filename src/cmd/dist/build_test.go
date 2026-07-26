@@ -12,6 +12,12 @@ import (
 // TestMustLinkExternal verifies that the mustLinkExternal helper
 // function matches internal/platform.MustLinkExternal.
 func TestMustLinkExternal(t *testing.T) {
+	oldBuildGoallc := buildGoallc
+	buildGoallc = false
+	defer func() {
+		buildGoallc = oldBuildGoallc
+	}()
+
 	for _, goos := range okgoos {
 		for _, goarch := range okgoarch {
 			for _, cgoEnabled := range []bool{true, false} {
