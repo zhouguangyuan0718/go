@@ -16,6 +16,7 @@ package llvm
 #include "llvm-c/Core.h"
 #include "llvm-c/Comdat.h"
 #include "IRBindings.h"
+#include "deprecated.h"
 #include <stdlib.h>
 */
 import "C"
@@ -132,7 +133,6 @@ func llvmMetadataRefs(mds []Metadata) (*C.LLVMMetadataRef, C.unsigned) {
 
 const (
 	Ret         Opcode = C.LLVMRet
-	Br          Opcode = C.LLVMBr
 	Switch      Opcode = C.LLVMSwitch
 	IndirectBr  Opcode = C.LLVMIndirectBr
 	Invoke      Opcode = C.LLVMInvoke
@@ -357,7 +357,7 @@ const (
 //-------------------------------------------------------------------------
 
 func NewContext() Context    { return Context{C.LLVMContextCreate()} }
-func GlobalContext() Context { return Context{C.LLVMGetGlobalContext()} }
+func GlobalContext() Context { return Context{C.LLVMGetGlobalContext_wrap()} }
 func (c Context) Dispose()   { C.LLVMContextDispose(c.C) }
 
 func (c Context) MDKindID(name string) (id int) {
@@ -368,10 +368,7 @@ func (c Context) MDKindID(name string) (id int) {
 }
 
 func MDKindID(name string) (id int) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	id = int(C.LLVMGetMDKindID(cname, C.unsigned(len(name))))
-	return
+	return GlobalContext().MDKindID(name)
 }
 
 //-------------------------------------------------------------------------
@@ -610,14 +607,7 @@ func (c Context) StructType(elementTypes []Type, packed bool) (t Type) {
 }
 
 func StructType(elementTypes []Type, packed bool) (t Type) {
-	var pt *C.LLVMTypeRef
-	var ptlen C.unsigned
-	if len(elementTypes) > 0 {
-		pt = llvmTypeRefPtr(&elementTypes[0])
-		ptlen = C.unsigned(len(elementTypes))
-	}
-	t.C = C.LLVMStructType(pt, ptlen, boolToLLVMBool(packed))
-	return
+	return GlobalContext().StructType(elementTypes, packed)
 }
 
 func (c Context) StructCreateNamed(name string) (t Type) {
@@ -757,7 +747,6 @@ func (v Value) IsAPHINode() (rv Value)             { rv.C = C.LLVMIsAPHINode(v.C
 func (v Value) IsASelectInst() (rv Value)          { rv.C = C.LLVMIsASelectInst(v.C); return }
 func (v Value) IsAShuffleVectorInst() (rv Value)   { rv.C = C.LLVMIsAShuffleVectorInst(v.C); return }
 func (v Value) IsAStoreInst() (rv Value)           { rv.C = C.LLVMIsAStoreInst(v.C); return }
-func (v Value) IsABranchInst() (rv Value)          { rv.C = C.LLVMIsABranchInst(v.C); return }
 func (v Value) IsAInvokeInst() (rv Value)          { rv.C = C.LLVMIsAInvokeInst(v.C); return }
 func (v Value) IsAReturnInst() (rv Value)          { rv.C = C.LLVMIsAReturnInst(v.C); return }
 func (v Value) IsASwitchInst() (rv Value)          { rv.C = C.LLVMIsASwitchInst(v.C); return }
@@ -791,6 +780,18 @@ func (u Use) UsedValue() (v Value) { v.C = C.LLVMGetUsedValue(u.C); return }
 func (v Value) Operand(i int) (rv Value)   { rv.C = C.LLVMGetOperand(v.C, C.unsigned(i)); return }
 func (v Value) SetOperand(i int, op Value) { C.LLVMSetOperand(v.C, C.unsigned(i), op.C) }
 func (v Value) OperandsCount() int         { return int(C.LLVMGetNumOperands(v.C)) }
+
+// Operations on terminator instructions (br, switch, etc). Unlike operands,
+// the number and meaning of successors has been stable across LLVM versions,
+// making these a safe, version-independent way to enumerate the destination
+// blocks of a switch instruction: successor 0 is the default destination,
+// and successors 1..N-1 correspond to case 0..N-2 (see GetSwitchCaseValue for
+// the matching case value).
+func (v Value) SuccessorsCount() int { return int(C.LLVMGetNumSuccessors(v.C)) }
+func (v Value) Successor(i int) (bb BasicBlock) {
+	bb.C = C.LLVMGetSuccessor(v.C, C.unsigned(i))
+	return
+}
 
 // Operations on constants of any type
 func ConstNull(t Type) (v Value)        { v.C = C.LLVMConstNull(t.C); return }
@@ -870,11 +871,7 @@ func ConstNamedStruct(t Type, constVals []Value) (v Value) {
 	return
 }
 func ConstString(str string, addnull bool) (v Value) {
-	cstr := C.CString(str)
-	defer C.free(unsafe.Pointer(cstr))
-	v.C = C.LLVMConstString(cstr,
-		C.unsigned(len(str)), boolToLLVMBool(!addnull))
-	return
+	return GlobalContext().ConstString(str, addnull)
 }
 func ConstArray(t Type, constVals []Value) (v Value) {
 	ptr, nvals := llvmValueRefs(constVals)
@@ -882,9 +879,7 @@ func ConstArray(t Type, constVals []Value) (v Value) {
 	return
 }
 func ConstStruct(constVals []Value, packed bool) (v Value) {
-	ptr, nvals := llvmValueRefs(constVals)
-	v.C = C.LLVMConstStruct(ptr, nvals, boolToLLVMBool(packed))
-	return
+	return GlobalContext().ConstStruct(constVals, packed)
 }
 func ConstVector(scalarConstVals []Value, packed bool) (v Value) {
 	ptr, nvals := llvmValueRefs(scalarConstVals)
@@ -1191,16 +1186,10 @@ func (c Context) InsertBasicBlock(ref BasicBlock, name string) (bb BasicBlock) {
 	return
 }
 func AddBasicBlock(f Value, name string) (bb BasicBlock) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	bb.C = C.LLVMAppendBasicBlock(f.C, cname)
-	return
+	return GlobalContext().AddBasicBlock(f, name)
 }
 func InsertBasicBlock(ref BasicBlock, name string) (bb BasicBlock) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	bb.C = C.LLVMInsertBasicBlock(ref.C, cname)
-	return
+	return GlobalContext().InsertBasicBlock(ref, name)
 }
 func (bb BasicBlock) EraseFromParent()          { C.LLVMDeleteBasicBlock(bb.C) }
 func (bb BasicBlock) MoveBefore(pos BasicBlock) { C.LLVMMoveBasicBlockBefore(bb.C, pos.C) }

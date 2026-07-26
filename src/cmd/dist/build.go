@@ -67,6 +67,8 @@ var (
 	vflag int // verbosity
 )
 
+var goallcLLVMBuildTags string
+
 // The known architectures.
 var okgoarch = []string{
 	"386",
@@ -108,6 +110,8 @@ var okgoos = []string{
 
 // xinit handles initialization of the various global state, like goroot and goarch.
 func xinit() {
+	goallcLLVMBuildTags = os.Getenv("GOALLC_LLVM_BUILD_TAGS")
+
 	b := os.Getenv("GOROOT")
 	if b == "" {
 		fatalf("$GOROOT must be set")
@@ -1390,6 +1394,7 @@ func timelog(op, name string) {
 // to switch between the host and target configurations when cross-compiling.
 func toolenv() []string {
 	var env []string
+	var goFlags []string
 	if !mustLinkExternal(goos, goarch, false) {
 		// Unless the platform requires external linking,
 		// we disable cgo to get static binaries for cmd/go and cmd/pprof,
@@ -1397,13 +1402,19 @@ func toolenv() []string {
 		// as the original build system.
 		env = append(env, "CGO_ENABLED=0")
 	}
+	if goallcLLVMBuildTags != "" {
+		goFlags = append(goFlags, "-tags="+goallcLLVMBuildTags)
+	}
 	if isRelease || os.Getenv("GO_BUILDER_NAME") != "" {
 		// Add -trimpath for reproducible builds of releases.
 		// Include builders so that -trimpath is well-tested ahead of releases.
 		// Do not include local development, so that people working in the
 		// main branch for day-to-day work on the Go toolchain itself can
 		// still have full paths for stack traces for compiler crashes and the like.
-		env = append(env, "GOFLAGS=-trimpath -ldflags=-w -gcflags=cmd/...=-dwarf=false")
+		goFlags = append(goFlags, "-trimpath", "-ldflags=-w", "-gcflags=cmd/...=-dwarf=false")
+	}
+	if len(goFlags) != 0 {
+		env = append(env, "GOFLAGS="+strings.Join(goFlags, " "))
 	}
 	return env
 }

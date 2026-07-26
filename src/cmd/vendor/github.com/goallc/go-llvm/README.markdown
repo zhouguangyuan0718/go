@@ -4,12 +4,18 @@ This library provides bindings to a system-installed LLVM.
 
 Currently supported:
 
-  * LLVM 20, 19, 18, 17, 16, 15 and 14 from [apt.llvm.org](http://apt.llvm.org/) on Debian/Ubuntu.
-  * LLVM 20, 19, 18, 17, 16, 15 and 14 from Homebrew on macOS.
+  * LLVM 23, 22, 21, 20, 19, 18, 17, 16, 15 and 14 from [apt.llvm.org](http://apt.llvm.org/) on Debian/Ubuntu.
+  * LLVM 23, 22, 21, 20, 19, 18, 17, 16, 15 and 14 from Homebrew on macOS.
   * Any of the above versions with a manually built LLVM through the `byollvm` build tag. You need to set up `CFLAGS`/`LDFLAGS` etc yourself in this case.
 
-You can select the LLVM version using a build tag, for example `-tags=llvm17`
-to use LLVM 17.
+LLVM 23 is selected by default. You can select another LLVM version using a
+build tag, for example `-tags=llvm17` to use LLVM 17. When using a manually
+built LLVM 22 or newer, combine the version and custom-build tags, for example
+`-tags="byollvm llvm23"`.
+
+The GoALLC in-tree static LLVM payload is selected explicitly with
+`-tags=staticllvm`. Add a version tag when the payload is not LLVM 23, for
+example `-tags="staticllvm llvm20"`.
 
 ## Usage
 
