@@ -25,6 +25,40 @@ IR 和 Go archive 的 `__.PKGDEF` 后结束，不再生成原生 linker object�
 对被替换的 package 而言，archive 中唯一的 `_go_.o` 必须是 `llc` 生成的
 GoObj；`__.PKGDEF` 仍完全由 Go compiler 生成并位于 archive 的第一个成员。
 
+## 类型描述符和只读数据
+
+`-llvmironly` 不会跳过 compiler 的 `dumpdata` 准备阶段。`reflectdata` 仍按
+原生 compiler 的方式在 `base.Ctxt.Data` 中生成最终的 `obj.LSym` 布局；随后
+LLVM lowering 从带有 `TypeInfo` 的 runtime type descriptor roots 出发，收集
+仅由这些 roots 的 relocation 可达的数据闭包，并将其 lower 为 LLVM constant
+globals。descriptor 的主体由同一份 `rttype` runtime ABI layout 构造为 packed
+named LLVM structs（例如 `%go.runtime.Type`、`%go.runtime.StructType`）；未建
+schema 的辅助数据仍以 bytes/relocations 表示。这个边界刻意位于 finalized LSym，
+而不是重写 reflectdata 布局逻辑。
+
+每个被 lower 的 LSym 保留：
+
+- descriptor 已知字段的 runtime ABI 类型、字段 offset、原始值和
+  `.rodata` / `.data` / `.bss` 段属性；
+- `R_ADDR`、`R_ADDROFF`、`R_METHODOFF` 及其 weak 变体的 addend 和目标；
+- `DUPOK`、`LOCAL`、typelink、Go type、itab、`UsedInIface`、linkname 等 GoObj
+  symbol flags；
+- runtime ABIInternal 函数引用（例如 type equality closure 中的
+  `runtime.memequal64`）。
+
+LLVM IR 使用 global attachment `!goobj.symbol.flags` 和 `!goobj.relocs` 交接
+这些 Go-only 属性。GoObj writer 消费该 metadata，在默认 relocation 推导前恢复
+精确的 Go relocation type，特别是 weak offset relocation。零宽度的 linker
+保活边 `R_KEEP` 不伪装为地址常量，而用 `!goobj.keep` 记录其 target symbol，
+由 writer 合成 GoObj relocation。最终链路仍只有
+`__.PKGDEF + _go_.o` 两个有意义的 archive members；不会生成或合并 native data
+object。
+
+当前实现只 lower type-rooted data closure，尚未把所有 `dumpdata` 产物泛化为
+LLVM data lowering。type descriptor 中未被当前 schema 覆盖的尾部数据，以及其他
+data roots，保守地维持 bytes/relocation fallback；新增 schema 或 root 前必须先明确
+其 relocation、GC 和 linker 契约，并为 writer 增加相应的 GoObj regression。
+
 ## LLVM IR 契约
 
 LLVM IR 本身是 frontend 到 `llc` 的唯一配置载体。`compile` 设置 GoObj
@@ -199,6 +233,8 @@ go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
   原生 compiler object 混合。
 - `!goobj.config` 是这条开发链路的稳定交接点。新增 header 配置时应新增独立
   metadata 字段和相应 `llc` 验证，不要恢复 wrapper 中的 header 解析逻辑。
+- 类型 descriptor data 已覆盖，但这不等同于通用 static-data lowering；目前仅
+  支持 type-rooted readonly/data closure 中已验证的 relocation 类型。
 
 相关合入记录：Go [#3](https://github.com/goallc/go/pull/3)，LLVM
 [#3](https://github.com/goallc/llvm-project/pull/3)。
