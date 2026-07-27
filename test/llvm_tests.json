@@ -4,7 +4,8 @@
       "codegen/divmod.go": "integer division, remainder, overflow handling, and tuple ABI",
       "codegen/logic.go": "integer logic and conditional control flow",
       "codegen/type_descriptor.go": "compiler-owned runtime type descriptor data and GoObj metadata",
-      "codegen/type_descriptor_kinds.go": "all runtime type descriptor layouts and variable descriptor data"
+      "codegen/type_descriptor_kinds.go": "all runtime type descriptor layouts and variable descriptor data",
+      "codegen/type_descriptor_methods.go": "uncommon type data, concrete method tables, wrappers, and R_METHODOFF"
     },
     "blacklist": {
       "codegen/*": "LLVM lowering support has not reached this complete source file yet"
@@ -15,7 +16,8 @@
       "helloworld.go": "basic main-to-runtime call and execution",
       "llvm_type_descriptor.go": "type descriptor data, ABI-internal equality closure, GoObj link, and execution",
       "llvm_type_descriptor_kinds.go": "all runtime type descriptor kinds, GoObj link, and execution",
-      "llvm_type_descriptor_map.go": "typed map descriptor layout, R_KEEP reachability edge, GoObj link, and execution"
+      "llvm_type_descriptor_map.go": "typed map descriptor layout, R_KEEP reachability edge, GoObj link, and execution",
+      "llvm_type_descriptor_methods.go": "uncommon concrete methods, method wrappers, direct calls, GoObj link, and execution"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"

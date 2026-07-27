@@ -7,6 +7,7 @@ import (
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
+	"cmd/internal/src"
 	"internal/buildcfg"
 
 	"github.com/goallc/go-llvm"
@@ -15,11 +16,21 @@ import (
 type LLVMFuncContext struct {
 	BBs         map[ID]llvm.BasicBlock
 	Vs          map[ID]llvm.Value
+	Locals      map[llvmLocalKey]llvm.Value
 	F           *Func
 	LF          llvm.Value
 	b           llvm.Builder
 	ReturnType  llvm.Type
 	ResultCount int
+}
+
+// SSA may clone an ir.Name while retaining the same logical source
+// declaration. Pointer identity is therefore not a stable stack-slot key.
+// Package symbol plus declaration position distinguishes shadowed locals while
+// merging those clones.
+type llvmLocalKey struct {
+	Sym *types.Sym
+	Pos src.XPos
 }
 
 // LLVM's GoABIInternal calling convention has numeric ID 22. Keep the
@@ -322,7 +333,18 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpKeepAlive:
 		lVal = arg1()
 	case OpLocalAddr:
-		lVal = lfc.b.CreateAlloca(getLLVMType(v.Type.Elem()), v.String())
+		sym := auxToSym(v.Aux)
+		name, ok := sym.(*ir.Name)
+		if !ok {
+			v.Fatalf("local address has no stack symbol")
+		}
+		key := llvmLocalKey{Sym: name.Sym(), Pos: name.Pos()}
+		if slot, ok := lfc.Locals[key]; ok {
+			lVal = slot
+		} else {
+			lVal = lfc.b.CreateAlloca(getLLVMType(name.Type()), v.String())
+			lfc.Locals[key] = lVal
+		}
 	case OpArg:
 		lVal = lfc.paramForArg(v)
 		lVal.SetName(v.Aux.(*ir.Name).Sym().Name)
@@ -507,6 +529,16 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 	case OpLoad:
 		lVal = lfc.b.CreateLoad(getLLVMType(v.Type), arg0(), v.String())
+	case OpNilCheck:
+		// Preserve Go's explicit nil-check side effect even when no following
+		// load uses the checked pointer. A volatile byte load faults at address
+		// zero and cannot be removed by LLVM. The SSA value itself is the
+		// original pointer.
+		p := arg0()
+		check := lfc.b.CreateLoad(GlobalCtxt.Int8Type(), p, v.String()+".nilcheck")
+		check.SetVolatile(true)
+		check.SetAlignment(1)
+		lVal = p
 	case OpStore:
 		lVal = lfc.b.CreateStore(arg1(), arg0())
 	case OpStructSelect:
@@ -588,6 +620,7 @@ func LLVMCompile(f *Func) {
 	FCtxt := &LLVMFuncContext{
 		BBs:         map[ID]llvm.BasicBlock{},
 		Vs:          map[ID]llvm.Value{},
+		Locals:      map[llvmLocalKey]llvm.Value{},
 		F:           f,
 		b:           GlobalCtxt.NewBuilder(),
 		ReturnType:  sig.ReturnType,
