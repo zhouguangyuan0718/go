@@ -10,11 +10,20 @@ type llvmSwitchInterface interface {
 	Value(int) int
 }
 
+type llvmDoubleSwitchInterface interface {
+	Double() int
+}
+
 type llvmSwitchValue int
+type llvmDoubleSwitchValue int
 
 //go:noinline
 func (v llvmSwitchValue) Value(delta int) int {
 	return int(v) + delta
+}
+
+func (v llvmDoubleSwitchValue) Double() int {
+	return int(v) * 2
 }
 
 func classifyLLVMInterface(v any) int {
@@ -27,6 +36,8 @@ func classifyLLVMInterface(v any) int {
 		return len(x)
 	case llvmSwitchInterface:
 		return x.Value(1)
+	case llvmDoubleSwitchInterface:
+		return x.Double()
 	default:
 		return -1
 	}
@@ -36,5 +47,6 @@ func main() {
 	println(classifyLLVMInterface(nil))
 	println(classifyLLVMInterface(llvmSwitchValue(10)))
 	println(classifyLLVMInterface("abc"))
+	println(classifyLLVMInterface(llvmDoubleSwitchValue(7)))
 	println(classifyLLVMInterface(struct{}{}))
 }

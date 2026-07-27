@@ -81,7 +81,8 @@ non-empty interface 的 comma-ok assertion 复用同一 TypeAssert cache/fallbac
 interface type switch 对 concrete cases 使用动态 type hash/type pointer 比较；
 interface case 使用 compiler 生成的 `internal/abi.InterfaceSwitch` descriptor、
 atomic cache probe 和 `runtime.interfaceSwitch` fallback。descriptor 作为带
-`AuxGotype` 的可写 data root 进入同一 LSym-to-LLVM data closure。
+`AuxGotype` 的可写 data root 进入同一 LSym-to-LLVM data closure；其尾部
+interface type 指针数组按实际 case 数扩展，并由多 interface case 测试覆盖。
 两个非 nil interface 的 equality 分别保留 `runtime.efaceeq` 或
 `runtime.ifaceeq` ABIInternal call，以动态 type/itab 和 data words 完成比较。
 

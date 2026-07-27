@@ -10,7 +10,7 @@
       "codegen/interface_conversion.go": "dynamic interface-to-interface conversion cache and runtime fallback",
       "codegen/interface_assertion.go": "comma-ok and panic-form concrete and non-empty interface assertions",
       "codegen/interface_equality.go": "empty and non-empty interface equality through runtime comparators",
-      "codegen/interface_switch.go": "concrete and interface type-switch cases with static interface-switch cache"
+      "codegen/interface_switch.go": "concrete and multiple interface type-switch cases with variable static cache descriptor"
     },
     "blacklist": {
       "codegen/*": "LLVM lowering support has not reached this complete source file yet"
@@ -27,7 +27,7 @@
       "llvm_interface_conversion.go": "dynamic interface-to-interface conversion cache, runtime fallback, nil conversion, and execution",
       "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
       "llvm_interface_equality.go": "empty and non-empty interface equality for matching and differing dynamic values",
-      "llvm_interface_switch.go": "nil, concrete, interface, and default type-switch cases with execution"
+      "llvm_interface_switch.go": "nil, concrete, multiple interface, and default type-switch cases with execution"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"
