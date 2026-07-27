@@ -71,11 +71,16 @@ non-empty interface 到另一 non-empty interface 的转换沿用 compiler 生�
 `internal/abi.TypeAssert` cache 和 `runtime.typeAssert` fallback。LLVM lowering
 保留 cache 的 sequentially-consistent pointer load、pointer/uintptr probe 比较、
 nil 分支和 ABIInternal runtime call；cache miss 与随后命中的 fast path 均由
-runtime 测试覆盖。
+runtime 测试覆盖。empty interface 到 concrete type 的 comma-ok assertion
+直接比较动态 type word 并按 SSA 结果形状取回 data；empty interface 到
+non-empty interface 的 comma-ok assertion 复用同一 TypeAssert cache/fallback，
+并覆盖成功、类型不匹配和 nil 输入。
 
 这类可写 descriptor 还要求 GoObj symbol 的精确大小、对齐和 `AuxGotype`。
 LLVM GoObj writer 从 global layout 写入 symbol size/alignment，排除 section
 padding，并通过 `!goobj.gotype` 恢复 compiler LSym 的 Go type auxiliary。
+该 auxiliary 的 target 既可以是本包定义，也可以是 external non-package
+reference；后者用于 builtin 或其他 package 拥有的 type symbol。
 否则 linker 无法为 `.data` 生成正确的 GC bitmap。
 
 当前实现只 lower type-rooted data closure，尚未把所有 `dumpdata` 产物泛化为
@@ -252,11 +257,12 @@ go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
 
 - 当前 target triple 仅配置了 `darwin/arm64` 和 `linux/amd64`。
 - LLVM SSA lowering 仍不完整；复杂 SSA op、GC pointer liveness、defer/panic、
-  closure、动态 interface assertion/switch、完整 ABI/DWARF 等尚未达到通用正确性。
+  closure、interface type switch、完整 ABI/DWARF 等尚未达到通用正确性。
 - 当前 interface 范围包括 compiler 能静态生成 itab 的 concrete-to-interface
   conversion、对应的 ABIInternal 间接方法调用，以及 non-empty
-  interface-to-interface conversion；concrete type assertion 和 interface switch
-  不在本阶段范围内。
+  interface-to-interface conversion；empty-interface 到 concrete/non-empty
+  interface 的 comma-ok assertion 也已覆盖。panic-form assertion 和 interface
+  type switch 不在本阶段范围内。
 - 每个经 LLVM 替换的 package 都必须由 `llc` 生成完整的 `_go_.o`，不能与
   原生 compiler object 混合。
 - `!goobj.config` 是这条开发链路的稳定交接点。新增 header 配置时应新增独立
