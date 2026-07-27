@@ -276,6 +276,38 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	return call
 }
 
+func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int) llvm.Value {
+	aux := auxToCall(v.Aux)
+	if aux == nil {
+		v.Fatalf("indirect call has no ABI information")
+	}
+	if got, want := len(v.Args)-argStart-1, int(aux.NArgs()); got != want {
+		v.Fatalf("indirect call has %d LLVM arguments, want %d", got, want)
+	}
+
+	sig := llvmSignature(aux)
+	cc := llvmCallConv(aux.ABI().Which())
+	code := lfc.GenLV(v.Args[0])
+	if code.Type().TypeKind() == llvm.IntegerTypeKind {
+		code = lfc.b.CreateIntToPtr(code, GlobalCtxt.PointerType(0), v.String()+".code")
+	}
+	args := make([]llvm.Value, 0, aux.NArgs())
+	for i := int64(0); i < aux.NArgs(); i++ {
+		arg := lfc.GenLV(v.Args[argStart+int(i)])
+		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
+			v.Fatalf("argument %d to indirect call has incompatible LLVM type", i)
+		}
+		args = append(args, arg)
+	}
+	name := v.String()
+	if sig.ResultCount == 0 {
+		name = ""
+	}
+	call := lfc.b.CreateCall(sig.Type, code, args, name)
+	call.SetInstructionCallConv(cc)
+	return call
+}
+
 var llvmBoundsPanicNames = [...]string{
 	BoundsIndex:       "runtime.goPanicIndex",
 	BoundsIndexU:      "runtime.goPanicIndexU",
@@ -345,6 +377,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			lVal = lfc.b.CreateAlloca(getLLVMType(name.Type()), v.String())
 			lfc.Locals[key] = lVal
 		}
+	case OpAddr:
+		sym, ok := v.Aux.(*obj.LSym)
+		if !ok {
+			v.Fatalf("global address has non-LSym auxiliary %T", v.Aux)
+		}
+		lVal = llvmGoDataRef(sym)
 	case OpArg:
 		lVal = lfc.paramForArg(v)
 		lVal.SetName(v.Aux.(*ir.Name).Sym().Name)
@@ -490,13 +528,17 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateGEP(getLLVMType(v.Type.Elem()), arg0(), []llvm.Value{arg1()}, v.String())
 	case OpStaticCall, OpStaticLECall:
 		lVal = lfc.staticCall(v)
+	case OpInterCall, OpInterLECall:
+		// arg0 is the code pointer loaded from the itab. Interface method
+		// ABIs receive the interface data word as their first real argument.
+		lVal = lfc.indirectCall(v, 1)
 	case OpPanicBounds:
 		lVal = lfc.panicBounds(v)
 	case OpSelectN:
 		sel := int(auxIntToInt64(v.AuxInt))
 		src := v.Args[0]
 		switch src.Op {
-		case OpStaticCall, OpStaticLECall:
+		case OpStaticCall, OpStaticLECall, OpInterCall, OpInterLECall:
 			aux := auxToCall(src.Aux)
 			call := lfc.GenLV(src)
 			switch {
@@ -632,6 +674,7 @@ func LLVMCompile(f *Func) {
 	if FCtxt.LF.BasicBlocksCount() != 0 {
 		f.fe.Fatalf(f.Entry.Pos, "duplicate LLVM definition for %s", f.OwnAux.Fn.Name)
 	}
+	setGoObjFunctionRelocMetadata(FCtxt.LF, f.OwnAux.Fn)
 	for _, BB := range f.Blocks {
 		FCtxt.BBs[BB.ID] = GlobalCtxt.AddBasicBlock(FCtxt.LF, BB.String())
 	}
@@ -661,6 +704,7 @@ func LLVMCompile(f *Func) {
 var CurrentModule llvm.Module
 var type2lTypes = map[*types.Type]llvm.Type{}
 var goObjConfigWritten bool
+var currentLLVMDataLowerer *llvmDataLowerer
 
 var GlobalCtxt = llvm.GlobalContext()
 
@@ -789,6 +833,7 @@ func InitModule(pkg *types.Pkg) {
 	CurrentModule = GlobalCtxt.NewModule(pkg.Path)
 	CurrentModule.SetTarget(goObjTargetTriple())
 	goObjConfigWritten = false
+	currentLLVMDataLowerer = newLLVMDataLowerer(make(map[*obj.LSym]bool))
 }
 
 // goObjTargetTriple identifies the GoObj target that llc should use when it

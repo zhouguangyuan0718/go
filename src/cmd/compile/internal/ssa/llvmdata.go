@@ -38,7 +38,12 @@ func LowerGoObjTypeData() {
 		}
 	}
 	for _, s := range base.Ctxt.Data {
-		if s.TypeInfo() != nil {
+		if s.TypeInfo() != nil || s.ItabInfo() != nil {
+			visit(s)
+		}
+	}
+	if currentLLVMDataLowerer != nil {
+		for s := range currentLLVMDataLowerer.roots {
 			visit(s)
 		}
 	}
@@ -52,7 +57,13 @@ func LowerGoObjTypeData() {
 		syms = append(syms, s)
 	}
 	sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
-	lowerer := newLLVMDataLowerer(data)
+	lowerer := currentLLVMDataLowerer
+	if lowerer == nil {
+		lowerer = newLLVMDataLowerer(data)
+		currentLLVMDataLowerer = lowerer
+	} else {
+		lowerer.data = data
+	}
 
 	globals := make(map[*obj.LSym]llvm.Value, len(syms))
 	for _, s := range syms {
@@ -77,6 +88,44 @@ func LowerGoObjTypeData() {
 		setGoObjDataFlags(g, s)
 		setGoObjRelocMetadata(g, s)
 		setGoObjKeepMetadata(g, s)
+	}
+}
+
+// llvmGoDataRef returns the module-global address for a compiler LSym. Local
+// data symbols use the same semantic type cache as final data lowering so an
+// early OpAddr and the later initializer always agree on the global type.
+func llvmGoDataRef(s *obj.LSym) llvm.Value {
+	if s == nil {
+		base.Fatalf("nil Go data symbol in LLVM lowering")
+	}
+	if g := CurrentModule.NamedGlobal(s.Name); !g.IsNil() {
+		return g
+	}
+	if currentLLVMDataLowerer == nil {
+		currentLLVMDataLowerer = newLLVMDataLowerer(make(map[*obj.LSym]bool))
+	}
+	currentLLVMDataLowerer.roots[s] = true
+	local := false
+	for _, candidate := range base.Ctxt.Data {
+		if candidate == s {
+			local = true
+			break
+		}
+	}
+	if !local && !llvmDataSymbolKindSupported(s.Type) {
+		return llvm.AddGlobal(CurrentModule, GlobalCtxt.Int8Type(), s.Name)
+	}
+	currentLLVMDataLowerer.data[s] = true
+	return llvm.AddGlobal(CurrentModule, currentLLVMDataLowerer.dataType(s), s.Name)
+}
+
+func llvmDataSymbolKindSupported(kind objabi.SymKind) bool {
+	switch kind {
+	case objabi.SRODATA, objabi.SRODATAFIPS, objabi.SNOPTRDATA, objabi.SNOPTRDATAFIPS,
+		objabi.SDATA, objabi.SDATAFIPS, objabi.SBSS, objabi.SNOPTRBSS:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -304,6 +353,30 @@ func setGoObjKeepMetadata(g llvm.Value, s *obj.LSym) {
 	}
 	if len(entries) != 0 {
 		g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.keep"), GlobalCtxt.MDNode(entries))
+	}
+}
+
+// Interface dead-method elimination uses zero-width marker relocations on the
+// containing function. LLVM calls and globals cannot encode those records, so
+// carry the exact Go relocation type, addend, and target in function metadata.
+func setGoObjFunctionRelocMetadata(fn llvm.Value, s *obj.LSym) {
+	entries := make([]llvm.Metadata, 0)
+	for _, r := range s.R {
+		switch r.Type {
+		case objabi.R_USEIFACE, objabi.R_USEIFACEMETHOD, objabi.R_USENAMEDMETHOD:
+			if r.Sym == nil {
+				base.Fatalf("nil interface marker target in %s", s.Name)
+			}
+			llvmGoDataRef(r.Sym)
+			entries = append(entries, GlobalCtxt.MDNode([]llvm.Metadata{
+				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(uint16(r.Type)), false).ConstantAsMetadata(),
+				llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(r.Add), true).ConstantAsMetadata(),
+				GlobalCtxt.MDString(r.Sym.Name),
+			}))
+		}
+	}
+	if len(entries) != 0 {
+		fn.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.marker_relocs"), GlobalCtxt.MDNode(entries))
 	}
 }
 

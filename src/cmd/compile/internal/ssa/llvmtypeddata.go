@@ -22,6 +22,7 @@ import (
 // retaining the generic representation for auxiliary linker data.
 type llvmDataLowerer struct {
 	data             map[*obj.LSym]bool
+	roots            map[*obj.LSym]bool
 	runtimeTypes     map[*types.Type]llvm.Type
 	descriptorTypes  map[*obj.LSym]llvm.Type
 	namedRuntimeType map[*types.Type]bool
@@ -30,6 +31,7 @@ type llvmDataLowerer struct {
 func newLLVMDataLowerer(data map[*obj.LSym]bool) *llvmDataLowerer {
 	return &llvmDataLowerer{
 		data:             data,
+		roots:            make(map[*obj.LSym]bool),
 		runtimeTypes:     make(map[*types.Type]llvm.Type),
 		descriptorTypes:  make(map[*obj.LSym]llvm.Type),
 		namedRuntimeType: make(map[*types.Type]bool),
@@ -40,12 +42,18 @@ func (l *llvmDataLowerer) dataType(s *obj.LSym) llvm.Type {
 	if t := llvmDescriptorGoType(s); t != nil {
 		return l.descriptorType(s, t)
 	}
+	if s.ItabInfo() != nil {
+		return l.itabType(s)
+	}
 	return llvmDataType(s)
 }
 
 func (l *llvmDataLowerer) dataInitializer(s *obj.LSym, globals map[*obj.LSym]llvm.Value) llvm.Value {
 	if t := llvmDescriptorGoType(s); t != nil {
 		return l.descriptorInitializer(s, t, globals)
+	}
+	if s.ItabInfo() != nil {
+		return l.itabInitializer(s, globals)
 	}
 	return llvmDataInitializer(s, globals, l.data)
 }
@@ -60,8 +68,76 @@ func llvmDescriptorGoType(s *obj.LSym) *types.Type {
 }
 
 type llvmDescriptorPart struct {
-	off int64
-	typ *types.Type
+	off        int64
+	typ        *types.Type
+	arrayElem  *types.Type
+	arrayCount int64
+}
+
+func (p llvmDescriptorPart) size() int64 {
+	if p.typ != nil {
+		return p.typ.Size()
+	}
+	return p.arrayElem.Size() * p.arrayCount
+}
+
+func (l *llvmDataLowerer) partType(p llvmDescriptorPart) llvm.Type {
+	if p.typ != nil {
+		return l.goType(p.typ)
+	}
+	return llvm.ArrayType(l.goType(p.arrayElem), int(p.arrayCount))
+}
+
+func (l *llvmDataLowerer) partValue(s *obj.LSym, p llvmDescriptorPart, globals map[*obj.LSym]llvm.Value) llvm.Value {
+	if p.typ != nil {
+		return l.goValue(s, p.typ, p.off, globals)
+	}
+	values := make([]llvm.Value, p.arrayCount)
+	for i := range values {
+		values[i] = l.goValue(s, p.arrayElem, p.off+int64(i)*p.arrayElem.Size(), globals)
+	}
+	return llvm.ConstArray(l.goType(p.arrayElem), values)
+}
+
+func llvmItabParts(s *obj.LSym) []llvmDescriptorPart {
+	size := llvmDataSize(s)
+	fixed := rttype.ITab.Size()
+	if size < fixed || (size-fixed)%int64(types.PtrSize) != 0 {
+		base.Fatalf("invalid runtime itab size %d for %s", size, s.Name)
+	}
+	parts := []llvmDescriptorPart{{off: 0, typ: rttype.ITab}}
+	if tail := (size - fixed) / int64(types.PtrSize); tail != 0 {
+		parts = append(parts, llvmDescriptorPart{
+			off:        fixed,
+			arrayElem:  types.Types[types.TUINTPTR],
+			arrayCount: tail,
+		})
+	}
+	return parts
+}
+
+func (l *llvmDataLowerer) itabType(s *obj.LSym) llvm.Type {
+	if result, ok := l.descriptorTypes[s]; ok {
+		return result
+	}
+	name := "go.itab." + llvmSafeTypeName(strings.TrimPrefix(s.Name, "go:itab."))
+	result := CurrentModule.GetTypeByName(name)
+	if result.IsNil() {
+		result = GlobalCtxt.StructCreateNamed(name)
+	}
+	l.descriptorTypes[s] = result
+	fields := l.descriptorFields(s, llvmItabParts(s), nil)
+	fieldTypes := make([]llvm.Type, len(fields))
+	for i, field := range fields {
+		fieldTypes[i] = field.Type()
+	}
+	result.StructSetBody(fieldTypes, true)
+	return result
+}
+
+func (l *llvmDataLowerer) itabInitializer(s *obj.LSym, globals map[*obj.LSym]llvm.Value) llvm.Value {
+	typ := l.itabType(s)
+	return llvm.ConstNamedStruct(typ, l.descriptorFields(s, llvmItabParts(s), globals))
 }
 
 // descriptorParts mirrors reflectdata.writeType. It uses the runtime ABI
@@ -74,7 +150,8 @@ type llvmDescriptorPart struct {
 // the descriptor instead of silently treating a runtime field as opaque bytes.
 func descriptorParts(t *types.Type, size int64) []llvmDescriptorPart {
 	var rt *types.Type
-	var variable *types.Type
+	var variableElem *types.Type
+	var variableCount int64
 	switch t.Kind() {
 	default:
 		rt = rttype.Type
@@ -86,24 +163,27 @@ func descriptorParts(t *types.Type, size int64) []llvmDescriptorPart {
 		rt = rttype.ChanType
 	case types.TFUNC:
 		rt = rttype.FuncType
-		variable = types.NewArray(types.Types[types.TUNSAFEPTR], int64(t.NumRecvs()+t.NumParams()+t.NumResults()))
+		variableElem = types.Types[types.TUNSAFEPTR]
+		variableCount = int64(t.NumRecvs() + t.NumParams() + t.NumResults())
 	case types.TINTER:
 		rt = rttype.InterfaceType
-		variable = types.NewArray(rttype.IMethod, int64(len(t.AllMethods())))
+		variableElem = rttype.IMethod
+		variableCount = int64(len(t.AllMethods()))
 	case types.TMAP:
 		rt = rttype.MapType
 	case types.TPTR:
 		rt = rttype.PtrType
 	case types.TSTRUCT:
 		rt = rttype.StructType
-		variable = types.NewArray(rttype.StructField, int64(t.NumFields()))
+		variableElem = rttype.StructField
+		variableCount = int64(t.NumFields())
 	}
 
 	parts := []llvmDescriptorPart{{off: 0, typ: rt}}
 	off := rt.Size()
 	variableSize := int64(0)
-	if variable != nil {
-		variableSize = variable.Size()
+	if variableElem != nil {
+		variableSize = variableElem.Size() * variableCount
 	}
 	trailing := size - off - variableSize
 	if trailing < 0 {
@@ -121,17 +201,24 @@ func descriptorParts(t *types.Type, size int64) []llvmDescriptorPart {
 		off += rttype.UncommonType.Size()
 		trailing -= rttype.UncommonType.Size()
 	}
-	if variable != nil {
-		parts = append(parts, llvmDescriptorPart{off: off, typ: variable})
-		off += variable.Size()
+	if variableElem != nil {
+		parts = append(parts, llvmDescriptorPart{
+			off:        off,
+			arrayElem:  variableElem,
+			arrayCount: variableCount,
+		})
+		off += variableSize
 	}
 	if trailing%rttype.Method.Size() != 0 {
 		base.Fatalf("invalid runtime method table size %d for %s", trailing, t)
 	}
 	if n := trailing / rttype.Method.Size(); n != 0 {
-		methods := types.NewArray(rttype.Method, n)
-		parts = append(parts, llvmDescriptorPart{off: off, typ: methods})
-		off += methods.Size()
+		parts = append(parts, llvmDescriptorPart{
+			off:        off,
+			arrayElem:  rttype.Method,
+			arrayCount: n,
+		})
+		off += rttype.Method.Size() * n
 	}
 	if off != size {
 		base.Fatalf("runtime descriptor layout for %s has size %d, want %d", t, off, size)
@@ -168,12 +255,12 @@ func (l *llvmDataLowerer) descriptorFields(s *obj.LSym, parts []llvmDescriptorPa
 	fields := make([]llvm.Value, 0, len(parts)*2+1)
 	pos := int64(0)
 	for _, part := range parts {
-		if part.off < pos || part.off+part.typ.Size() > llvmDataSize(s) {
+		if part.off < pos || part.off+part.size() > llvmDataSize(s) {
 			base.Fatalf("invalid semantic descriptor layout for %s", s.Name)
 		}
 		fields = append(fields, llvmDataRangeFields(s, pos, part.off, globals, l.data)...)
-		fields = append(fields, l.goValue(s, part.typ, part.off, globals))
-		pos = part.off + part.typ.Size()
+		fields = append(fields, l.partValue(s, part, globals))
+		pos = part.off + part.size()
 	}
 	fields = append(fields, llvmDataRangeFields(s, pos, llvmDataSize(s), globals, l.data)...)
 	if len(fields) == 0 {
@@ -260,10 +347,13 @@ func (l *llvmDataLowerer) goValue(s *obj.LSym, t *types.Type, off int64, globals
 	// relocation at their base offset.
 	if t.Kind() != types.TSTRUCT && t.Kind() != types.TARRAY && t.Kind() != types.TSLICE && t.Kind() != types.TSTRING {
 		if r, ok := llvmDataRelocAt(s, off); ok {
+			var value llvm.Value
 			if globals == nil {
-				return llvmDataRelocZero(r)
+				value = llvmDataRelocZero(r)
+			} else {
+				value = llvmDataRelocValue(s, r, globals, l.data)
 			}
-			return llvmDataRelocValue(s, r, globals, l.data)
+			return llvmCoerceDataReloc(value, l.goType(t), s, off)
 		}
 	}
 
@@ -311,6 +401,17 @@ func (l *llvmDataLowerer) goValue(s *obj.LSym, t *types.Type, off int64, globals
 		base.Fatalf("unsupported runtime descriptor constant type %s", t)
 		return llvm.Value{}
 	}
+}
+
+func llvmCoerceDataReloc(value llvm.Value, want llvm.Type, s *obj.LSym, off int64) llvm.Value {
+	if value.Type() == want {
+		return value
+	}
+	if value.Type().TypeKind() == llvm.PointerTypeKind && want.TypeKind() == llvm.IntegerTypeKind {
+		return llvm.ConstPtrToInt(value, want)
+	}
+	base.Fatalf("relocation in %s at %d has LLVM type kind %d, want %d", s.Name, off, value.Type().TypeKind(), want.TypeKind())
+	return llvm.Value{}
 }
 
 func llvmCheckStructInitializer(typ llvm.Type, values []llvm.Value, symbol string, off int64) {
@@ -447,6 +548,8 @@ func llvmRuntimeTypeName(t *types.Type) string {
 		return "go.runtime.StructField"
 	case rttype.UncommonType:
 		return "go.runtime.UncommonType"
+	case rttype.ITab:
+		return "go.runtime.ITab"
 	default:
 		return ""
 	}

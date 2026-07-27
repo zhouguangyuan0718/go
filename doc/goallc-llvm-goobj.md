@@ -54,6 +54,19 @@ LLVM IR 使用 global attachment `!goobj.symbol.flags` 和 `!goobj.relocs` 交�
 `__.PKGDEF + _go_.o` 两个有意义的 archive members；不会生成或合并 native data
 object。
 
+静态 interface conversion 还会把带有 `ItabInfo` 的 roots 纳入同一数据闭包。
+itab 使用 `%go.runtime.ITab` 和按实际方法数扩展的 packed LLVM struct 表达；
+固定的 `Fun[0]` 后面按 LSym 的最终大小追加 `uintptr` 数组，因此单方法和多方法
+itab 都保持 runtime ABI 的连续方法表布局。方法入口仍保留 weak `R_ADDR`
+relocation。interface 方法调用从 itab 槽加载入口，转成 LLVM function pointer，
+并以原 SSA `AuxCall` 的 ABIInternal signature 发出 indirect call。
+
+Go linker 的 dead-method elimination 还依赖函数上的零宽度
+`R_USEIFACE`、`R_USEIFACEMETHOD` 和 `R_USENAMEDMETHOD`。它们不对应 LLVM
+机器指令或地址常量，因此 compiler 用 `!goobj.marker_relocs` 保存精确的
+relocation type、addend 和 target name；GoObj writer 将其恢复到源函数的
+relocation 列表。普通 LLVM call graph 不能替代这项 linker 契约。
+
 当前实现只 lower type-rooted data closure，尚未把所有 `dumpdata` 产物泛化为
 LLVM data lowering。type descriptor 中未被当前 schema 覆盖的尾部数据，以及其他
 data roots，保守地维持 bytes/relocation fallback；新增 schema 或 root 前必须先明确
@@ -228,7 +241,10 @@ go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
 
 - 当前 target triple 仅配置了 `darwin/arm64` 和 `linux/amd64`。
 - LLVM SSA lowering 仍不完整；复杂 SSA op、GC pointer liveness、defer/panic、
-  closure/interface、完整 ABI/DWARF 等尚未达到通用正确性。
+  closure、动态 interface assertion/switch、完整 ABI/DWARF 等尚未达到通用正确性。
+- 当前 interface 范围是 compiler 能静态生成 itab 的 concrete-to-interface
+  conversion，以及对应的 ABIInternal 间接方法调用；动态 itab construction 和
+  assertion/switch 不在本阶段范围内。
 - 每个经 LLVM 替换的 package 都必须由 `llc` 生成完整的 `_go_.o`，不能与
   原生 compiler object 混合。
 - `!goobj.config` 是这条开发链路的稳定交接点。新增 header 配置时应新增独立
