@@ -6,6 +6,7 @@ import (
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/types"
 	"fmt"
+	"internal/buildcfg"
 
 	"github.com/goallc/go-llvm"
 )
@@ -186,6 +187,7 @@ func LLVMCompile(f *Func) {
 
 var CurrentModule llvm.Module
 var type2lTypes = map[*types.Type]llvm.Type{}
+var goObjConfigWritten bool
 
 var GlobalCtxt = llvm.GlobalContext()
 
@@ -278,8 +280,63 @@ func InitModule(pkg *types.Pkg) {
 	type2lTypes[types.RuneType] = GlobalCtxt.Int32Type()
 
 	CurrentModule = GlobalCtxt.NewModule(pkg.Path)
+	CurrentModule.SetTarget(goObjTargetTriple())
+	goObjConfigWritten = false
+}
+
+// goObjTargetTriple identifies the GoObj target that llc should use when it
+// consumes the IR produced by this compiler. Keep this in the IR rather than
+// making the toolexec wrapper rediscover it from the build environment.
+func goObjTargetTriple() string {
+	switch buildcfg.GOOS + "/" + buildcfg.GOARCH {
+	case "darwin/arm64":
+		return "aarch64-apple-darwin-goobj"
+	case "linux/amd64":
+		return "x86_64-unknown-linux-goobj"
+	default:
+		base.Fatalf("LLVM GoObj target is not configured for %s/%s", buildcfg.GOOS, buildcfg.GOARCH)
+		return ""
+	}
+}
+
+// addGoObjConfigMetadata makes an LLVM IR file self-describing for llc's
+// GoObj writer. Keep every Go object-header field structurally separate so llc
+// never needs to parse a Go header or a comma-separated experiment list.
+func addGoObjConfigMetadata(pkg *types.Pkg) {
+	goarchKey, goarchValue := buildcfg.GOGOARCH()
+	experiments := buildcfg.Experiment.Enabled()
+	experimentMetadata := make([]llvm.Metadata, len(experiments))
+	for i, experiment := range experiments {
+		experimentMetadata[i] = GlobalCtxt.MDString(experiment)
+	}
+	shared := "0"
+	if *base.Flag.Shared {
+		shared = "1"
+	}
+	main := "0"
+	if pkg.Name == "main" {
+		main = "1"
+	}
+	config := GlobalCtxt.MDNode([]llvm.Metadata{
+		GlobalCtxt.MDString("goallc.goobj"),
+		GlobalCtxt.MDString(buildcfg.GOOS),
+		GlobalCtxt.MDString(buildcfg.GOARCH),
+		GlobalCtxt.MDString(buildcfg.Version),
+		GlobalCtxt.MDString(goarchKey),
+		GlobalCtxt.MDString(goarchValue),
+		GlobalCtxt.MDString(base.Flag.BuildID),
+		GlobalCtxt.MDString(pkg.Path),
+		GlobalCtxt.MDString(main),
+		GlobalCtxt.MDString(shared),
+		GlobalCtxt.MDNode(experimentMetadata),
+	})
+	CurrentModule.AddNamedMetadataOperand("goobj.config", config)
 }
 
 func Output(fileName string) error {
+	if !goObjConfigWritten {
+		addGoObjConfigMetadata(types.LocalPkg)
+		goObjConfigWritten = true
+	}
 	return llvm.LLVMPrintModuleToFile(CurrentModule, fileName)
 }

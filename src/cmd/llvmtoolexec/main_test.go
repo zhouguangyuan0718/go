@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"cmd/internal/archive"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,72 +26,42 @@ func TestToolFlag(t *testing.T) {
 	}
 }
 
-func TestDefaultTriple(t *testing.T) {
-	for _, test := range []struct {
-		goos, goarch, want string
-	}{
-		{"darwin", "arm64", "aarch64-apple-darwin-goobj"},
-		{"linux", "amd64", "x86_64-unknown-linux-goobj"},
-	} {
-		got, err := defaultTriple(test.goos, test.goarch)
-		if err != nil || got != test.want {
-			t.Errorf("defaultTriple(%q, %q) = %q, %v; want %q", test.goos, test.goarch, got, err, test.want)
-		}
-	}
-	if _, err := defaultTriple("darwin", "amd64"); err == nil {
-		t.Error("defaultTriple accepted unsupported target")
-	}
-}
-
 func TestAppendArchiveMember(t *testing.T) {
 	dir := t.TempDir()
-	archive := filepath.Join(dir, "p.a")
+	archivePath := filepath.Join(dir, "p.a")
 	member := filepath.Join(dir, "member.o")
-	if err := os.WriteFile(archive, []byte("!<arch>\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(member, []byte{1, 2, 3}, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	appendArchiveMember(archive, "member.o", member)
-	got, err := os.ReadFile(archive)
+	arFile, err := os.OpenFile(archivePath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 8+60+3+1 {
-		t.Fatalf("archive length = %d, want %d", len(got), 8+60+3+1)
-	}
-	if got[8+60+3] != 0 {
-		t.Fatalf("archive padding = %d, want 0", got[8+60+3])
-	}
-}
-
-func TestArchiveGoObjectHeader(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "p.a")
-	payload := []byte("go object darwin arm64 go1.27 X:one,two\n\nexport data")
-	header := []byte("!<arch>\n" + formatArchiveHeader("__.PKGDEF", len(payload)))
-	if err := os.WriteFile(path, append(header, payload...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := archiveGoObjectHeader(path)
-	if err != nil || goObjExperiments(got) != "one,two" {
-		t.Fatalf("archiveGoObjectHeader() = %q, %v; want X:one,two", got, err)
-	}
-}
-
-func TestDecorateGoObj(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "obj.o")
-	if err := os.WriteFile(path, []byte("go object darwin arm64 go1.27\n\n!\n\x00go"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	decorateGoObj(path, true)
-	got, err := os.ReadFile(path)
+	ar, err := archive.New(arFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "go object darwin arm64 go1.27\nmain\n\n!\n\x00go"
-	if string(got) != want {
-		t.Fatalf("wrapped object = %q, want %q", got, want)
+	ar.AddEntry(archive.EntryPkgDef, "__.PKGDEF", 0, 0, 0, 0o644, 6, bytes.NewReader([]byte("pkgdef")))
+	if err := arFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(member, []byte("native-o"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendArchiveMember(archivePath, "_go_.o", member)
+	arFile, err = os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer arFile.Close()
+	parsed, err := archive.Parse(arFile, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(parsed.Entries), 2; got != want {
+		t.Fatalf("archive entries = %d, want %d", got, want)
+	}
+	if got, want := parsed.Entries[0].Name, "__.PKGDEF"; got != want {
+		t.Fatalf("first archive member = %q, want %q", got, want)
+	}
+	if got, want := parsed.Entries[1].Name, "_go_.o"; got != want {
+		t.Fatalf("second archive member = %q, want %q", got, want)
 	}
 }
