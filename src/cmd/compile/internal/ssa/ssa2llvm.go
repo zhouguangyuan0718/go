@@ -123,6 +123,25 @@ func (lfc *LLVMFuncContext) llvmCondition(v llvm.Value, name string) llvm.Value 
 	return lfc.b.CreateICmp(llvm.IntNE, v, zero, name)
 }
 
+func (lfc *LLVMFuncContext) pointerComparisonOperands(v *Value) (llvm.Value, llvm.Value) {
+	return lfc.normalizePointerComparisonOperands(v, lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]))
+}
+
+func (lfc *LLVMFuncContext) normalizePointerComparisonOperands(v *Value, x, y llvm.Value) (llvm.Value, llvm.Value) {
+	if x.Type() == y.Type() {
+		return x, y
+	}
+	switch {
+	case x.Type().TypeKind() == llvm.PointerTypeKind && y.Type().TypeKind() == llvm.IntegerTypeKind:
+		x = lfc.b.CreatePtrToInt(x, y.Type(), v.String()+".ptr")
+	case x.Type().TypeKind() == llvm.IntegerTypeKind && y.Type().TypeKind() == llvm.PointerTypeKind:
+		y = lfc.b.CreatePtrToInt(y, x.Type(), v.String()+".ptr")
+	default:
+		v.Fatalf("pointer comparison has incompatible LLVM operand types")
+	}
+	return x, y
+}
+
 type llvmShiftKind uint8
 
 const (
@@ -445,10 +464,25 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateNeg(arg0(), v.String())
 	case OpNeg32F, OpNeg64F:
 		lVal = lfc.b.CreateFNeg(arg0(), v.String())
-	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB, OpEqPtr:
+	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, arg0(), arg1(), v.String()+".i1"), v.String())
-	case OpNeq64, OpNeq32, OpNeq16, OpNeq8, OpNeqB, OpNeqPtr:
+	case OpEqPtr:
+		x, y := lfc.pointerComparisonOperands(v)
+		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, x, y, v.String()+".i1"), v.String())
+	case OpNeq64, OpNeq32, OpNeq16, OpNeq8, OpNeqB:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, arg0(), arg1(), v.String()+".i1"), v.String())
+	case OpNeqPtr:
+		x, y := lfc.pointerComparisonOperands(v)
+		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, x, y, v.String()+".i1"), v.String())
+	case OpEqInter, OpNeqInter:
+		x := lfc.b.CreateExtractValue(arg0(), 0, v.String()+".x")
+		y := lfc.b.CreateExtractValue(arg1(), 0, v.String()+".y")
+		x, y = lfc.normalizePointerComparisonOperands(v, x, y)
+		pred := llvm.IntEQ
+		if v.Op == OpNeqInter {
+			pred = llvm.IntNE
+		}
+		lVal = lfc.goBool(lfc.b.CreateICmp(pred, x, y, v.String()+".i1"), v.String())
 	case OpLess64, OpLess32, OpLess16, OpLess8:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntSLT, arg0(), arg1(), v.String()+".i1"), v.String())
 	case OpLess64U, OpLess32U, OpLess16U, OpLess8U:
@@ -469,6 +503,8 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULT, arg0(), arg1(), v.String()+".i1"), v.String())
 	case OpIsSliceInBounds:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULE, arg0(), arg1(), v.String()+".i1"), v.String())
+	case OpIsNonNil:
+		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, arg0(), llvm.ConstNull(arg0().Type()), v.String()+".i1"), v.String())
 	case OpLsh64x64, OpLsh64x32, OpLsh64x16, OpLsh64x8,
 		OpLsh32x64, OpLsh32x32, OpLsh32x16, OpLsh32x8,
 		OpLsh16x64, OpLsh16x32, OpLsh16x16, OpLsh16x8,
@@ -534,6 +570,21 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.indirectCall(v, 1)
 	case OpPanicBounds:
 		lVal = lfc.panicBounds(v)
+	case OpSelect0, OpSelect1:
+		sel := 0
+		if v.Op == OpSelect1 {
+			sel = 1
+		}
+		src := v.Args[0]
+		switch src.Op {
+		case OpAtomicLoadPtr:
+			load := lfc.GenLV(src)
+			if sel == 0 {
+				lVal = load
+			}
+		default:
+			v.Fatalf("%s selects unsupported tuple source %s", v.Op, src.Op)
+		}
 	case OpSelectN:
 		sel := int(auxIntToInt64(v.AuxInt))
 		src := v.Args[0]
@@ -549,6 +600,11 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 				lVal = call
 			default:
 				lVal = lfc.b.CreateExtractValue(call, sel, v.String())
+			}
+		case OpAtomicLoadPtr:
+			load := lfc.GenLV(src)
+			if sel == 0 {
+				lVal = load
 			}
 		default:
 			lVal = lfc.b.CreateExtractValue(lfc.GenLV(src), sel, v.String())
@@ -571,6 +627,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 	case OpLoad:
 		lVal = lfc.b.CreateLoad(getLLVMType(v.Type), arg0(), v.String())
+	case OpAtomicLoadPtr:
+		lVal = lfc.b.CreateLoad(GlobalCtxt.PointerType(0), arg0(), v.String())
+		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
 	case OpNilCheck:
 		// Preserve Go's explicit nil-check side effect even when no following
 		// load uses the checked pointer. A volatile byte load faults at address

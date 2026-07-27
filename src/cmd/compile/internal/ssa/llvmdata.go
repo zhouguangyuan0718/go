@@ -33,6 +33,7 @@ func LowerGoObjTypeData() {
 			return
 		}
 		closure[s] = true
+		visit(s.Gotype)
 		for _, r := range s.R {
 			visit(r.Sym)
 		}
@@ -88,6 +89,7 @@ func LowerGoObjTypeData() {
 		setGoObjDataFlags(g, s)
 		setGoObjRelocMetadata(g, s)
 		setGoObjKeepMetadata(g, s)
+		setGoObjGotypeMetadata(g, s)
 	}
 }
 
@@ -354,6 +356,18 @@ func setGoObjKeepMetadata(g llvm.Value, s *obj.LSym) {
 	if len(entries) != 0 {
 		g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.keep"), GlobalCtxt.MDNode(entries))
 	}
+}
+
+func setGoObjGotypeMetadata(g llvm.Value, s *obj.LSym) {
+	if s.Gotype == nil {
+		return
+	}
+	if CurrentModule.NamedGlobal(s.Gotype.Name).IsNil() {
+		base.Fatalf("Go type symbol %s for %s was not included in LLVM data closure", s.Gotype.Name, s.Name)
+	}
+	g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.gotype"), GlobalCtxt.MDNode([]llvm.Metadata{
+		GlobalCtxt.MDString(s.Gotype.Name),
+	}))
 }
 
 // Interface dead-method elimination uses zero-width marker relocations on the
