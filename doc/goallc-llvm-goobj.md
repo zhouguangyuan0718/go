@@ -82,6 +82,8 @@ interface type switch 对 concrete cases 使用动态 type hash/type pointer 比
 interface case 使用 compiler 生成的 `internal/abi.InterfaceSwitch` descriptor、
 atomic cache probe 和 `runtime.interfaceSwitch` fallback。descriptor 作为带
 `AuxGotype` 的可写 data root 进入同一 LSym-to-LLVM data closure。
+两个非 nil interface 的 equality 分别保留 `runtime.efaceeq` 或
+`runtime.ifaceeq` ABIInternal call，以动态 type/itab 和 data words 完成比较。
 
 这类可写 descriptor 还要求 GoObj symbol 的精确大小、对齐和 `AuxGotype`。
 LLVM GoObj writer 从 global layout 写入 symbol size/alignment，排除 section

@@ -9,6 +9,7 @@
       "codegen/interface.go": "static multi-method itabs, interface conversions and indirect method calls",
       "codegen/interface_conversion.go": "dynamic interface-to-interface conversion cache and runtime fallback",
       "codegen/interface_assertion.go": "comma-ok and panic-form concrete and non-empty interface assertions",
+      "codegen/interface_equality.go": "empty and non-empty interface equality through runtime comparators",
       "codegen/interface_switch.go": "concrete and interface type-switch cases with static interface-switch cache"
     },
     "blacklist": {
@@ -25,6 +26,7 @@
       "llvm_interface.go": "static multi-method itab, interface conversion, indirect calls, GoObj link, and execution",
       "llvm_interface_conversion.go": "dynamic interface-to-interface conversion cache, runtime fallback, nil conversion, and execution",
       "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
+      "llvm_interface_equality.go": "empty and non-empty interface equality for matching and differing dynamic values",
       "llvm_interface_switch.go": "nil, concrete, interface, and default type-switch cases with execution"
     },
     "blacklist": {
