@@ -6,6 +6,16 @@
 
 package codegen
 
+// LLVM-DAG: ret i64 -1
+func llvmNegativeConstant() int {
+	return -1
+}
+
+// LLVM-DAG: ret i32 -1
+func llvmNegativeInt32Constant() int32 {
+	return -1
+}
+
 // LLVM-DAG: define goabiinternal i64 @codegen.andWithUse
 // LLVM-DAG: and i64
 // LLVM-DAG: or i64

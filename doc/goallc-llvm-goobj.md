@@ -74,7 +74,14 @@ nil 分支和 ABIInternal runtime call；cache miss 与随后命中的 fast path
 runtime 测试覆盖。empty interface 到 concrete type 的 comma-ok assertion
 直接比较动态 type word 并按 SSA 结果形状取回 data；empty interface 到
 non-empty interface 的 comma-ok assertion 复用同一 TypeAssert cache/fallback，
-并覆盖成功、类型不匹配和 nil 输入。
+并覆盖成功、类型不匹配和 nil 输入。panic-form assertion 沿用相同 fast path，
+失败边分别调用 `runtime.panicdottypeE`、`runtime.panicdottypeI` 或
+`runtime.panicnildottype`。
+
+interface type switch 对 concrete cases 使用动态 type hash/type pointer 比较；
+interface case 使用 compiler 生成的 `internal/abi.InterfaceSwitch` descriptor、
+atomic cache probe 和 `runtime.interfaceSwitch` fallback。descriptor 作为带
+`AuxGotype` 的可写 data root 进入同一 LSym-to-LLVM data closure。
 
 这类可写 descriptor 还要求 GoObj symbol 的精确大小、对齐和 `AuxGotype`。
 LLVM GoObj writer 从 global layout 写入 symbol size/alignment，排除 section
@@ -257,12 +264,12 @@ go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
 
 - 当前 target triple 仅配置了 `darwin/arm64` 和 `linux/amd64`。
 - LLVM SSA lowering 仍不完整；复杂 SSA op、GC pointer liveness、defer/panic、
-  closure、interface type switch、完整 ABI/DWARF 等尚未达到通用正确性。
+  closure、完整 ABI/DWARF 等尚未达到通用正确性。
 - 当前 interface 范围包括 compiler 能静态生成 itab 的 concrete-to-interface
   conversion、对应的 ABIInternal 间接方法调用，以及 non-empty
   interface-to-interface conversion；empty-interface 到 concrete/non-empty
-  interface 的 comma-ok assertion 也已覆盖。panic-form assertion 和 interface
-  type switch 不在本阶段范围内。
+  interface 的 comma-ok/panic-form assertion，以及包含 concrete/interface cases
+  的 type switch 也已覆盖。
 - 每个经 LLVM 替换的 package 都必须由 `llc` 生成完整的 `_go_.o`，不能与
   原生 compiler object 混合。
 - `!goobj.config` 是这条开发链路的稳定交接点。新增 header 配置时应新增独立

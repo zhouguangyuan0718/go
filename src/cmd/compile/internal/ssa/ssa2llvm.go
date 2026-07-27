@@ -123,6 +123,15 @@ func (lfc *LLVMFuncContext) llvmCondition(v llvm.Value, name string) llvm.Value 
 	return lfc.b.CreateICmp(llvm.IntNE, v, zero, name)
 }
 
+func llvmConstInt(t *types.Type, value int64) llvm.Value {
+	bits := uint64(t.Size() * 8)
+	raw := uint64(value)
+	if bits < 64 {
+		raw &= uint64(1)<<bits - 1
+	}
+	return llvm.ConstInt(getLLVMType(t), raw, false)
+}
+
 func (lfc *LLVMFuncContext) pointerComparisonOperands(v *Value) (llvm.Value, llvm.Value) {
 	return lfc.normalizePointerComparisonOperands(v, lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]))
 }
@@ -368,6 +377,15 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	if lv, ok := lfc.Vs[v.ID]; ok {
 		return lv
 	}
+	savedBlock := lfc.b.GetInsertBlock()
+	if v.Block != nil {
+		lfc.b.SetInsertPointAtEnd(lfc.BBs[v.Block.ID])
+	}
+	defer func() {
+		if !savedBlock.IsNil() {
+			lfc.b.SetInsertPointAtEnd(savedBlock)
+		}
+	}()
 	var lVal llvm.Value
 	arg0 := func() llvm.Value { return lfc.GenLV(v.Args[0]) }
 	arg1 := func() llvm.Value { return lfc.GenLV(v.Args[1]) }
@@ -376,8 +394,11 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		// LLVM models memory ordering through instruction dependencies, not an
 		// explicit SSA memory value. SP/SB are only address-space tokens here.
 	case OpUnknown:
-		if !v.Type.IsMemory() {
-			v.Fatalf("non-memory Unknown value in LLVM lowering: %s", v.LongString())
+		// SSA construction leaves Unknown values only in dead code. Preserve
+		// their "value does not matter" semantics as LLVM undef; live Go
+		// values are resolved before this point.
+		if !v.Type.IsMemory() && v.Type != types.TypeInvalid {
+			lVal = llvm.Undef(getLLVMType(v.Type))
 		}
 	case OpVarDef, OpVarLive:
 		lVal = arg0()
@@ -406,7 +427,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.paramForArg(v)
 		lVal.SetName(v.Aux.(*ir.Name).Sym().Name)
 	case OpConst8, OpConst16, OpConst32, OpConst64:
-		lVal = llvm.ConstInt(getLLVMType(v.Type), uint64(auxIntToInt64(v.AuxInt)), v.Type.IsSigned())
+		// AuxInt already carries the two's-complement bit pattern. Asking LLVM
+		// to sign-extend the uint64 representation of a negative value makes
+		// APInt reject it as an out-of-range signed host integer. Masking to
+		// the SSA type width also avoids presenting a sign-extended host value
+		// as an out-of-range unsigned i8/i16/i32.
+		lVal = llvmConstInt(v.Type, auxIntToInt64(v.AuxInt))
 	case OpConstBool:
 		lVal = llvm.ConstInt(getLLVMType(v.Type), uint64(v.AuxInt), false)
 	case OpConst32F:
@@ -553,7 +579,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			v.Fatalf("%s changes LLVM representation", v.Op)
 		}
 	case OpOffPtr:
-		off := llvm.ConstInt(getLLVMType(types.Types[types.TINT]), uint64(auxIntToInt64(v.AuxInt)), true)
+		off := llvmConstInt(types.Types[types.TINT], auxIntToInt64(v.AuxInt))
 		lVal = lfc.b.CreateGEP(GlobalCtxt.Int8Type(), arg0(), []llvm.Value{off}, v.String())
 	case OpAddPtr:
 		lVal = lfc.b.CreateGEP(GlobalCtxt.Int8Type(), arg0(), []llvm.Value{arg1()}, v.String())

@@ -37,3 +37,15 @@ func assertLLVMInterface(v any) (llvmAssertionInterface, bool) {
 	x, ok := v.(llvmAssertionInterface)
 	return x, ok
 }
+
+// LLVM-DAG: call goabiinternal void @runtime.panicdottypeE(
+// LLVM-DAG: call goabiinternal void @runtime.panicnildottype(
+// LLVM-DAG: declare goabiinternal void @runtime.panicdottypeE(ptr, ptr, ptr)
+// LLVM-DAG: declare goabiinternal void @runtime.panicnildottype(ptr)
+func mustLLVMConcrete(v any) llvmAssertionValue {
+	return v.(llvmAssertionValue)
+}
+
+func mustLLVMInterface(v any) llvmAssertionInterface {
+	return v.(llvmAssertionInterface)
+}

@@ -8,7 +8,8 @@
       "codegen/type_descriptor_methods.go": "uncommon type data, concrete method tables, wrappers, and R_METHODOFF",
       "codegen/interface.go": "static multi-method itabs, interface conversions and indirect method calls",
       "codegen/interface_conversion.go": "dynamic interface-to-interface conversion cache and runtime fallback",
-      "codegen/interface_assertion.go": "concrete and non-empty interface assertions with comma-ok results"
+      "codegen/interface_assertion.go": "comma-ok and panic-form concrete and non-empty interface assertions",
+      "codegen/interface_switch.go": "concrete and interface type-switch cases with static interface-switch cache"
     },
     "blacklist": {
       "codegen/*": "LLVM lowering support has not reached this complete source file yet"
@@ -23,7 +24,8 @@
       "llvm_type_descriptor_methods.go": "uncommon concrete methods, method wrappers, direct calls, GoObj link, and execution",
       "llvm_interface.go": "static multi-method itab, interface conversion, indirect calls, GoObj link, and execution",
       "llvm_interface_conversion.go": "dynamic interface-to-interface conversion cache, runtime fallback, nil conversion, and execution",
-      "llvm_interface_assertion.go": "concrete and non-empty interface assertions, cache fallback, mismatch, nil, and execution"
+      "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
+      "llvm_interface_switch.go": "nil, concrete, interface, and default type-switch cases with execution"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"

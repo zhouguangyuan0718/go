@@ -27,6 +27,14 @@ func assertLLVMInterface(v any) (llvmAssertionInterface, bool) {
 	return x, ok
 }
 
+func mustLLVMConcrete(v any) llvmAssertionValue {
+	return v.(llvmAssertionValue)
+}
+
+func mustLLVMInterface(v any) llvmAssertionInterface {
+	return v.(llvmAssertionInterface)
+}
+
 func main() {
 	var v any = llvmAssertionValue(10)
 	x, ok := assertLLVMConcrete(v)
@@ -40,4 +48,7 @@ func main() {
 
 	i, ok = assertLLVMInterface(nil)
 	println(i == nil, ok)
+
+	println(int(mustLLVMConcrete(v)))
+	println(mustLLVMInterface(v).Value(4))
 }
