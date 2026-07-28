@@ -56,9 +56,10 @@ object。
 
 静态 interface conversion 还会把带有 `ItabInfo` 的 roots 纳入同一数据闭包。
 itab 使用 `%go.runtime.ITab` 和按实际方法数扩展的 packed LLVM struct 表达；
-固定的 `Fun[0]` 后面按 LSym 的最终大小追加 `uintptr` 数组，因此单方法和多方法
-itab 都保持 runtime ABI 的连续方法表布局。方法入口仍保留 weak `R_ADDR`
-relocation。interface 方法调用从 itab 槽加载入口，转成 LLVM function pointer，
+固定的 `Fun[0]` 后面按 LSym 的最终大小追加 `ptr` 数组。`ptr` 与 runtime
+`uintptr` 具有相同大小和对齐，因此单方法和多方法 itab 仍保持连续的 ABI
+布局，同时 LLVM 能保留静态方法入口的 function-pointer 语义。方法入口仍保留
+weak `R_ADDR` relocation。interface 方法调用从 itab 槽直接加载 LLVM pointer，
 并以原 SSA `AuxCall` 的 ABIInternal signature 发出 indirect call。
 
 Go linker 的 dead-method elimination 还依赖函数上的零宽度

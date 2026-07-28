@@ -17,6 +17,7 @@ type LLVMFuncContext struct {
 	BBs         map[ID]llvm.BasicBlock
 	Vs          map[ID]llvm.Value
 	Locals      map[llvmLocalKey]llvm.Value
+	ItabMethods map[ID]bool
 	F           *Func
 	LF          llvm.Value
 	b           llvm.Builder
@@ -652,7 +653,13 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			lVal = lfc.b.CreatePHI(getLLVMType(v.Type), v.String())
 		}
 	case OpLoad:
-		lVal = lfc.b.CreateLoad(getLLVMType(v.Type), arg0(), v.String())
+		typ := getLLVMType(v.Type)
+		if lfc.ItabMethods[v.ID] {
+			// Native SSA uses uintptr for an itab method slot. Preserve its
+			// pointer-sized storage but expose the callable pointer to LLVM.
+			typ = GlobalCtxt.PointerType(0)
+		}
+		lVal = lfc.b.CreateLoad(typ, arg0(), v.String())
 	case OpAtomicLoadPtr:
 		lVal = lfc.b.CreateLoad(GlobalCtxt.PointerType(0), arg0(), v.String())
 		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
@@ -748,6 +755,7 @@ func LLVMCompile(f *Func) {
 		BBs:         map[ID]llvm.BasicBlock{},
 		Vs:          map[ID]llvm.Value{},
 		Locals:      map[llvmLocalKey]llvm.Value{},
+		ItabMethods: map[ID]bool{},
 		F:           f,
 		b:           GlobalCtxt.NewBuilder(),
 		ReturnType:  sig.ReturnType,
@@ -762,6 +770,14 @@ func LLVMCompile(f *Func) {
 	setGoObjFunctionRelocMetadata(FCtxt.LF, f.OwnAux.Fn)
 	for _, BB := range f.Blocks {
 		FCtxt.BBs[BB.ID] = GlobalCtxt.AddBasicBlock(FCtxt.LF, BB.String())
+		for _, v := range BB.Values {
+			if (v.Op == OpInterCall || v.Op == OpInterLECall) && len(v.Args) != 0 {
+				code := v.Args[0]
+				if code.Op == OpLoad && code.Type.IsUintptr() && code.Uses == 1 {
+					FCtxt.ItabMethods[code.ID] = true
+				}
+			}
+		}
 	}
 	// LLVM requires all phi nodes to precede non-phi instructions in a
 	// block. Predeclare them before recursive value emission can insert any

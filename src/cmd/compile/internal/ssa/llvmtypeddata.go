@@ -109,7 +109,7 @@ func llvmItabParts(s *obj.LSym) []llvmDescriptorPart {
 	if tail := (size - fixed) / int64(types.PtrSize); tail != 0 {
 		parts = append(parts, llvmDescriptorPart{
 			off:        fixed,
-			arrayElem:  types.Types[types.TUINTPTR],
+			arrayElem:  types.Types[types.TUNSAFEPTR],
 			arrayCount: tail,
 		})
 	}
@@ -332,7 +332,11 @@ func (l *llvmDataLowerer) goStructElementTypes(t *types.Type) []llvm.Type {
 		if f.Offset > off {
 			fields = append(fields, llvm.ArrayType(GlobalCtxt.Int8Type(), int(f.Offset-off)))
 		}
-		fields = append(fields, l.goType(f.Type))
+		if llvmItabFunField(t, f) {
+			fields = append(fields, llvm.ArrayType(GlobalCtxt.PointerType(0), int(f.Type.NumElem())))
+		} else {
+			fields = append(fields, l.goType(f.Type))
+		}
 		off = f.Offset + f.Type.Size()
 	}
 	if off < t.Size() {
@@ -363,7 +367,15 @@ func (l *llvmDataLowerer) goValue(s *obj.LSym, t *types.Type, off int64, globals
 		pos := off
 		for _, f := range t.Fields() {
 			values = append(values, llvmDataRangeFields(s, pos, off+f.Offset, globals, l.data)...)
-			values = append(values, l.goValue(s, f.Type, off+f.Offset, globals))
+			if llvmItabFunField(t, f) {
+				fun := make([]llvm.Value, f.Type.NumElem())
+				for i := range fun {
+					fun[i] = l.goValue(s, types.Types[types.TUNSAFEPTR], off+f.Offset+int64(i*types.PtrSize), globals)
+				}
+				values = append(values, llvm.ConstArray(GlobalCtxt.PointerType(0), fun))
+			} else {
+				values = append(values, l.goValue(s, f.Type, off+f.Offset, globals))
+			}
 			pos = off + f.Offset + f.Type.Size()
 		}
 		values = append(values, llvmDataRangeFields(s, pos, off+t.Size(), globals, l.data)...)
@@ -401,6 +413,10 @@ func (l *llvmDataLowerer) goValue(s *obj.LSym, t *types.Type, off int64, globals
 		base.Fatalf("unsupported runtime descriptor constant type %s", t)
 		return llvm.Value{}
 	}
+}
+
+func llvmItabFunField(t *types.Type, f *types.Field) bool {
+	return t == rttype.ITab && f.Sym != nil && f.Sym.Name == "Fun"
 }
 
 func llvmCoerceDataReloc(value llvm.Value, want llvm.Type, s *obj.LSym, off int64) llvm.Value {

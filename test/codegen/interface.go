@@ -6,22 +6,22 @@
 
 package codegen
 
-// LLVM-DAG: %go.runtime.ITab = type <{ ptr, ptr, i32, [4 x i8], [1 x i64] }>
-// LLVM-DAG: %go.itab.codegen.llvmInterfaceValue_codegen.llvmInterface = type <{ %go.runtime.ITab, [1 x i64] }>
+// LLVM-DAG: %go.runtime.ITab = type <{ ptr, ptr, i32, [4 x i8], [1 x ptr] }>
+// LLVM-DAG: %go.itab.codegen.llvmInterfaceValue_codegen.llvmInterface = type <{ %go.runtime.ITab, [1 x ptr] }>
 // LLVM-DAG: @"go:itab.codegen.llvmInterfaceValue,codegen.llvmInterface" = constant %go.itab.codegen.llvmInterfaceValue_codegen.llvmInterface
-// LLVM-DAG: ptrtoint (ptr @"codegen.(*llvmInterfaceValue).Double" to i64)
-// LLVM-DAG: ptrtoint (ptr @"codegen.(*llvmInterfaceValue).Value" to i64)
+// LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Double"
+// LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Value"
 // LLVM-DAG: !goobj.symbol.flags
 // LLVM-DAG: !goobj.relocs
 // LLVM-LABEL: define goabiinternal i64 @codegen.useLLVMInterface(
 // LLVM-SAME: !goobj.marker_relocs
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmInterface.Value(
-// LLVM: inttoptr i64
+// LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %
 // LLVM-SAME: (ptr
 // LLVM-SAME: i64
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmInterface.Double(
-// LLVM: inttoptr i64
+// LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %
 // LLVM-SAME: (ptr
 // LLVM: !{i32 23, i64 0, !"type:codegen.llvmInterfaceValue"}
