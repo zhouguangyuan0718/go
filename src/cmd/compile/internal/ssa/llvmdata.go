@@ -97,7 +97,7 @@ func LowerGoObjTypeData() {
 		g := globals[s]
 		g.SetInitializer(lowerer.dataInitializer(s, globals))
 		setGoObjDataFlags(g, s)
-		setGoObjRelocMetadata(g, s)
+		setGoObjWeakRelocMetadata(g, s)
 		setGoObjKeepMetadata(g, s)
 		setGoObjGotypeMetadata(g, s)
 	}
@@ -345,25 +345,17 @@ func setGoObjDataFlags(g llvm.Value, s *obj.LSym) {
 	}))
 }
 
-func setGoObjRelocMetadata(g llvm.Value, s *obj.LSym) {
-	entries := make([]llvm.Metadata, 0, len(s.R))
+func setGoObjWeakRelocMetadata(g llvm.Value, s *obj.LSym) {
+	entries := make([]llvm.Metadata, 0)
 	for _, r := range s.R {
 		switch r.Type {
-		case objabi.R_ADDR:
-			// An ordinary address relocation is already represented exactly
-			// by the pointer-valued LLVM initializer (including its target and
-			// addend). Let LLVM lower it to the native MC relocation instead of
-			// duplicating the same information in GoObj metadata.
-			continue
-		case objabi.R_WEAKADDR, objabi.R_ADDROFF, objabi.R_WEAKADDROFF, objabi.R_METHODOFF:
-			// Weakness is a property of this relocation rather than the target
-			// symbol, and LLVM IR cannot in general distinguish the Go linker
-			// offset relocation kinds. Preserve only those residual semantics
-			// as an offset-keyed GoObj override.
-			entries = append(entries, GlobalCtxt.MDNode([]llvm.Metadata{
-				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(r.Off), false).ConstantAsMetadata(),
-				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(uint16(r.Type)), false).ConstantAsMetadata(),
-			}))
+		case objabi.R_WEAKADDR, objabi.R_WEAKADDROFF:
+			entries = append(entries,
+				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(r.Off), false).ConstantAsMetadata())
+		case objabi.R_ADDR, objabi.R_ADDROFF, objabi.R_METHODOFF:
+			// LLVM constants carry the offset, size, target, and addend. The
+			// GoObj writer derives the strong relocation kind from those
+			// semantics and the containing descriptor's GoType flag.
 		case objabi.R_KEEP:
 			continue
 		default:
@@ -371,12 +363,12 @@ func setGoObjRelocMetadata(g llvm.Value, s *obj.LSym) {
 		}
 	}
 	if len(entries) != 0 {
-		g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.relocs"), GlobalCtxt.MDNode(entries))
+		g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.weak_relocs"), GlobalCtxt.MDNode(entries))
 	}
 }
 
 // R_KEEP is a zero-width linker reachability edge, not a storage relocation.
-// Keep it separate from !goobj.relocs so llc can synthesize the GoObj record
+// Keep it separate from !goobj.weak_relocs so llc can synthesize the GoObj record
 // without inventing bytes or a target-address expression in the global.
 func setGoObjKeepMetadata(g llvm.Value, s *obj.LSym) {
 	for _, r := range s.R {
