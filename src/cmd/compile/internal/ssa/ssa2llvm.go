@@ -14,15 +14,17 @@ import (
 )
 
 type LLVMFuncContext struct {
-	BBs         map[ID]llvm.BasicBlock
-	Vs          map[ID]llvm.Value
-	Locals      map[llvmLocalKey]llvm.Value
-	ItabMethods map[ID]bool
-	F           *Func
-	LF          llvm.Value
-	b           llvm.Builder
-	ReturnType  llvm.Type
-	ResultCount int
+	BBs              map[ID]llvm.BasicBlock
+	Vs               map[ID]llvm.Value
+	Locals           map[llvmLocalKey]llvmStackSlot
+	ItabMethods      map[ID]bool
+	ClosureCodeLoads map[ID]bool
+	F                *Func
+	LF               llvm.Value
+	ClosureContext   llvm.Value
+	b                llvm.Builder
+	ReturnType       llvm.Type
+	ResultCount      int
 }
 
 // SSA may clone an ir.Name while retaining the same logical source
@@ -34,6 +36,11 @@ type llvmLocalKey struct {
 	Pos src.XPos
 }
 
+type llvmStackSlot struct {
+	Value llvm.Value
+	Type  *types.Type
+}
+
 // LLVM's GoABIInternal calling convention has numeric ID 22. Keep the
 // prototype lowering on the Go register ABI so llc emits GoObj symbols that
 // the standard Go linker can call directly.
@@ -42,9 +49,11 @@ const goABI0CallConv llvm.CallConv = 23
 const goResultsTupleAttr = "go_results_tuple"
 
 type llvmFuncSignature struct {
-	Type        llvm.Type
-	ReturnType  llvm.Type
-	ResultCount int
+	Type                llvm.Type
+	ReturnType          llvm.Type
+	ResultCount         int
+	HasClosureContext   bool
+	ClosureContextIndex int
 }
 
 func llvmCallConv(which obj.ABI) llvm.CallConv {
@@ -84,10 +93,28 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 		ret = llvm.StructType(results, false)
 	}
 	return llvmFuncSignature{
-		Type:        llvm.FunctionType(ret, params, false),
-		ReturnType:  ret,
-		ResultCount: len(results),
+		Type:                llvm.FunctionType(ret, params, false),
+		ReturnType:          ret,
+		ResultCount:         len(results),
+		ClosureContextIndex: -1,
 	}
+}
+
+func (sig llvmFuncSignature) withClosureContext() llvmFuncSignature {
+	params := append([]llvm.Type(nil), sig.Type.ParamTypes()...)
+	sig.ClosureContextIndex = len(params)
+	sig.HasClosureContext = true
+	params = append(params, GlobalCtxt.PointerType(0))
+	sig.Type = llvm.FunctionType(sig.ReturnType, params, false)
+	return sig
+}
+
+func llvmNestAttribute() llvm.Attribute {
+	kind := llvm.AttributeKindID("nest")
+	if kind == 0 {
+		base.Fatalf("LLVM does not provide the nest parameter attribute")
+	}
+	return GlobalCtxt.CreateEnumAttribute(kind, 0)
 }
 
 func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallConv) {
@@ -95,14 +122,37 @@ func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallCon
 	if sig.ResultCount > 1 {
 		fn.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goResultsTupleAttr, ""))
 	}
+	if sig.HasClosureContext {
+		// LLVM parameter attribute indexes are one-based. The closure context
+		// is deliberately excluded from the Go ABI argument layout by the
+		// target and carried in REGCTXT (RDX on amd64, X26 on arm64).
+		fn.AddAttributeAtIndex(sig.ClosureContextIndex+1, llvmNestAttribute())
+	}
 }
 
 func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallConv) llvm.Value {
 	fn := CurrentModule.NamedFunction(name)
 	if fn.IsNil() {
-		fn = llvm.AddFunction(CurrentModule, name, sig.Type)
+		fn = llvm.AddFunction(CurrentModule, name+".goallc.final", sig.Type)
+		if placeholder := CurrentModule.NamedGlobal(name); !placeholder.IsNil() {
+			// An OpAddr may have needed the code address before this function
+			// reached the compile queue. Opaque pointers let the provisional
+			// global be replaced by the correctly typed function definition.
+			placeholder.ReplaceAllUsesWith(fn)
+			placeholder.EraseFromParentAsGlobal()
+		}
+		fn.SetName(name)
 	} else if got := fn.GlobalValueType(); got != sig.Type {
-		base.Fatalf("conflicting LLVM function type for %s", name)
+		if fn.BasicBlocksCount() != 0 {
+			base.Fatalf("conflicting LLVM function type for definition %s", name)
+		}
+		// Compiler data can refer to an ABI function before AuxCall exposes
+		// its exact signature. Replace that provisional declaration now.
+		replacement := llvm.AddFunction(CurrentModule, name+".goallc.final", sig.Type)
+		fn.ReplaceAllUsesWith(replacement)
+		fn.EraseFromParentAsFunction()
+		replacement.SetName(name)
+		fn = replacement
 	}
 	configureLLVMFunction(fn, sig, cc)
 	return fn
@@ -305,7 +355,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	return call
 }
 
-func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int) llvm.Value {
+func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext bool) llvm.Value {
 	aux := auxToCall(v.Aux)
 	if aux == nil {
 		v.Fatalf("indirect call has no ABI information")
@@ -315,10 +365,22 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int) llvm.Value {
 	}
 
 	sig := llvmSignature(aux)
+	if closureContext {
+		if argStart != 2 {
+			v.Fatalf("closure call has invalid argument start %d", argStart)
+		}
+		if aux.ABI().Which() != obj.ABIInternal {
+			v.Fatalf("closure call uses unsupported ABI %v", aux.ABI().Which())
+		}
+		sig = sig.withClosureContext()
+	}
 	cc := llvmCallConv(aux.ABI().Which())
 	code := lfc.GenLV(v.Args[0])
 	if code.Type().TypeKind() == llvm.IntegerTypeKind {
 		code = lfc.b.CreateIntToPtr(code, GlobalCtxt.PointerType(0), v.String()+".code")
+	}
+	if code.Type().TypeKind() != llvm.PointerTypeKind {
+		v.Fatalf("indirect callee has non-pointer LLVM type")
 	}
 	args := make([]llvm.Value, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
@@ -328,13 +390,51 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int) llvm.Value {
 		}
 		args = append(args, arg)
 	}
+	if closureContext {
+		context := lfc.GenLV(v.Args[1])
+		if context.Type().TypeKind() != llvm.PointerTypeKind {
+			v.Fatalf("closure context has non-pointer LLVM type")
+		}
+		args = append(args, context)
+	}
 	name := v.String()
 	if sig.ResultCount == 0 {
 		name = ""
 	}
 	call := lfc.b.CreateCall(sig.Type, code, args, name)
 	call.SetInstructionCallConv(cc)
+	if closureContext {
+		call.AddCallSiteAttribute(sig.ClosureContextIndex+1, llvmNestAttribute())
+	}
 	return call
+}
+
+func llvmFunctionUsesClosureContext(f *Func) bool {
+	usesContext := false
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpGetClosurePtr {
+				usesContext = true
+			}
+		}
+	}
+	needContext := f.OwnAux.Fn.NeedCtxt()
+	if usesContext != needContext {
+		f.fe.Fatalf(f.Entry.Pos, "closure context mismatch for %s: NEEDCTXT=%t, OpGetClosurePtr=%t", f.Name, needContext, usesContext)
+	}
+	if needContext && f.OwnAux.ABI().Which() != obj.ABIInternal {
+		f.fe.Fatalf(f.Entry.Pos, "closure context on unsupported ABI %v for %s", f.OwnAux.ABI().Which(), f.Name)
+	}
+	return needContext
+}
+
+func llvmLocalName(v *Value) (*ir.Name, llvmLocalKey) {
+	sym := auxToSym(v.Aux)
+	name, ok := sym.(*ir.Name)
+	if !ok {
+		v.Fatalf("local address has no stack symbol")
+	}
+	return name, llvmLocalKey{Sym: name.Sym(), Pos: name.Pos()}
 }
 
 var llvmBoundsPanicNames = [...]string{
@@ -406,18 +506,17 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpKeepAlive:
 		lVal = arg1()
 	case OpLocalAddr:
-		sym := auxToSym(v.Aux)
-		name, ok := sym.(*ir.Name)
+		_, key := llvmLocalName(v)
+		slot, ok := lfc.Locals[key]
 		if !ok {
-			v.Fatalf("local address has no stack symbol")
+			v.Fatalf("local stack slot was not preallocated in the entry block")
 		}
-		key := llvmLocalKey{Sym: name.Sym(), Pos: name.Pos()}
-		if slot, ok := lfc.Locals[key]; ok {
-			lVal = slot
-		} else {
-			lVal = lfc.b.CreateAlloca(getLLVMType(name.Type()), v.String())
-			lfc.Locals[key] = lVal
+		lVal = slot.Value
+	case OpGetClosurePtr:
+		if lfc.ClosureContext.IsNil() {
+			v.Fatalf("closure context requested by a function without a closure ABI parameter")
 		}
+		lVal = lfc.ClosureContext
 	case OpAddr:
 		sym, ok := v.Aux.(*obj.LSym)
 		if !ok {
@@ -591,10 +690,15 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateGEP(getLLVMType(v.Type.Elem()), arg0(), []llvm.Value{arg1()}, v.String())
 	case OpStaticCall, OpStaticLECall:
 		lVal = lfc.staticCall(v)
+	case OpClosureCall, OpClosureLECall:
+		// arg0 is the code pointer loaded from the funcval, arg1 is the
+		// funcval itself. The latter is a hidden REGCTXT input, not an
+		// ordinary Go ABI argument.
+		lVal = lfc.indirectCall(v, 2, true)
 	case OpInterCall, OpInterLECall:
 		// arg0 is the code pointer loaded from the itab. Interface method
 		// ABIs receive the interface data word as their first real argument.
-		lVal = lfc.indirectCall(v, 1)
+		lVal = lfc.indirectCall(v, 1, false)
 	case OpPanicBounds:
 		lVal = lfc.panicBounds(v)
 	case OpSelect0, OpSelect1:
@@ -616,7 +720,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		sel := int(auxIntToInt64(v.AuxInt))
 		src := v.Args[0]
 		switch src.Op {
-		case OpStaticCall, OpStaticLECall, OpInterCall, OpInterLECall:
+		case OpStaticCall, OpStaticLECall, OpClosureCall, OpClosureLECall, OpInterCall, OpInterLECall:
 			aux := auxToCall(src.Aux)
 			call := lfc.GenLV(src)
 			switch {
@@ -654,10 +758,18 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 	case OpLoad:
 		typ := getLLVMType(v.Type)
-		if lfc.ItabMethods[v.ID] {
+		if lfc.ItabMethods[v.ID] || lfc.ClosureCodeLoads[v.ID] {
 			// Native SSA uses uintptr for an itab method slot. Preserve its
 			// pointer-sized storage but expose the callable pointer to LLVM.
 			typ = GlobalCtxt.PointerType(0)
+		}
+		if lfc.ClosureCodeLoads[v.ID] {
+			// Loading the code word from a nil func value must fault before
+			// the indirect call. A normal LLVM load from null is immediate
+			// undefined behavior, so retain the Go nil-check side effect.
+			check := lfc.b.CreateLoad(GlobalCtxt.Int8Type(), arg0(), v.String()+".nilcheck")
+			check.SetVolatile(true)
+			check.SetAlignment(1)
 		}
 		lVal = lfc.b.CreateLoad(typ, arg0(), v.String())
 	case OpAtomicLoadPtr:
@@ -750,16 +862,20 @@ func LLVMCompile(f *Func) {
 		f.fe.Fatalf(f.Entry.Pos, "missing function ABI information in LLVM lowering for %s", f.Name)
 	}
 	sig := llvmSignature(f.OwnAux)
+	if llvmFunctionUsesClosureContext(f) {
+		sig = sig.withClosureContext()
+	}
 	cc := llvmCallConv(f.OwnAux.ABI().Which())
 	FCtxt := &LLVMFuncContext{
-		BBs:         map[ID]llvm.BasicBlock{},
-		Vs:          map[ID]llvm.Value{},
-		Locals:      map[llvmLocalKey]llvm.Value{},
-		ItabMethods: map[ID]bool{},
-		F:           f,
-		b:           GlobalCtxt.NewBuilder(),
-		ReturnType:  sig.ReturnType,
-		ResultCount: sig.ResultCount,
+		BBs:              map[ID]llvm.BasicBlock{},
+		Vs:               map[ID]llvm.Value{},
+		Locals:           map[llvmLocalKey]llvmStackSlot{},
+		ItabMethods:      map[ID]bool{},
+		ClosureCodeLoads: map[ID]bool{},
+		F:                f,
+		b:                GlobalCtxt.NewBuilder(),
+		ReturnType:       sig.ReturnType,
+		ResultCount:      sig.ResultCount,
 	}
 	defer FCtxt.b.Dispose()
 
@@ -768,6 +884,10 @@ func LLVMCompile(f *Func) {
 		f.fe.Fatalf(f.Entry.Pos, "duplicate LLVM definition for %s", f.OwnAux.Fn.Name)
 	}
 	setGoObjFunctionRelocMetadata(FCtxt.LF, f.OwnAux.Fn)
+	if sig.HasClosureContext {
+		FCtxt.ClosureContext = FCtxt.LF.Param(sig.ClosureContextIndex)
+		FCtxt.ClosureContext.SetName(".closureptr")
+	}
 	for _, BB := range f.Blocks {
 		FCtxt.BBs[BB.ID] = GlobalCtxt.AddBasicBlock(FCtxt.LF, BB.String())
 		for _, v := range BB.Values {
@@ -777,6 +897,43 @@ func LLVMCompile(f *Func) {
 					FCtxt.ItabMethods[code.ID] = true
 				}
 			}
+			if (v.Op == OpClosureCall || v.Op == OpClosureLECall) && len(v.Args) >= 2 {
+				code := v.Args[0]
+				if code.Op != OpLoad || !code.Type.IsUintptr() || code.Uses != 1 {
+					v.Fatalf("closure call code pointer is not a single-use uintptr load")
+				}
+				if len(code.Args) == 0 || code.Args[0] != v.Args[1] {
+					v.Fatalf("closure call code pointer was not loaded from its funcval context")
+				}
+				FCtxt.ClosureCodeLoads[code.ID] = true
+			} else if v.Op == OpClosureCall || v.Op == OpClosureLECall {
+				v.Fatalf("closure call has %d SSA arguments, want at least code, context, and memory", len(v.Args))
+			}
+		}
+	}
+	// LLVM only treats a constant-sized alloca as a fixed frame object when
+	// it is in the entry block. Preallocate every Go stack slot before phi or
+	// ordinary instruction emission so LocalAddr values in loops and branches
+	// cannot become dynamic allocas (which Go stack growth cannot support).
+	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
+	for _, BB := range f.Blocks {
+		for _, v := range BB.Values {
+			if v.Op != OpLocalAddr {
+				continue
+			}
+			name, key := llvmLocalName(v)
+			if slot, ok := FCtxt.Locals[key]; ok {
+				if !types.Identical(slot.Type, name.Type()) {
+					v.Fatalf("conflicting Go types for local stack slot %v", name)
+				}
+				continue
+			}
+			if name.Type().Alignment() <= 0 {
+				v.Fatalf("invalid alignment %d for local stack slot %v", name.Type().Alignment(), name)
+			}
+			slot := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), v.String())
+			slot.SetAlignment(int(name.Type().Alignment()))
+			FCtxt.Locals[key] = llvmStackSlot{Value: slot, Type: name.Type()}
 		}
 	}
 	// LLVM requires all phi nodes to precede non-phi instructions in a
