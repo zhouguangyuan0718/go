@@ -116,6 +116,66 @@ LLVM data lowering。type descriptor 中未被当前 schema 覆盖的尾部数�
 data roots，保守地维持 bytes/relocation fallback；新增 schema 或 root 前必须先明确
 其 relocation、GC 和 linker 契约，并为 writer 增加相应的 GoObj regression。
 
+## 闭包调用 ABI
+
+Go SSA 的 `ClosureCall` / `ClosureLECall` 不能按普通 indirect call lowering。
+调用的第一个 SSA operand 是从 funcval 首字加载的 code pointer，第二个 operand
+是 funcval 自身；后者不是普通 Go 参数，而是 ABIInternal 的隐藏 closure context。
+LLVM lowering 在 `AuxCall` 描述的普通参数之后追加一个 `ptr nest` 参数，并在
+call site 和被调函数定义上保持相同签名。GoObj target 把该参数固定放入原生
+REGCTXT：amd64 使用 RDX，arm64 使用 X26，不把它计入普通参数寄存器或栈参数布局。
+
+闭包函数定义必须同时满足 `obj.NEEDCTXT` 和 SSA `OpGetClosurePtr`；两者不一致、
+closure callee/context 类型错误、code pointer 不是从同一 funcval 的单次
+`uintptr` load 获得，或 closure call 使用 ABI0 时，LLVM lowering 都会
+fail-fast。ABI0 的普通 static call 仍使用独立 calling convention，但当前没有
+安全的 ABI0 closure-context 契约。多返回值沿用 `AuxCall` 的 ABI 结果顺序，
+在 LLVM 中以 aggregate return 表达，再由 `OpSelectN` 提取；零结果和单结果不
+虚构 tuple。
+
+nil funcval 调用必须在 indirect call 前产生可恢复的 Go panic。原生 Go backend
+依赖 funcval 首字的机器 load 在零地址 fault；普通 LLVM null load 则允许优化器
+按 undefined behavior 处理。当前 lowering 在真实 code-pointer load 前保留一个
+`load volatile i8` faulting access，以保证 nil-check side effect 不会被删除。
+该实现正确但会为非 nil 闭包增加一次额外 load；后续任务应验证并改为单次
+pointer-sized faulting load，同时补充 nil funcval 的优化前后 IR、汇编和
+`recover` 回归，不能简单删除 fault 语义。
+
+带 closure context 的 GoObj 函数发生 stack growth 时必须调用
+`runtime.morestack`，使 REGCTXT 在 slow path 中保留；普通函数仍调用
+`runtime.morestack_noctxt`。LLVM backend 根据 `nest` 参数选择这两个入口。
+这一规则与调用点的 hidden context lowering 是同一 ABI 契约，不能只修改其中
+一侧。
+
+## 固定栈槽和动态 alloca
+
+每个仍有 use 的 SSA `OpLocalAddr` 在 LLVM entry block 预先建立唯一的固定
+`alloca`。栈槽按源变量身份和位置复用，并使用 Go 类型要求的对齐；循环或分支
+中的 `OpLocalAddr` 只引用该 entry-block 栈槽，不在控制流内部重复分配。没有
+use 的 local 不生成 LLVM 栈槽，避免无意义地增大 frame。
+
+GoObj stack growth、SP 恢复和当前 stack-map 路径只支持编译期固定 frame。
+因此 amd64 和 arm64 GoObj target 对 variable-sized `alloca` 都确定性报错，
+不能把动态栈分配交给 LLVM 通用 lowering。当前 GoObj writer 的 args/locals
+pointer maps 仍为空；本实现只保证现有固定栈槽的 dominance、frame placement
+和 stack-growth 约束，不代表已经支持完整 precise-GC stack maps、goroutine、
+defer 或 panic unwind。
+
+对应回归包括：
+
+- `test/codegen/closure.go`：hidden context、tuple return、重复 funcval 调用和
+  entry-block alloca；
+- `test/llvm_closure.go`：逃逸 funcval、capture、重复调用和递归 stack growth；
+- LLVM `goobj-stack-growth-metadata.ll`：`morestack` 与
+  `morestack_noctxt` 的选择及 REGCTXT 保留；
+- LLVM `goobj-dynamic-alloca.ll`：两个已支持 GoObj target 上的动态 alloca
+  fail-fast。
+
+本阶段验证基线为 41/41 LLVM codegen whitelist 通过，runtime whitelist
+18/20 通过。剩余 `llvm_interface_assertion.go` 和
+`llvm_interface_conversion.go` 失败来自既有 panic/traceback unwind 限制，
+不是 closure ABI、alloca 或 GoObj relocation mismatch。
+
 ## LLVM IR 契约
 
 LLVM IR 本身是 frontend 到 `llc` 的唯一配置载体。`compile` 设置 GoObj
