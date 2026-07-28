@@ -52,11 +52,13 @@ LLVM IR 优先使用原生 linkage 和语义类型交接这些属性：Local 对
 和 itab 的身份由真实的 `type:*` / `go:itab.*` global symbol 表达，避免重复生成
 既长又不提供额外 LLVM 语义的 identified wrapper type。`!goobj.symbol.flags` 只保留 typelink、
 UsedInIface、linkname 以及 Local+DUPOK 重叠等没有等价 LLVM 表示的位。
-普通 `R_ADDR`、`R_ADDROFF` 和 `R_METHODOFF` 都由 LLVM initializer、其中
-`%go.runtime.Method` / `%go.runtime.Imethod` 的结构位置、GoType source flag
-及 target symbol 语义直接推导，不向 metadata 复制同一份信息。具体地，
-concrete method 的 type/ifn/tfn 三个字段生成连续 `R_METHODOFF`，interface
-method 的 type 字段仍是普通 `R_ADDROFF`。
+普通 `R_ADDR` 由 LLVM initializer 和 target symbol 语义直接表达，不向
+metadata 复制同一份信息。`R_ADDROFF` 是 GoObj 的 32 位 section offset；
+`R_METHODOFF` 还额外控制 Go linker 的 dead-method elimination。LLVM 原生
+relocation 均没有这两种对象格式语义，因此用 `!goobj.relocs` 精确标出它们的
+relocation offset 和类型；`R_WEAKADDROFF` 的基础类型同样在该表中标为
+`R_ADDROFF`。这避免让通用 LLVM backend 依赖 GoType flag、target symbol
+命名、`%go.runtime.Method` 的名字或字段布局来猜测 offset relocation。
 `!goobj.weak_relocs` 只记录 LLVM 无法表达的逐 relocation weak 属性。这样 LLVM
 initializer 始终是地址关系的 source of truth，metadata 只承载对象格式特有的
 剩余语义。零宽度的 linker
