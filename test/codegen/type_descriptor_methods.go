@@ -11,7 +11,9 @@ package codegen
 // LLVM-DAG: %go.descriptor._codegen.llvmMethodType = type <{ %go.runtime.PtrType, %go.runtime.UncommonType, [3 x %go.runtime.Method] }>
 // LLVM-DAG: @"type:codegen.llvmMethodType" = constant %go.descriptor.codegen.llvmMethodType
 // LLVM-DAG: @"type:*codegen.llvmMethodType" = constant %go.descriptor._codegen.llvmMethodType
-// LLVM-DAG: !{{[0-9]+}} = !{i32 {{[0-9]+}}, i32 26}
+// LLVM-DAG: i32 ptrtoint (ptr @"codegen.(*llvmMethodType).Pointer" to i32)
+// LLVM-DAG: i32 ptrtoint (ptr @"codegen.(*llvmMethodType).Value" to i32)
+// LLVM-NOT: !goobj.relocs
 
 type llvmMethodType struct {
 	value int

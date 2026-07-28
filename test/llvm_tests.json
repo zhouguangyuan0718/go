@@ -1,8 +1,14 @@
 {
   "codegen": {
     "whitelist": {
+      "codegen/addrcalc.go": "bounds-checked nested array address calculation",
+      "codegen/alloc.go": "zero-sized allocations and slice literals through runtime.zerobase",
       "codegen/divmod.go": "integer division, remainder, overflow handling, and tuple ABI",
       "codegen/logic.go": "integer logic and conditional control flow",
+      "codegen/multiply.go": "integer multiplication across positive, negative, and zero constants",
+      "codegen/shortcircuit.go": "empty-interface extraction and concrete type comparison",
+      "codegen/smallintiface.go": "small scalar boxing through runtime.staticuint64s",
+      "codegen/structs.go": "typed struct initialization and zeroing",
       "codegen/type_descriptor.go": "compiler-owned runtime type descriptor data and GoObj metadata",
       "codegen/type_descriptor_kinds.go": "all runtime type descriptor layouts and variable descriptor data",
       "codegen/type_descriptor_methods.go": "uncommon type data, concrete method tables, wrappers, and R_METHODOFF",
@@ -18,11 +24,20 @@
   },
   "runtime": {
     "whitelist": {
+      "alias1.go": "byte and rune aliases in concrete interface type switches",
+      "char_lit.go": "character literal constants and external os.Exit reference",
+      "compos.go": "heap allocation of escaping composite literals and pointer inequality",
+      "const8.go": "implicit constant declarations and iota shadowing",
       "helloworld.go": "basic main-to-runtime call and execution",
+      "int_lit.go": "integer literal constants and external os.Exit reference",
+      "iota.go": "integer, float, string, boolean, and paired iota constants",
       "llvm_type_descriptor.go": "type descriptor data, ABI-internal equality closure, GoObj link, and execution",
       "llvm_type_descriptor_kinds.go": "all runtime type descriptor kinds, GoObj link, and execution",
       "llvm_type_descriptor_map.go": "typed map descriptor layout, R_KEEP reachability edge, GoObj link, and execution",
       "llvm_type_descriptor_methods.go": "uncommon concrete methods, method wrappers, direct calls, GoObj link, and execution",
+      "printbig.go": "signed and unsigned 64-bit boundary constants through runtime print",
+      "sizeof.go": "unsafe Sizeof, Alignof, and deeply embedded Offsetof constants",
+      "varinit.go": "nested variable initialization and lexical shadowing",
       "llvm_interface.go": "static multi-method itab, interface conversion, indirect calls, GoObj link, and execution",
       "llvm_interface_conversion.go": "dynamic interface-to-interface conversion cache, runtime fallback, nil conversion, and execution",
       "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
