@@ -49,6 +49,7 @@ func LowerGoObjTypeData() {
 	}
 
 	if len(closure) == 0 {
+		emitGoObjCompilerUsed()
 		return
 	}
 
@@ -91,6 +92,7 @@ func LowerGoObjTypeData() {
 		setGoObjKeepMetadata(g, s)
 		setGoObjGotypeMetadata(g, s)
 	}
+	emitGoObjCompilerUsed()
 }
 
 // llvmGoDataRef returns the module-global address for a compiler LSym. Local
@@ -347,7 +349,6 @@ func setGoObjWeakRelocMetadata(g llvm.Value, s *obj.LSym) {
 // Keep it separate from !goobj.weak_relocs so llc can synthesize the GoObj record
 // without inventing bytes or a target-address expression in the global.
 func setGoObjKeepMetadata(g llvm.Value, s *obj.LSym) {
-	entries := make([]llvm.Metadata, 0)
 	for _, r := range s.R {
 		if r.Type != objabi.R_KEEP {
 			continue
@@ -355,10 +356,12 @@ func setGoObjKeepMetadata(g llvm.Value, s *obj.LSym) {
 		if r.Sym == nil {
 			base.Fatalf("nil R_KEEP target in %s", s.Name)
 		}
-		entries = append(entries, GlobalCtxt.MDString(r.Sym.Name))
-	}
-	if len(entries) != 0 {
-		g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.keep"), GlobalCtxt.MDNode(entries))
+		target := llvmGoDataRef(r.Sym)
+		preserveGoObjMetadataValues(g, target)
+		CurrentModule.AddNamedMetadataOperand("goobj.keep", GlobalCtxt.MDNode([]llvm.Metadata{
+			g.ConstantAsMetadata(),
+			target.ConstantAsMetadata(),
+		}))
 	}
 }
 
@@ -366,17 +369,22 @@ func setGoObjGotypeMetadata(g llvm.Value, s *obj.LSym) {
 	if s.Gotype == nil {
 		return
 	}
-	if CurrentModule.NamedGlobal(s.Gotype.Name).IsNil() {
-		base.Fatalf("Go type symbol %s for %s was not included in LLVM data closure", s.Gotype.Name, s.Name)
+	target := CurrentModule.NamedGlobal(s.Gotype.Name)
+	if target.IsNil() {
+		target = llvmGoDataRef(s.Gotype)
 	}
-	g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.gotype"), GlobalCtxt.MDNode([]llvm.Metadata{
-		GlobalCtxt.MDString(s.Gotype.Name),
+	preserveGoObjMetadataValues(g, target)
+	CurrentModule.AddNamedMetadataOperand("goobj.gotype", GlobalCtxt.MDNode([]llvm.Metadata{
+		g.ConstantAsMetadata(),
+		target.ConstantAsMetadata(),
 	}))
 }
 
 // Interface dead-method elimination uses zero-width marker relocations on the
 // containing function. LLVM calls and globals cannot encode those records, so
-// carry the exact Go relocation type, addend, and target in function metadata.
+// carry the exact source, target, Go relocation type, and addend in a module
+// relationship table. Direct value references let LLVM keep the relationships
+// synchronized across renaming and RAUW.
 func setGoObjFunctionRelocMetadata(fn llvm.Value, s *obj.LSym) {
 	entries := make([]llvm.Metadata, 0)
 	for _, r := range s.R {
@@ -385,17 +393,61 @@ func setGoObjFunctionRelocMetadata(fn llvm.Value, s *obj.LSym) {
 			if r.Sym == nil {
 				base.Fatalf("nil interface marker target in %s", s.Name)
 			}
-			llvmGoDataRef(r.Sym)
+			target := llvmGoDataRef(r.Sym)
+			preserveGoObjMetadataValues(fn, target)
 			entries = append(entries, GlobalCtxt.MDNode([]llvm.Metadata{
+				fn.ConstantAsMetadata(),
+				target.ConstantAsMetadata(),
 				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(uint16(r.Type)), false).ConstantAsMetadata(),
 				llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(r.Add), true).ConstantAsMetadata(),
-				GlobalCtxt.MDString(r.Sym.Name),
 			}))
 		}
 	}
-	if len(entries) != 0 {
-		fn.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.marker_relocs"), GlobalCtxt.MDNode(entries))
+	for _, entry := range entries {
+		CurrentModule.AddNamedMetadataOperand("goobj.marker_relocs", entry)
 	}
+}
+
+// Named metadata references participate in RAUW, but GlobalDCE is allowed to
+// delete values that are referenced only from metadata. llvm.compiler.used is
+// LLVM's native way to state that those values also have object-format
+// semantics. It emits no storage; Go linker reachability remains controlled by
+// the R_KEEP and marker records produced from the relationship tables.
+func preserveGoObjMetadataValues(values ...llvm.Value) {
+	for _, v := range values {
+		if v.IsNil() || v.Name() == "" {
+			base.Fatalf("invalid LLVM value in GoObj metadata relationship")
+		}
+		if goObjCompilerUsedNames[v.Name()] {
+			continue
+		}
+		goObjCompilerUsedNames[v.Name()] = true
+		goObjCompilerUsed = append(goObjCompilerUsed, v)
+	}
+}
+
+func emitGoObjCompilerUsed() {
+	if len(goObjCompilerUsed) == 0 {
+		return
+	}
+	sort.Slice(goObjCompilerUsed, func(i, j int) bool {
+		return goObjCompilerUsed[i].Name() < goObjCompilerUsed[j].Name()
+	})
+	values := append([]llvm.Value(nil), goObjCompilerUsed...)
+	if old := CurrentModule.NamedGlobal("llvm.compiler.used"); !old.IsNil() {
+		init := old.Initializer()
+		for i := 0; i < init.OperandsCount(); i++ {
+			values = append(values, init.Operand(i))
+		}
+		old.EraseFromParentAsGlobal()
+	}
+	init := llvm.ConstArray(GlobalCtxt.PointerType(0), values)
+	used := llvm.AddGlobal(CurrentModule, init.Type(), "llvm.compiler.used")
+	used.SetLinkage(llvm.AppendingLinkage)
+	used.SetSection("llvm.metadata")
+	used.SetInitializer(init)
+	goObjCompilerUsed = nil
+	goObjCompilerUsedNames = make(map[string]bool)
 }
 
 func llvmDataStorageRelocs(s *obj.LSym) []obj.Reloc {

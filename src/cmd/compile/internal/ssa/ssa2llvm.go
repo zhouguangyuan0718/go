@@ -806,6 +806,8 @@ var CurrentModule llvm.Module
 var type2lTypes = map[*types.Type]llvm.Type{}
 var goObjConfigWritten bool
 var currentLLVMDataLowerer *llvmDataLowerer
+var goObjCompilerUsed []llvm.Value
+var goObjCompilerUsedNames map[string]bool
 
 var GlobalCtxt = llvm.GlobalContext()
 
@@ -935,6 +937,8 @@ func InitModule(pkg *types.Pkg) {
 	CurrentModule.SetTarget(goObjTargetTriple())
 	goObjConfigWritten = false
 	currentLLVMDataLowerer = newLLVMDataLowerer(make(map[*obj.LSym]bool))
+	goObjCompilerUsed = nil
+	goObjCompilerUsedNames = make(map[string]bool)
 }
 
 // goObjTargetTriple identifies the GoObj target that llc should use when it

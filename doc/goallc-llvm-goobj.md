@@ -53,8 +53,12 @@ UsedInIface、linkname 以及 Local+DUPOK 重叠等没有等价 LLVM 表示的�
 普通 address、type offset 和 method offset 都由 LLVM initializer 与语义类型
 直接推导；`!goobj.weak_relocs` 只记录无法由 LLVM 表达的逐 relocation weak
 属性。零宽度的 linker
-保活边 `R_KEEP` 不伪装为地址常量，而用 `!goobj.keep` 记录其 target symbol，
-由 writer 合成 GoObj relocation。最终链路仍只有
+保活边 `R_KEEP` 不伪装为地址常量，而用模块级 `!goobj.keep` 关系表记录；
+`gotype` aux 和 interface dead-method marker 也使用模块级关系表。表中的 source
+与 target 都是对 LLVM global/function 的直接引用，不再以字符串重复符号名，
+因此 LLVM 重命名和 RAUW 会同步更新这些关系；关系涉及的值同时进入
+`@llvm.compiler.used`，避免 GlobalDCE 删除仅承担对象格式语义的声明。该 LLVM
+特殊全局本身不生成数据，writer 再根据关系表合成 GoObj relocation/aux。最终链路仍只有
 `__.PKGDEF + _go_.o` 两个有意义的 archive members；不会生成或合并 native data
 object。
 

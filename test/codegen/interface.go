@@ -12,8 +12,8 @@ package codegen
 // LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Double"
 // LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Value"
 // LLVM-DAG: !goobj.weak_relocs
+// LLVM-DAG: @llvm.compiler.used = appending global
 // LLVM-LABEL: define goabiinternal i64 @codegen.useLLVMInterface(
-// LLVM-SAME: !goobj.marker_relocs
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmInterface.Value(
 // LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %
@@ -23,8 +23,10 @@ package codegen
 // LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %
 // LLVM-SAME: (ptr
-// LLVM: !{i32 23, i64 0, !"type:codegen.llvmInterfaceValue"}
-// LLVM-DAG: !{i32 24, i64 {{[0-9]+}}, !"type:codegen.llvmInterface"}
+// LLVM: !goobj.marker_relocs = !{
+// LLVM-DAG: !{ptr @codegen.useLLVMInterface, ptr @"type:codegen.llvmInterfaceValue", i32 23, i64 0}
+// LLVM-DAG: !{ptr @codegen.llvmInterface.Value, ptr @"type:codegen.llvmInterface", i32 24, i64 {{[0-9]+}}}
+// LLVM-DAG: !{ptr @codegen.llvmInterface.Double, ptr @"type:codegen.llvmInterface", i32 24, i64 {{[0-9]+}}}
 
 type llvmInterface interface {
 	Double() int

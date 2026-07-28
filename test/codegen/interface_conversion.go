@@ -6,13 +6,14 @@
 
 package codegen
 
-// LLVM: @codegen..typeAssert.0 = global <{ ptr, ptr, [8 x i8] }>
-// LLVM-SAME: !goobj.gotype
+// LLVM: @codegen..typeAssert.0 = internal global <{ ptr, ptr, [8 x i8] }>
 // LLVM-LABEL: define goabiinternal { ptr, ptr } @codegen.convertLLVMInterface(
 // LLVM: load atomic ptr, ptr @codegen..typeAssert.0 seq_cst
 // LLVM: ptrtoint ptr
 // LLVM: call goabiinternal ptr @runtime.typeAssert(ptr @codegen..typeAssert.0, ptr
 // LLVM-DAG: declare goabiinternal ptr @runtime.typeAssert(ptr, ptr)
+// LLVM: !goobj.gotype = !{
+// LLVM-DAG: !{ptr @codegen..typeAssert.0, ptr @
 
 type llvmSourceInterface interface {
 	Double() int
