@@ -117,6 +117,14 @@ func llvmNestAttribute() llvm.Attribute {
 	return GlobalCtxt.CreateEnumAttribute(kind, 0)
 }
 
+func llvmNullPointerIsValidAttribute() llvm.Attribute {
+	kind := llvm.AttributeKindID("null_pointer_is_valid")
+	if kind == 0 {
+		base.Fatalf("LLVM does not provide the null_pointer_is_valid function attribute")
+	}
+	return GlobalCtxt.CreateEnumAttribute(kind, 0)
+}
+
 func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallConv) {
 	fn.SetFunctionCallConv(cc)
 	if sig.ResultCount > 1 {
@@ -766,14 +774,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			// pointer-sized storage but expose the callable pointer to LLVM.
 			typ = GlobalCtxt.PointerType(0)
 		}
-		if lfc.ClosureCodeLoads[v.ID] {
-			// Loading the code word from a nil func value must fault before
-			// the indirect call. A normal LLVM load from null is immediate
-			// undefined behavior, so retain the Go nil-check side effect.
-			check := lfc.b.CreateLoad(GlobalCtxt.Int8Type(), arg0(), v.String()+".nilcheck")
-			check.SetVolatile(true)
-			check.SetAlignment(1)
-		}
 		lVal = lfc.b.CreateLoad(typ, arg0(), v.String())
 	case OpAtomicLoadPtr:
 		lVal = lfc.b.CreateLoad(GlobalCtxt.PointerType(0), arg0(), v.String())
@@ -913,6 +913,12 @@ func LLVMCompile(f *Func) {
 				v.Fatalf("closure call has %d SSA arguments, want at least code, context, and memory", len(v.Args))
 			}
 		}
+	}
+	if len(FCtxt.ClosureCodeLoads) != 0 {
+		// Native Go relies on the funcval code-word load faulting when the
+		// funcval is nil. Its result feeds the indirect call, so keeping null
+		// dereferences defined is enough to retain the single ordinary load.
+		FCtxt.LF.AddFunctionAttr(llvmNullPointerIsValidAttribute())
 	}
 	// LLVM only treats a constant-sized alloca as a fixed frame object when
 	// it is in the entry block. Preallocate every Go stack slot before phi or
