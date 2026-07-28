@@ -227,7 +227,8 @@ header。`llc` 在建立 code-generation pipeline 前读取并严格校验这些
 
 1. 为选中的 compile 调用增加 `-enablellvm -llvmironly`；
 2. 调用
-   `llc -load-pass-plugin=<GoALLCStatepoints> -filetype=obj`；插件的
+   `llc -load-pass-plugin=<GoALLCStatepoints>
+   -statepoint-callsite-position=call-start -filetype=obj`；插件的
    pre-codegen callback 是当前外部链路与未来 compiler 进程内 LLVM
    集成共用的 pass pipeline 入口，wrapper 不在命令行中重建 pipeline；
 3. 使用 `cmd/internal/archive` 打开 compiler archive，并将对象以 `_go_.o`
@@ -268,7 +269,10 @@ strategy 注册 `GCMetadataPrinter::emitStackMaps`，在 AsmPrinter 模块收尾
 读取标准 `FnInfos/CSInfos`，跳过 statepoint 的 CC、flags 和 deopt 前缀后，把
 原始 GC locations 写入 MCContext。GoObj writer 在最终 layout 后完成 SP
 校验、`Direct`/`Indirect` 解释、LocalsPointerMaps 和 PCDATA_StackMapIndex
-编码。`Direct SP+offset` 是栈地址本身，不表示该 slot 存有 pointer，因此
+编码。GoALLC 要求 StackMaps 记录 CALL 起点；map 从 CALL 开始，并在 pcsp
+之外单独记录的栈增长 slow path 入口恢复 `-1`，从而覆盖正常路径的 RET，
+且不依赖 return PC 反推调用范围。`Direct SP+offset` 是栈地址本身，不表示该
+slot 存有 pointer，因此
 不会设置 locals bitmap；`Indirect [SP+offset]` 才表示该槽保存指针值并置位。
 这允许 IR 层保守追踪所有 alloca，同时避免把 alloca 对象内容误当成指针。
 

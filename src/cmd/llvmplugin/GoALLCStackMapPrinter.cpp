@@ -83,7 +83,13 @@ bool GoALLCStackMapPrinter::emitStackMaps(StackMaps &SM, AsmPrinter &AP) {
       size_t FirstGCLocation = 3 + static_cast<size_t>(NumDeopts);
 
       MCContext::GoObjStackMapEntry Entry{
-          CSI.CSOffsetExpr, CSI.ID, Info.StackSize, PointerSize, {}};
+          CSI.CSOffsetExpr,
+          CSI.ID,
+          Info.StackSize,
+          PointerSize,
+          SM.getStatepointCallsitePosition() ==
+              StackMaps::StatepointCallsitePosition::CallStart,
+          {}};
       Entry.Locations.reserve(CSI.Locations.size() - FirstGCLocation);
       for (const StackMaps::Location &Location :
            ArrayRef(CSI.Locations).drop_front(FirstGCLocation)) {

@@ -91,6 +91,7 @@ if(BUILD_TESTING)
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -statepoint-callsite-position=call-start
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/statepoint.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
@@ -101,6 +102,7 @@ if(BUILD_TESTING)
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -statepoint-callsite-position=call-start
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-derived.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-derived.ll"

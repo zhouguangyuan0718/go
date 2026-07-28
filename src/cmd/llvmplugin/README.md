@@ -30,9 +30,14 @@ phase.
 StackMaps and GoObj. It uses the standard
 `AsmPrinter -> GCMetadataPrinter::emitStackMaps` hook and copies only raw
 machine locations into `MCContext`. LLVM's generic `StackMaps.cpp` has no
-GoALLC or GoObj branch. The GoObj writer interprets those locations after final
-layout: an `Indirect [SP+offset]` location contributes a locals pointer bit,
-while a `Direct SP+offset` stack address does not. This permits conservative IR
+GoALLC or GoObj branch. `llvmtoolexec` selects
+`-statepoint-callsite-position=call-start`, so the recorded callsite PC matches
+Go's `PCDATA_StackMapIndex` convention. The map remains active through the
+normal return and resets at the stack-growth slow-path entry, matching the
+range emitted by the Go assembler without relying on a return-PC convention.
+The GoObj writer interprets locations after final layout: an
+`Indirect [SP+offset]` location contributes a locals pointer bit, while a
+`Direct SP+offset` stack address does not. This permits conservative IR
 tracking without confusing an alloca's address with pointer data stored in the
 alloca.
 
