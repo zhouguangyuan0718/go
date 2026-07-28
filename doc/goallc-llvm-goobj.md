@@ -52,9 +52,13 @@ LLVM IR 优先使用原生 linkage 和语义类型交接这些属性：Local 对
 和 itab 的身份由真实的 `type:*` / `go:itab.*` global symbol 表达，避免重复生成
 既长又不提供额外 LLVM 语义的 identified wrapper type。`!goobj.symbol.flags` 只保留 typelink、
 UsedInIface、linkname 以及 Local+DUPOK 重叠等没有等价 LLVM 表示的位。
-普通 address、type offset 和 method offset 都由 LLVM initializer 与语义类型
-直接推导；`!goobj.weak_relocs` 只记录无法由 LLVM 表达的逐 relocation weak
-属性。零宽度的 linker
+普通 `R_ADDR` 完全由 LLVM initializer 中的 global/function pointer（以及可选
+GEP addend）表达，并直接生成原生 MC relocation，不再向 metadata 复制同一份
+信息。`!goobj.relocs` 只补充 LLVM IR 无法通用表达的逐 relocation 语义：
+`R_ADDROFF` / `R_METHODOFF` 的精确 GoObj 类型，以及 `R_WEAKADDR` /
+`R_WEAKADDROFF` 的 weak 属性；writer 以 source symbol 内 offset 为键覆盖原生
+relocation 的 GoObj 类型。这样 LLVM initializer 始终是地址关系的 source of
+truth，metadata 只承载对象格式特有的剩余语义。零宽度的 linker
 保活边 `R_KEEP` 不伪装为地址常量，而用模块级 `!goobj.keep` 关系表记录；
 `gotype` aux 和 interface dead-method marker 也使用模块级关系表。表中的 source
 与 target 都是对 LLVM global/function 的直接引用，不再以字符串重复符号名，

@@ -349,7 +349,17 @@ func setGoObjRelocMetadata(g llvm.Value, s *obj.LSym) {
 	entries := make([]llvm.Metadata, 0, len(s.R))
 	for _, r := range s.R {
 		switch r.Type {
-		case objabi.R_ADDR, objabi.R_WEAKADDR, objabi.R_ADDROFF, objabi.R_WEAKADDROFF, objabi.R_METHODOFF:
+		case objabi.R_ADDR:
+			// An ordinary address relocation is already represented exactly
+			// by the pointer-valued LLVM initializer (including its target and
+			// addend). Let LLVM lower it to the native MC relocation instead of
+			// duplicating the same information in GoObj metadata.
+			continue
+		case objabi.R_WEAKADDR, objabi.R_ADDROFF, objabi.R_WEAKADDROFF, objabi.R_METHODOFF:
+			// Weakness is a property of this relocation rather than the target
+			// symbol, and LLVM IR cannot in general distinguish the Go linker
+			// offset relocation kinds. Preserve only those residual semantics
+			// as an offset-keyed GoObj override.
 			entries = append(entries, GlobalCtxt.MDNode([]llvm.Metadata{
 				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(r.Off), false).ConstantAsMetadata(),
 				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(uint16(r.Type)), false).ConstantAsMetadata(),
