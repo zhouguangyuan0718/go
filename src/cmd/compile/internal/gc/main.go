@@ -379,10 +379,13 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 		staticinit.AddKeepRelocations()
 	}
 
-	// Write object data to disk. In LLVM-IR-only mode the toolexec wrapper
-	// supplies the linker object with llc, so retain only compiler export data.
+	// Write object data to disk. In LLVM-IR-only mode dumpdata still prepares
+	// reflect/type linker data as LSyms, but LLVM lowers that closure into the
+	// IR consumed by llc; the archive itself retains only compiler export data.
 	base.Timer.Start("be", "dumpobj")
 	if base.Flag.LLVMIROnly {
+		dumpdata()
+		ssa.LowerGoObjTypeData()
 		dumpobj()
 	} else {
 		dumpdata()

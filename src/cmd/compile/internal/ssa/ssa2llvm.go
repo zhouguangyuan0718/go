@@ -7,6 +7,7 @@ import (
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
+	"cmd/internal/src"
 	"internal/buildcfg"
 
 	"github.com/goallc/go-llvm"
@@ -15,11 +16,22 @@ import (
 type LLVMFuncContext struct {
 	BBs         map[ID]llvm.BasicBlock
 	Vs          map[ID]llvm.Value
+	Locals      map[llvmLocalKey]llvm.Value
+	ItabMethods map[ID]bool
 	F           *Func
 	LF          llvm.Value
 	b           llvm.Builder
 	ReturnType  llvm.Type
 	ResultCount int
+}
+
+// SSA may clone an ir.Name while retaining the same logical source
+// declaration. Pointer identity is therefore not a stable stack-slot key.
+// Package symbol plus declaration position distinguishes shadowed locals while
+// merging those clones.
+type llvmLocalKey struct {
+	Sym *types.Sym
+	Pos src.XPos
 }
 
 // LLVM's GoABIInternal calling convention has numeric ID 22. Keep the
@@ -110,6 +122,34 @@ func (lfc *LLVMFuncContext) llvmCondition(v llvm.Value, name string) llvm.Value 
 	}
 	zero := llvm.ConstInt(v.Type(), 0, false)
 	return lfc.b.CreateICmp(llvm.IntNE, v, zero, name)
+}
+
+func llvmConstInt(t *types.Type, value int64) llvm.Value {
+	bits := uint64(t.Size() * 8)
+	raw := uint64(value)
+	if bits < 64 {
+		raw &= uint64(1)<<bits - 1
+	}
+	return llvm.ConstInt(getLLVMType(t), raw, false)
+}
+
+func (lfc *LLVMFuncContext) pointerComparisonOperands(v *Value) (llvm.Value, llvm.Value) {
+	return lfc.normalizePointerComparisonOperands(v, lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]))
+}
+
+func (lfc *LLVMFuncContext) normalizePointerComparisonOperands(v *Value, x, y llvm.Value) (llvm.Value, llvm.Value) {
+	if x.Type() == y.Type() {
+		return x, y
+	}
+	switch {
+	case x.Type().TypeKind() == llvm.PointerTypeKind && y.Type().TypeKind() == llvm.IntegerTypeKind:
+		x = lfc.b.CreatePtrToInt(x, y.Type(), v.String()+".ptr")
+	case x.Type().TypeKind() == llvm.IntegerTypeKind && y.Type().TypeKind() == llvm.PointerTypeKind:
+		y = lfc.b.CreatePtrToInt(y, x.Type(), v.String()+".ptr")
+	default:
+		v.Fatalf("pointer comparison has incompatible LLVM operand types")
+	}
+	return x, y
 }
 
 type llvmShiftKind uint8
@@ -265,6 +305,38 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	return call
 }
 
+func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int) llvm.Value {
+	aux := auxToCall(v.Aux)
+	if aux == nil {
+		v.Fatalf("indirect call has no ABI information")
+	}
+	if got, want := len(v.Args)-argStart-1, int(aux.NArgs()); got != want {
+		v.Fatalf("indirect call has %d LLVM arguments, want %d", got, want)
+	}
+
+	sig := llvmSignature(aux)
+	cc := llvmCallConv(aux.ABI().Which())
+	code := lfc.GenLV(v.Args[0])
+	if code.Type().TypeKind() == llvm.IntegerTypeKind {
+		code = lfc.b.CreateIntToPtr(code, GlobalCtxt.PointerType(0), v.String()+".code")
+	}
+	args := make([]llvm.Value, 0, aux.NArgs())
+	for i := int64(0); i < aux.NArgs(); i++ {
+		arg := lfc.GenLV(v.Args[argStart+int(i)])
+		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
+			v.Fatalf("argument %d to indirect call has incompatible LLVM type", i)
+		}
+		args = append(args, arg)
+	}
+	name := v.String()
+	if sig.ResultCount == 0 {
+		name = ""
+	}
+	call := lfc.b.CreateCall(sig.Type, code, args, name)
+	call.SetInstructionCallConv(cc)
+	return call
+}
+
 var llvmBoundsPanicNames = [...]string{
 	BoundsIndex:       "runtime.goPanicIndex",
 	BoundsIndexU:      "runtime.goPanicIndexU",
@@ -306,6 +378,15 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	if lv, ok := lfc.Vs[v.ID]; ok {
 		return lv
 	}
+	savedBlock := lfc.b.GetInsertBlock()
+	if v.Block != nil {
+		lfc.b.SetInsertPointAtEnd(lfc.BBs[v.Block.ID])
+	}
+	defer func() {
+		if !savedBlock.IsNil() {
+			lfc.b.SetInsertPointAtEnd(savedBlock)
+		}
+	}()
 	var lVal llvm.Value
 	arg0 := func() llvm.Value { return lfc.GenLV(v.Args[0]) }
 	arg1 := func() llvm.Value { return lfc.GenLV(v.Args[1]) }
@@ -314,20 +395,45 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		// LLVM models memory ordering through instruction dependencies, not an
 		// explicit SSA memory value. SP/SB are only address-space tokens here.
 	case OpUnknown:
-		if !v.Type.IsMemory() {
-			v.Fatalf("non-memory Unknown value in LLVM lowering: %s", v.LongString())
+		// SSA construction leaves Unknown values only in dead code. Preserve
+		// their "value does not matter" semantics as LLVM undef; live Go
+		// values are resolved before this point.
+		if !v.Type.IsMemory() && v.Type != types.TypeInvalid {
+			lVal = llvm.Undef(getLLVMType(v.Type))
 		}
 	case OpVarDef, OpVarLive:
 		lVal = arg0()
 	case OpKeepAlive:
 		lVal = arg1()
 	case OpLocalAddr:
-		lVal = lfc.b.CreateAlloca(getLLVMType(v.Type.Elem()), v.String())
+		sym := auxToSym(v.Aux)
+		name, ok := sym.(*ir.Name)
+		if !ok {
+			v.Fatalf("local address has no stack symbol")
+		}
+		key := llvmLocalKey{Sym: name.Sym(), Pos: name.Pos()}
+		if slot, ok := lfc.Locals[key]; ok {
+			lVal = slot
+		} else {
+			lVal = lfc.b.CreateAlloca(getLLVMType(name.Type()), v.String())
+			lfc.Locals[key] = lVal
+		}
+	case OpAddr:
+		sym, ok := v.Aux.(*obj.LSym)
+		if !ok {
+			v.Fatalf("global address has non-LSym auxiliary %T", v.Aux)
+		}
+		lVal = llvmGoDataRef(sym)
 	case OpArg:
 		lVal = lfc.paramForArg(v)
 		lVal.SetName(v.Aux.(*ir.Name).Sym().Name)
 	case OpConst8, OpConst16, OpConst32, OpConst64:
-		lVal = llvm.ConstInt(getLLVMType(v.Type), uint64(auxIntToInt64(v.AuxInt)), v.Type.IsSigned())
+		// AuxInt already carries the two's-complement bit pattern. Asking LLVM
+		// to sign-extend the uint64 representation of a negative value makes
+		// APInt reject it as an out-of-range signed host integer. Masking to
+		// the SSA type width also avoids presenting a sign-extended host value
+		// as an out-of-range unsigned i8/i16/i32.
+		lVal = llvmConstInt(v.Type, auxIntToInt64(v.AuxInt))
 	case OpConstBool:
 		lVal = llvm.ConstInt(getLLVMType(v.Type), uint64(v.AuxInt), false)
 	case OpConst32F:
@@ -385,10 +491,25 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateNeg(arg0(), v.String())
 	case OpNeg32F, OpNeg64F:
 		lVal = lfc.b.CreateFNeg(arg0(), v.String())
-	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB, OpEqPtr:
+	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, arg0(), arg1(), v.String()+".i1"), v.String())
-	case OpNeq64, OpNeq32, OpNeq16, OpNeq8, OpNeqB, OpNeqPtr:
+	case OpEqPtr:
+		x, y := lfc.pointerComparisonOperands(v)
+		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, x, y, v.String()+".i1"), v.String())
+	case OpNeq64, OpNeq32, OpNeq16, OpNeq8, OpNeqB:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, arg0(), arg1(), v.String()+".i1"), v.String())
+	case OpNeqPtr:
+		x, y := lfc.pointerComparisonOperands(v)
+		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, x, y, v.String()+".i1"), v.String())
+	case OpEqInter, OpNeqInter:
+		x := lfc.b.CreateExtractValue(arg0(), 0, v.String()+".x")
+		y := lfc.b.CreateExtractValue(arg1(), 0, v.String()+".y")
+		x, y = lfc.normalizePointerComparisonOperands(v, x, y)
+		pred := llvm.IntEQ
+		if v.Op == OpNeqInter {
+			pred = llvm.IntNE
+		}
+		lVal = lfc.goBool(lfc.b.CreateICmp(pred, x, y, v.String()+".i1"), v.String())
 	case OpLess64, OpLess32, OpLess16, OpLess8:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntSLT, arg0(), arg1(), v.String()+".i1"), v.String())
 	case OpLess64U, OpLess32U, OpLess16U, OpLess8U:
@@ -409,6 +530,8 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULT, arg0(), arg1(), v.String()+".i1"), v.String())
 	case OpIsSliceInBounds:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULE, arg0(), arg1(), v.String()+".i1"), v.String())
+	case OpIsNonNil:
+		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, arg0(), llvm.ConstNull(arg0().Type()), v.String()+".i1"), v.String())
 	case OpLsh64x64, OpLsh64x32, OpLsh64x16, OpLsh64x8,
 		OpLsh32x64, OpLsh32x32, OpLsh32x16, OpLsh32x8,
 		OpLsh16x64, OpLsh16x32, OpLsh16x16, OpLsh16x8,
@@ -457,7 +580,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			v.Fatalf("%s changes LLVM representation", v.Op)
 		}
 	case OpOffPtr:
-		off := llvm.ConstInt(getLLVMType(types.Types[types.TINT]), uint64(auxIntToInt64(v.AuxInt)), true)
+		off := llvmConstInt(types.Types[types.TINT], auxIntToInt64(v.AuxInt))
 		lVal = lfc.b.CreateGEP(GlobalCtxt.Int8Type(), arg0(), []llvm.Value{off}, v.String())
 	case OpAddPtr:
 		lVal = lfc.b.CreateGEP(GlobalCtxt.Int8Type(), arg0(), []llvm.Value{arg1()}, v.String())
@@ -468,13 +591,32 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateGEP(getLLVMType(v.Type.Elem()), arg0(), []llvm.Value{arg1()}, v.String())
 	case OpStaticCall, OpStaticLECall:
 		lVal = lfc.staticCall(v)
+	case OpInterCall, OpInterLECall:
+		// arg0 is the code pointer loaded from the itab. Interface method
+		// ABIs receive the interface data word as their first real argument.
+		lVal = lfc.indirectCall(v, 1)
 	case OpPanicBounds:
 		lVal = lfc.panicBounds(v)
+	case OpSelect0, OpSelect1:
+		sel := 0
+		if v.Op == OpSelect1 {
+			sel = 1
+		}
+		src := v.Args[0]
+		switch src.Op {
+		case OpAtomicLoadPtr:
+			load := lfc.GenLV(src)
+			if sel == 0 {
+				lVal = load
+			}
+		default:
+			v.Fatalf("%s selects unsupported tuple source %s", v.Op, src.Op)
+		}
 	case OpSelectN:
 		sel := int(auxIntToInt64(v.AuxInt))
 		src := v.Args[0]
 		switch src.Op {
-		case OpStaticCall, OpStaticLECall:
+		case OpStaticCall, OpStaticLECall, OpInterCall, OpInterLECall:
 			aux := auxToCall(src.Aux)
 			call := lfc.GenLV(src)
 			switch {
@@ -485,6 +627,11 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 				lVal = call
 			default:
 				lVal = lfc.b.CreateExtractValue(call, sel, v.String())
+			}
+		case OpAtomicLoadPtr:
+			load := lfc.GenLV(src)
+			if sel == 0 {
+				lVal = load
 			}
 		default:
 			lVal = lfc.b.CreateExtractValue(lfc.GenLV(src), sel, v.String())
@@ -506,7 +653,26 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			lVal = lfc.b.CreatePHI(getLLVMType(v.Type), v.String())
 		}
 	case OpLoad:
-		lVal = lfc.b.CreateLoad(getLLVMType(v.Type), arg0(), v.String())
+		typ := getLLVMType(v.Type)
+		if lfc.ItabMethods[v.ID] {
+			// Native SSA uses uintptr for an itab method slot. Preserve its
+			// pointer-sized storage but expose the callable pointer to LLVM.
+			typ = GlobalCtxt.PointerType(0)
+		}
+		lVal = lfc.b.CreateLoad(typ, arg0(), v.String())
+	case OpAtomicLoadPtr:
+		lVal = lfc.b.CreateLoad(GlobalCtxt.PointerType(0), arg0(), v.String())
+		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
+	case OpNilCheck:
+		// Preserve Go's explicit nil-check side effect even when no following
+		// load uses the checked pointer. A volatile byte load faults at address
+		// zero and cannot be removed by LLVM. The SSA value itself is the
+		// original pointer.
+		p := arg0()
+		check := lfc.b.CreateLoad(GlobalCtxt.Int8Type(), p, v.String()+".nilcheck")
+		check.SetVolatile(true)
+		check.SetAlignment(1)
+		lVal = p
 	case OpStore:
 		lVal = lfc.b.CreateStore(arg1(), arg0())
 	case OpStructSelect:
@@ -588,6 +754,8 @@ func LLVMCompile(f *Func) {
 	FCtxt := &LLVMFuncContext{
 		BBs:         map[ID]llvm.BasicBlock{},
 		Vs:          map[ID]llvm.Value{},
+		Locals:      map[llvmLocalKey]llvm.Value{},
+		ItabMethods: map[ID]bool{},
 		F:           f,
 		b:           GlobalCtxt.NewBuilder(),
 		ReturnType:  sig.ReturnType,
@@ -599,8 +767,17 @@ func LLVMCompile(f *Func) {
 	if FCtxt.LF.BasicBlocksCount() != 0 {
 		f.fe.Fatalf(f.Entry.Pos, "duplicate LLVM definition for %s", f.OwnAux.Fn.Name)
 	}
+	setGoObjFunctionRelocMetadata(FCtxt.LF, f.OwnAux.Fn)
 	for _, BB := range f.Blocks {
 		FCtxt.BBs[BB.ID] = GlobalCtxt.AddBasicBlock(FCtxt.LF, BB.String())
+		for _, v := range BB.Values {
+			if (v.Op == OpInterCall || v.Op == OpInterLECall) && len(v.Args) != 0 {
+				code := v.Args[0]
+				if code.Op == OpLoad && code.Type.IsUintptr() && code.Uses == 1 {
+					FCtxt.ItabMethods[code.ID] = true
+				}
+			}
+		}
 	}
 	// LLVM requires all phi nodes to precede non-phi instructions in a
 	// block. Predeclare them before recursive value emission can insert any
@@ -628,6 +805,9 @@ func LLVMCompile(f *Func) {
 var CurrentModule llvm.Module
 var type2lTypes = map[*types.Type]llvm.Type{}
 var goObjConfigWritten bool
+var currentLLVMDataLowerer *llvmDataLowerer
+var goObjCompilerUsed []llvm.Value
+var goObjCompilerUsedNames map[string]bool
 
 var GlobalCtxt = llvm.GlobalContext()
 
@@ -756,6 +936,9 @@ func InitModule(pkg *types.Pkg) {
 	CurrentModule = GlobalCtxt.NewModule(pkg.Path)
 	CurrentModule.SetTarget(goObjTargetTriple())
 	goObjConfigWritten = false
+	currentLLVMDataLowerer = newLLVMDataLowerer(make(map[*obj.LSym]bool))
+	goObjCompilerUsed = nil
+	goObjCompilerUsedNames = make(map[string]bool)
 }
 
 // goObjTargetTriple identifies the GoObj target that llc should use when it

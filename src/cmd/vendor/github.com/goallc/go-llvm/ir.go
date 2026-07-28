@@ -693,6 +693,9 @@ func (v Value) Metadata(kind int) (rv Value) {
 func (v Value) SetMetadata(kind int, node Metadata) {
 	C.LLVMSetMetadata2(v.C, C.unsigned(kind), node.C)
 }
+func (v Value) SetGlobalMetadata(kind int, node Metadata) {
+	C.LLVMGlobalSetMetadata(v.C, C.unsigned(kind), node.C)
+}
 
 // Obtain the string value of the instruction. Same as would be printed with
 // Value.Dump() (with two spaces at the start but no newline at the end).

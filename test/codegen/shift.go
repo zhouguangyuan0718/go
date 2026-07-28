@@ -6,6 +6,14 @@
 
 package codegen
 
+// LLVM-DAG: define goabiinternal i64 @codegen.lshConst64x64(i64 %v)
+// LLVM-DAG: shl i64 %v, 33
+// LLVM-DAG: define goabiinternal i64 @codegen.rshConst64Ux64(i64 %v)
+// LLVM-DAG: lshr i64 %v, 33
+// LLVM-DAG: define goabiinternal i64 @codegen.rshMask64Ux32(i64 %v, i32 %s)
+// LLVM-DAG: and i32 %s, 63
+// LLVM-DAG: select i1 {{%.*}}, i64 {{%.*}}, i64 0
+
 // ------------------ //
 //   constant shifts  //
 // ------------------ //

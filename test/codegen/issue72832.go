@@ -6,6 +6,15 @@
 
 package codegen
 
+// LLVM-DAG: define goabiinternal void @codegen.store_shifted(ptr %t, i32 %x)
+// LLVM-DAG: lshr i32 %x, 8
+// LLVM-DAG: lshr i32 %x, 16
+// LLVM-DAG: store i16 {{%.*}}, ptr {{%.*}}, align 2
+// LLVM-DAG: define goabiinternal void @codegen.store_const(ptr %t)
+// LLVM-DAG: store i8 1, ptr {{%.*}}, align 1
+// LLVM-DAG: store i8 2, ptr {{%.*}}, align 1
+// LLVM-DAG: store i16 3, ptr {{%.*}}, align 2
+
 type tile1 struct {
 	a uint16
 	b uint16

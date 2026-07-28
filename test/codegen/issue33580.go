@@ -9,6 +9,15 @@
 
 package codegen
 
+// LLVM-LABEL: define goabiinternal i64 @codegen.f(i64 %x, i64 %y)
+// LLVM-DAG: and i64 %x, 7777777777777777
+// LLVM-DAG: and i64 %y, 7777777777777777
+// LLVM-DAG: and i64 %x, 8888888888888888
+// LLVM-DAG: and i64 %y, 8888888888888888
+// LLVM: mul i64
+// LLVM: mul i64
+// LLVM: mul i64
+
 const (
 	A = 7777777777777777
 	B = 8888888888888888

@@ -2,6 +2,12 @@
 
 package codegen
 
+// LLVM-DAG: @runtime.staticuint64s = external global i8
+// LLVM-DAG: define goabiinternal { ptr, ptr } @codegen.booliface()
+// LLVM-DAG: define goabiinternal { ptr, ptr } @codegen.smallint8iface()
+// LLVM-DAG: define goabiinternal { ptr, ptr } @codegen.smalluint8iface()
+// LLVM-DAG: getelementptr i8, ptr @runtime.staticuint64s, i64
+
 // Copyright 2020 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.

@@ -6,6 +6,12 @@
 
 package codegen
 
+// LLVM-LABEL: define goabiinternal void @codegen.g(ptr %p)
+// LLVM: load volatile i8, ptr %p, align 1
+// LLVM: load i32, ptr %p, align 4
+// LLVM: call goabiinternal void @codegen.f(i32 {{%.*}})
+// LLVM-LABEL: define goabiinternal void @codegen.f(i32 %x)
+
 //go:noinline
 func f(x int32) {
 }

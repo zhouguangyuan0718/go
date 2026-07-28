@@ -6,6 +6,13 @@
 
 package codegen
 
+// LLVM-DAG: define goabiinternal i64 @codegen.m0(i64
+// LLVM-DAG: mul i64 %x, 0
+// LLVM-DAG: define goabiinternal i64 @codegen.m3(i64
+// LLVM-DAG: mul i64 %x, 3
+// LLVM-DAG: define goabiinternal i64 @codegen.mn20(i64
+// LLVM-DAG: mul i64 %x, -20
+
 // This file contains codegen tests related to strength
 // reduction of integer multiply.
 
