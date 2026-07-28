@@ -73,7 +73,16 @@ func LowerGoObjTypeData() {
 		if g.IsNil() {
 			g = llvm.AddGlobal(CurrentModule, t, s.Name)
 		} else if g.GlobalValueType() != t {
-			base.Fatalf("conflicting LLVM global type for Go data symbol %s", s.Name)
+			// Some compiler-generated symbols are referenced by SSA before
+			// dumpdata has attached their final TypeInfo and relocation
+			// layout. LLVM opaque pointers make those early references
+			// independent of the global's pointee type, so replace the
+			// provisional declaration once the LSym is finalized.
+			replacement := llvm.AddGlobal(CurrentModule, t, s.Name+".goallc.final")
+			g.ReplaceAllUsesWith(replacement)
+			g.EraseFromParentAsGlobal()
+			replacement.SetName(s.Name)
+			g = replacement
 		}
 		g.SetSection(llvmDataSection(s))
 		g.SetGlobalConstant(llvmDataIsReadOnly(s))
@@ -88,6 +97,7 @@ func LowerGoObjTypeData() {
 		g := globals[s]
 		g.SetInitializer(lowerer.dataInitializer(s, globals))
 		setGoObjDataFlags(g, s)
+		setGoObjOffsetRelocMetadata(g, s)
 		setGoObjWeakRelocMetadata(g, s)
 		setGoObjKeepMetadata(g, s)
 		setGoObjGotypeMetadata(g, s)
@@ -101,6 +111,13 @@ func LowerGoObjTypeData() {
 func llvmGoDataRef(s *obj.LSym) llvm.Value {
 	if s == nil {
 		base.Fatalf("nil Go data symbol in LLVM lowering")
+	}
+	if s.Type == objabi.STEXT || s.Type == objabi.STEXTFIPS || s.ABI() == obj.ABIInternal {
+		data := map[*obj.LSym]bool(nil)
+		if currentLLVMDataLowerer != nil {
+			data = currentLLVMDataLowerer.data
+		}
+		return llvmExternalDataRef(s, data)
 	}
 	if g := CurrentModule.NamedGlobal(s.Name); !g.IsNil() {
 		return g
@@ -305,6 +322,12 @@ func setGoObjDataFlags(g llvm.Value, s *obj.LSym) {
 	if s.MakeTypelink() {
 		flag |= 1 << 2 // goobj.SymFlagTypelink
 	}
+	if s.TypeInfo() != nil {
+		// Typed descriptor globals are intentionally literal structs so their
+		// exact variable tail remains visible in IR. Carry the GoType bit
+		// explicitly rather than relying on a named LLVM wrapper type.
+		flag |= 1 << 6 // goobj.SymFlagGoType
+	}
 	if s.UsedInIface() {
 		flag2 |= 1 << 0 // goobj.SymFlagUsedInIface
 	}
@@ -323,6 +346,31 @@ func setGoObjDataFlags(g llvm.Value, s *obj.LSym) {
 	}))
 }
 
+// LLVM can express the address relationship but not GoObj's 32-bit section
+// offsets. Record the object-format-specific relocation type explicitly;
+// weakness remains orthogonal in !goobj.weak_relocs.
+func setGoObjOffsetRelocMetadata(g llvm.Value, s *obj.LSym) {
+	entries := make([]llvm.Metadata, 0)
+	for _, r := range s.R {
+		var typ objabi.RelocType
+		switch r.Type {
+		case objabi.R_ADDROFF, objabi.R_METHODOFF:
+			typ = r.Type
+		case objabi.R_WEAKADDROFF:
+			typ = objabi.R_ADDROFF
+		default:
+			continue
+		}
+		entries = append(entries, GlobalCtxt.MDNode([]llvm.Metadata{
+			llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(r.Off), false).ConstantAsMetadata(),
+			llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(typ), false).ConstantAsMetadata(),
+		}))
+	}
+	if len(entries) != 0 {
+		g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.relocs"), GlobalCtxt.MDNode(entries))
+	}
+}
+
 func setGoObjWeakRelocMetadata(g llvm.Value, s *obj.LSym) {
 	entries := make([]llvm.Metadata, 0)
 	for _, r := range s.R {
@@ -331,9 +379,9 @@ func setGoObjWeakRelocMetadata(g llvm.Value, s *obj.LSym) {
 			entries = append(entries,
 				llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(r.Off), false).ConstantAsMetadata())
 		case objabi.R_ADDR, objabi.R_ADDROFF, objabi.R_METHODOFF:
-			// LLVM constants carry the offset, size, target, and addend. The
-			// GoObj writer derives the strong relocation kind from those
-			// semantics and the containing descriptor type.
+			// LLVM constants carry the offset, size, target, and addend.
+			// Offset relocation types are recorded separately in
+			// !goobj.relocs.
 		case objabi.R_KEEP:
 			continue
 		default:
