@@ -135,11 +135,19 @@ fail-fast。ABI0 的普通 static call 仍使用独立 calling convention，但�
 
 nil funcval 调用必须在 indirect call 前产生可恢复的 Go panic。原生 Go backend
 依赖 funcval 首字的机器 load 在零地址 fault；普通 LLVM null load 则允许优化器
-按 undefined behavior 处理。当前 lowering 在真实 code-pointer load 前保留一个
-`load volatile i8` faulting access，以保证 nil-check side effect 不会被删除。
-该实现正确但会为非 nil 闭包增加一次额外 load；后续任务应验证并改为单次
-pointer-sized faulting load，同时补充 nil funcval 的优化前后 IR、汇编和
-`recover` 回归，不能简单删除 fault 语义。
+按 undefined behavior 处理。包含 closure code load 的 LLVM caller 因此带有
+`null_pointer_is_valid` function attribute，真实 code pointer 保持单次普通
+`load ptr`。load 结果直接进入 indirect call，不会成为 dead load；attribute
+则阻止 LLVM 仅因 funcval 可能为 nil 就把该路径改写为 `unreachable`。最终
+机器代码与原生 Go backend 一样，依赖零页访问产生 fault。
+
+TODO：通用 `OpNilCheck` 当前仍 lower 为结果未使用的 `load volatile i8`。
+`null_pointer_is_valid` 只能消除 null dereference 的 undefined behavior，不能
+阻止 DCE 删除未使用的普通 load。后续应在 LLVM GoObj 路径中引入可分析的 Go
+nilcheck marker/intrinsic，并实现 target-aware nilcheck analysis：在 panic
+顺序、可恢复 fault、允许的 implicit-check offset 和 memory dependence 均满足时，
+把显式 nilcheck 合并到后续 faulting load；否则保留确定性的 check。完成该分析
+前不能删除通用 `OpNilCheck` 的 volatile side effect。
 
 带 closure context 的 GoObj 函数发生 stack growth 时必须调用
 `runtime.morestack`，使 REGCTXT 在 slow path 中保留；普通函数仍调用
@@ -273,6 +281,8 @@ GoALLC 不维护一套与 Go 仓库重复的测试源码。LLVM 测试由
 - codegen 候选是 `test/codegen` 下 recipe 为 `// asmcheck` 的文件；
 - runtime 候选是 testdir 原本扫描目录中 recipe 为 `// run` 的文件；
 - `test/llvm_tests.json` 分别维护 codegen 和 runtime 的白名单与黑名单；
+- codegen source 出现 `// LLVM-OPT` directive 时，runner 还会执行
+  `opt -passes=default<O2>`，并用 `LLVM-OPT` prefix 检查优化后的 IR；
 - 白名单是当前必须通过的用例；黑名单支持 glob，用于记录尚未覆盖的范围；
   精确白名单优先于宽泛黑名单；
 - runner 会拒绝拼错的白名单、无匹配项的黑名单，以及未被任一名单分类的
