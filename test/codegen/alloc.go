@@ -9,6 +9,13 @@
 
 package codegen
 
+// LLVM-DAG: @runtime.zerobase = external global i8
+// LLVM-DAG: define goabiinternal ptr @codegen.zeroAllocNew1()
+// LLVM-DAG: ret ptr @runtime.zerobase
+// LLVM-DAG: define goabiinternal ptr @codegen.zeroAllocNew2()
+// LLVM-DAG: define goabiinternal { ptr, i64, i64 } @codegen.zeroAllocSliceLit()
+// LLVM-DAG: ret { ptr, i64, i64 } { ptr @runtime.zerobase, i64 0, i64 0 }
+
 func zeroAllocNew1() *struct{} {
 	// 386:-`CALL runtime\.newobject` `LEAL runtime.zerobase`
 	// amd64:-`CALL runtime\.newobject` `LEAQ runtime.zerobase`

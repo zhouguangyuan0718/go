@@ -1,8 +1,46 @@
 {
   "codegen": {
     "whitelist": {
+      "codegen/addrcalc.go": "bounds-checked nested array address calculation",
+      "codegen/alloc.go": "zero-sized allocations and slice literals through runtime.zerobase",
+      "codegen/arithmetic.go": "integer arithmetic, constant folding, division, remainder, and bounds-checked memory updates",
+      "codegen/bitfield.go": "bitfield extraction, insertion, masking, shifts, and multi-result tuple construction",
+      "codegen/compare_and_branch.go": "signed and unsigned compare-and-branch control flow including channel receives",
       "codegen/divmod.go": "integer division, remainder, overflow handling, and tuple ABI",
-      "codegen/logic.go": "integer logic and conditional control flow"
+      "codegen/interface.go": "static multi-method itabs, interface conversions and indirect method calls",
+      "codegen/interface_assertion.go": "comma-ok and panic-form concrete and non-empty interface assertions",
+      "codegen/interface_conversion.go": "dynamic interface-to-interface conversion cache and runtime fallback",
+      "codegen/interface_equality.go": "empty and non-empty interface equality through runtime comparators",
+      "codegen/interface_switch.go": "concrete and multiple interface type-switch cases with variable static cache descriptor",
+      "codegen/issue22703.go": "large interface method descriptor table and small versus large itab method offsets",
+      "codegen/issue25378.go": "zero extension of byte and uint16 array arguments for table indexing",
+      "codegen/issue31618.go": "signed shifts and additions across inlining positions",
+      "codegen/issue33580.go": "large integer masks and chained multiplication",
+      "codegen/issue42610.go": "masked indexes across 32-bit and word-sized slice accesses",
+      "codegen/issue48054.go": "string and slice length comparisons lowered to integer predicates",
+      "codegen/issue52635.go": "array and slice range clearing through typed loads and memclr calls",
+      "codegen/issue59297.go": "direct call argument placement followed by nil-checked pointer store",
+      "codegen/issue60673.go": "nil-checked scalar load passed through the internal ABI",
+      "codegen/issue61356.go": "wide packing from pointer-indexed loads, shifts, and bitwise composition",
+      "codegen/issue63332.go": "channel send with a materialized scalar argument",
+      "codegen/issue66585.go": "dynamic package initialization and typed global metadata",
+      "codegen/issue69635.go": "combined unsigned shifts and mask extraction",
+      "codegen/issue72832.go": "typed narrow stores and shifted field extraction",
+      "codegen/issue74485.go": "unsigned division and remainder at integer sign-bit constants",
+      "codegen/known_bits.go": "phi-carried known-bit masking and boolean control flow",
+      "codegen/logic.go": "integer logic and conditional control flow",
+      "codegen/memops.go": "typed indexed loads, stores, comparisons, bounds checks, and scalar memory operations",
+      "codegen/memops_bigoffset.go": "typed loads and stores at offsets beyond signed 32-bit byte displacement",
+      "codegen/multiply.go": "integer multiplication across positive, negative, and zero constants",
+      "codegen/regabi_regalloc.go": "register ABI argument permutations in direct calls",
+      "codegen/shift.go": "constant, masked, guarded, widened, and combined integer shifts",
+      "codegen/shortcircuit.go": "empty-interface extraction and concrete type comparison",
+      "codegen/smallintiface.go": "small scalar boxing through runtime.staticuint64s",
+      "codegen/spills.go": "integer and floating-point values preserved across calls",
+      "codegen/structs.go": "typed struct initialization and zeroing",
+      "codegen/type_descriptor.go": "compiler-owned runtime type descriptor data and GoObj metadata",
+      "codegen/type_descriptor_kinds.go": "all runtime type descriptor layouts and variable descriptor data",
+      "codegen/type_descriptor_methods.go": "uncommon type data, concrete method tables, wrappers, and R_METHODOFF"
     },
     "blacklist": {
       "codegen/*": "LLVM lowering support has not reached this complete source file yet"
@@ -10,7 +48,25 @@
   },
   "runtime": {
     "whitelist": {
-      "helloworld.go": "basic main-to-runtime call and execution"
+      "alias1.go": "byte and rune aliases in concrete interface type switches",
+      "char_lit.go": "character literal constants and external os.Exit reference",
+      "compos.go": "heap allocation of escaping composite literals and pointer inequality",
+      "const8.go": "implicit constant declarations and iota shadowing",
+      "helloworld.go": "basic main-to-runtime call and execution",
+      "int_lit.go": "integer literal constants and external os.Exit reference",
+      "iota.go": "integer, float, string, boolean, and paired iota constants",
+      "llvm_type_descriptor.go": "type descriptor data, ABI-internal equality closure, GoObj link, and execution",
+      "llvm_type_descriptor_kinds.go": "all runtime type descriptor kinds, GoObj link, and execution",
+      "llvm_type_descriptor_map.go": "typed map descriptor layout, R_KEEP reachability edge, GoObj link, and execution",
+      "llvm_type_descriptor_methods.go": "uncommon concrete methods, method wrappers, direct calls, GoObj link, and execution",
+      "printbig.go": "signed and unsigned 64-bit boundary constants through runtime print",
+      "sizeof.go": "unsafe Sizeof, Alignof, and deeply embedded Offsetof constants",
+      "varinit.go": "nested variable initialization and lexical shadowing",
+      "llvm_interface.go": "static multi-method itab, interface conversion, indirect calls, GoObj link, and execution",
+      "llvm_interface_conversion.go": "dynamic interface-to-interface conversion cache, runtime fallback, nil conversion, and execution",
+      "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
+      "llvm_interface_equality.go": "empty and non-empty interface equality for matching and differing dynamic values",
+      "llvm_interface_switch.go": "nil, concrete, multiple interface, and default type-switch cases with execution"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"

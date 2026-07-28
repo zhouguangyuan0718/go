@@ -8,6 +8,15 @@
 
 package codegen
 
+// LLVM-LABEL: define goabiinternal i64 @codegen.pack20(ptr %in)
+// LLVM: getelementptr i64, ptr %in, i64 0
+// LLVM: shl i64 {{%.*}}, 4
+// LLVM: getelementptr i64, ptr %in, i64 1
+// LLVM: shl i64 {{%.*}}, 7
+// LLVM: or i64
+// LLVM: getelementptr i64, ptr %in, i64 19
+// LLVM: shl i64 {{%.*}}, 61
+
 func pack20(in *[20]uint64) uint64 {
 	var out uint64
 	out |= 4

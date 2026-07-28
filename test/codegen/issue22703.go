@@ -6,6 +6,13 @@
 
 package codegen
 
+// LLVM-DAG: @"type:codegen.I" = constant <{ %go.runtime.InterfaceType, %go.runtime.UncommonType, [512 x %go.runtime.Imethod] }>
+// LLVM-DAG: define goabiinternal void @codegen.callMethodLargeOffset({ ptr, ptr } %i)
+// LLVM-DAG: getelementptr i8, ptr {{%.*}}, i64 4112
+// LLVM-DAG: define goabiinternal void @codegen.callMethodSmallOffset({ ptr, ptr } %i)
+// LLVM-DAG: getelementptr i8, ptr {{%.*}}, i64 32
+// LLVM-DAG: call goabiinternal void {{%.*}}(ptr {{%.*}})
+
 type I interface {
 	foo000()
 	foo001()

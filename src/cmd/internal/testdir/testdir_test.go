@@ -121,6 +121,10 @@ func Test(t *testing.T) {
 	goExperiment = env.GOEXPERIMENT
 	goDebug = env.GODEBUG
 	tmpDir = t.TempDir()
+	stdlibImportcfgPath = filepath.Join(tmpDir, "importcfg")
+	if err := os.WriteFile(stdlibImportcfgPath, []byte(stdlibImportcfg()), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	common := testCommon{
 		gorootTestDir: filepath.Join(testenv.GOROOT(t), "test"),
@@ -229,14 +233,14 @@ var stdlibImportcfg = sync.OnceValue(func() string {
 	return string(output)
 })
 
-var stdlibImportcfgFile = sync.OnceValue(func() string {
-	filename := filepath.Join(tmpDir, "importcfg")
-	err := os.WriteFile(filename, []byte(stdlibImportcfg()), 0644)
-	if err != nil {
-		log.Fatal(err)
+var stdlibImportcfgPath string
+
+func stdlibImportcfgFile() string {
+	if stdlibImportcfgPath == "" {
+		panic("stdlib importcfg was not initialized")
 	}
-	return filename
-})
+	return stdlibImportcfgPath
+}
 
 // linkFile links infile with the given importcfg and ldflags, writes to outfile.
 // infile can be the name of an object file or a go source file.

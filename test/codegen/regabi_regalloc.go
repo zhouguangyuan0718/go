@@ -6,6 +6,12 @@
 
 package codegen
 
+// LLVM-DAG: define goabiinternal void @codegen.f2(i64 %a, i64 %b)
+// LLVM-DAG: call goabiinternal void @codegen.g(i64 %b, i64 %b, i64 %b)
+// LLVM-DAG: define goabiinternal void @codegen.g(i64 %"~p0", i64 %"~p1", i64 %"~p2")
+// LLVM-DAG: define goabiinternal void @codegen.f1(i64 %a, i64 %b)
+// LLVM-DAG: call goabiinternal void @codegen.g(i64 1, i64 %a, i64 %b)
+
 //go:registerparams
 func f1(a, b int) {
 	// amd64:"MOVQ BX, CX" "MOVQ AX, BX" "MOVL [$]1, AX" -"MOVQ .*DX"

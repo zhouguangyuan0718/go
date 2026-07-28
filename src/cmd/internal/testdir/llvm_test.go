@@ -253,6 +253,13 @@ func runLLVMCodegenTest(t *testing.T, gorootTestDir, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	opt := llvmToolPath(t, "opt", "GOALLC_OPT")
+	cmd = exec.Command(opt, "-passes=verify", "-disable-output")
+	cmd.Stdin = bytes.NewReader(irBytes)
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("LLVM verifier failed: %v\n%s", err, out)
+	}
 	fileCheck := llvmToolPath(t, "FileCheck", "GOALLC_FILECHECK")
 	cmd = exec.Command(fileCheck, "--check-prefix=LLVM", source)
 	cmd.Stdin = bytes.NewReader(irBytes)

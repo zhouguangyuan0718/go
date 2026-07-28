@@ -25,6 +25,90 @@ IR 和 Go archive 的 `__.PKGDEF` 后结束，不再生成原生 linker object�
 对被替换的 package 而言，archive 中唯一的 `_go_.o` 必须是 `llc` 生成的
 GoObj；`__.PKGDEF` 仍完全由 Go compiler 生成并位于 archive 的第一个成员。
 
+## 类型描述符和只读数据
+
+`-llvmironly` 不会跳过 compiler 的 `dumpdata` 准备阶段。`reflectdata` 仍按
+原生 compiler 的方式在 `base.Ctxt.Data` 中生成最终的 `obj.LSym` 布局；随后
+LLVM lowering 从带有 `TypeInfo` 的 runtime type descriptor roots 出发，收集
+仅由这些 roots 的 relocation 可达的数据闭包，并将其 lower 为 LLVM constant
+globals。descriptor 的主体由同一份 `rttype` runtime ABI layout 构造为 packed
+named LLVM structs（例如 `%go.runtime.Type`、`%go.runtime.StructType`）；未建
+schema 的辅助数据仍以 bytes/relocations 表示。这个边界刻意位于 finalized LSym，
+而不是重写 reflectdata 布局逻辑。
+
+每个被 lower 的 LSym 保留：
+
+- descriptor 已知字段的 runtime ABI 类型、字段 offset、原始值和
+  `.rodata` / `.data` / `.bss` 段属性；
+- `R_ADDR`、`R_ADDROFF`、`R_METHODOFF` 及其 weak 变体的 addend 和目标；
+- `DUPOK`、`LOCAL`、typelink、Go type、itab、`UsedInIface`、linkname 等 GoObj
+  symbol flags；
+- runtime ABIInternal 函数引用（例如 type equality closure 中的
+  `runtime.memequal64`）。
+
+LLVM IR 优先使用原生 linkage 和语义类型交接这些属性：Local 对应
+`internal`，非 Local 的 DUPOK 对应 `weak`。Go type descriptor 与 itab 的
+外层使用匿名 packed struct，内部字段继续使用 `%go.runtime.*` ABI 类型；descriptor
+和 itab 的身份由真实的 `type:*` / `go:itab.*` global symbol 表达，避免重复生成
+既长又不提供额外 LLVM 语义的 identified wrapper type。`!goobj.symbol.flags` 只保留 typelink、
+UsedInIface、linkname 以及 Local+DUPOK 重叠等没有等价 LLVM 表示的位。
+普通 address、type offset 和 method offset 都由 LLVM initializer 与语义类型
+直接推导；`!goobj.weak_relocs` 只记录无法由 LLVM 表达的逐 relocation weak
+属性。零宽度的 linker
+保活边 `R_KEEP` 不伪装为地址常量，而用模块级 `!goobj.keep` 关系表记录；
+`gotype` aux 和 interface dead-method marker 也使用模块级关系表。表中的 source
+与 target 都是对 LLVM global/function 的直接引用，不再以字符串重复符号名，
+因此 LLVM 重命名和 RAUW 会同步更新这些关系；关系涉及的值同时进入
+`@llvm.compiler.used`，避免 GlobalDCE 删除仅承担对象格式语义的声明。该 LLVM
+特殊全局本身不生成数据，writer 再根据关系表合成 GoObj relocation/aux。最终链路仍只有
+`__.PKGDEF + _go_.o` 两个有意义的 archive members；不会生成或合并 native data
+object。
+
+静态 interface conversion 还会把带有 `ItabInfo` 的 roots 纳入同一数据闭包。
+itab 使用 `%go.runtime.ITab` 和按实际方法数扩展的 packed LLVM struct 表达；
+固定的 `Fun[0]` 后面按 LSym 的最终大小追加 `ptr` 数组。`ptr` 与 runtime
+`uintptr` 具有相同大小和对齐，因此单方法和多方法 itab 仍保持连续的 ABI
+布局，同时 LLVM 能保留静态方法入口的 function-pointer 语义。方法入口仍保留
+weak `R_ADDR` relocation。interface 方法调用从 itab 槽直接加载 LLVM pointer，
+并以原 SSA `AuxCall` 的 ABIInternal signature 发出 indirect call。
+
+Go linker 的 dead-method elimination 还依赖函数上的零宽度
+`R_USEIFACE`、`R_USEIFACEMETHOD` 和 `R_USENAMEDMETHOD`。它们不对应 LLVM
+机器指令或地址常量，因此 compiler 用 `!goobj.marker_relocs` 保存精确的
+relocation type、addend 和 target name；GoObj writer 将其恢复到源函数的
+relocation 列表。普通 LLVM call graph 不能替代这项 linker 契约。
+
+non-empty interface 到另一 non-empty interface 的转换沿用 compiler 生成的
+`internal/abi.TypeAssert` cache 和 `runtime.typeAssert` fallback。LLVM lowering
+保留 cache 的 sequentially-consistent pointer load、pointer/uintptr probe 比较、
+nil 分支和 ABIInternal runtime call；cache miss 与随后命中的 fast path 均由
+runtime 测试覆盖。empty interface 到 concrete type 的 comma-ok assertion
+直接比较动态 type word 并按 SSA 结果形状取回 data；empty interface 到
+non-empty interface 的 comma-ok assertion 复用同一 TypeAssert cache/fallback，
+并覆盖成功、类型不匹配和 nil 输入。panic-form assertion 沿用相同 fast path，
+失败边分别调用 `runtime.panicdottypeE`、`runtime.panicdottypeI` 或
+`runtime.panicnildottype`。
+
+interface type switch 对 concrete cases 使用动态 type hash/type pointer 比较；
+interface case 使用 compiler 生成的 `internal/abi.InterfaceSwitch` descriptor、
+atomic cache probe 和 `runtime.interfaceSwitch` fallback。descriptor 作为带
+`AuxGotype` 的可写 data root 进入同一 LSym-to-LLVM data closure；其尾部
+interface type 指针数组按实际 case 数扩展，并由多 interface case 测试覆盖。
+两个非 nil interface 的 equality 分别保留 `runtime.efaceeq` 或
+`runtime.ifaceeq` ABIInternal call，以动态 type/itab 和 data words 完成比较。
+
+这类可写 descriptor 还要求 GoObj symbol 的精确大小、对齐和 `AuxGotype`。
+LLVM GoObj writer 从 global layout 写入 symbol size/alignment，排除 section
+padding，并通过 `!goobj.gotype` 恢复 compiler LSym 的 Go type auxiliary。
+该 auxiliary 的 target 既可以是本包定义，也可以是 external non-package
+reference；后者用于 builtin 或其他 package 拥有的 type symbol。
+否则 linker 无法为 `.data` 生成正确的 GC bitmap。
+
+当前实现只 lower type-rooted data closure，尚未把所有 `dumpdata` 产物泛化为
+LLVM data lowering。type descriptor 中未被当前 schema 覆盖的尾部数据，以及其他
+data roots，保守地维持 bytes/relocation fallback；新增 schema 或 root 前必须先明确
+其 relocation、GC 和 linker 契约，并为 writer 增加相应的 GoObj regression。
+
 ## LLVM IR 契约
 
 LLVM IR 本身是 frontend 到 `llc` 的唯一配置载体。`compile` 设置 GoObj
@@ -194,11 +278,18 @@ go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
 
 - 当前 target triple 仅配置了 `darwin/arm64` 和 `linux/amd64`。
 - LLVM SSA lowering 仍不完整；复杂 SSA op、GC pointer liveness、defer/panic、
-  closure/interface、完整 ABI/DWARF 等尚未达到通用正确性。
+  closure、完整 ABI/DWARF 等尚未达到通用正确性。
+- 当前 interface 范围包括 compiler 能静态生成 itab 的 concrete-to-interface
+  conversion、对应的 ABIInternal 间接方法调用，以及 non-empty
+  interface-to-interface conversion；empty-interface 到 concrete/non-empty
+  interface 的 comma-ok/panic-form assertion，以及包含 concrete/interface cases
+  的 type switch 也已覆盖。
 - 每个经 LLVM 替换的 package 都必须由 `llc` 生成完整的 `_go_.o`，不能与
   原生 compiler object 混合。
 - `!goobj.config` 是这条开发链路的稳定交接点。新增 header 配置时应新增独立
   metadata 字段和相应 `llc` 验证，不要恢复 wrapper 中的 header 解析逻辑。
+- 类型 descriptor data 已覆盖，但这不等同于通用 static-data lowering；目前仅
+  支持 type-rooted readonly/data closure 中已验证的 relocation 类型。
 
 相关合入记录：Go [#3](https://github.com/goallc/go/pull/3)，LLVM
 [#3](https://github.com/goallc/llvm-project/pull/3)。
