@@ -267,6 +267,25 @@ func runLLVMCodegenTest(t *testing.T, gorootTestDir, name string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("FileCheck failed: %v\n%s", err, out)
 	}
+
+	if !bytes.Contains(src, []byte("// LLVM-OPT")) {
+		return
+	}
+	cmd = exec.Command(opt, "-passes=default<O2>", "-S")
+	cmd.Stdin = bytes.NewReader(irBytes)
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	optimizedIR, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("LLVM optimization failed: %v\n%s", err, stderr.Bytes())
+	}
+	cmd = exec.Command(fileCheck, "--check-prefix=LLVM-OPT", source)
+	cmd.Stdin = bytes.NewReader(optimizedIR)
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("optimized LLVM FileCheck failed: %v\n%s", err, out)
+	}
 }
 
 func (t test) runLLVMCase(tempDir string, flags, args []string, runcmd runCmd) error {
