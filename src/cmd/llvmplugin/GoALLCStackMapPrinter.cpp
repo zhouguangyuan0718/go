@@ -4,6 +4,7 @@
 
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -81,6 +82,10 @@ bool GoALLCStackMapPrinter::emitStackMaps(StackMaps &SM, AsmPrinter &AP) {
       if (NumDeopts > CSI.Locations.size() - 3)
         report_fatal_error("malformed GoALLC statepoint deopt operands");
       size_t FirstGCLocation = 3 + static_cast<size_t>(NumDeopts);
+      if (CSI.ID == goabi::StackGrowthStatepointID &&
+          FirstGCLocation != CSI.Locations.size())
+        report_fatal_error(
+            "GoALLC stack-growth statepoint contains GC live locations");
 
       MCContext::GoObjStackMapEntry Entry{
           CSI.CSOffsetExpr,

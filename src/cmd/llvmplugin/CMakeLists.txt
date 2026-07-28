@@ -75,6 +75,21 @@ if(BUILD_TESTING)
   )
 
   add_test(
+    NAME GoALLCStatepoints.StackGrowthAttribute
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.StackGrowthAttribute PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "go-stack-growth-statepoint"
+  )
+
+  add_test(
     NAME GoALLCStatepoints.AllocaDerivedRewrite
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
@@ -95,6 +110,7 @@ if(BUILD_TESTING)
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
       -statepoint-callsite-position=call-start
+      -verify-machineinstrs
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/statepoint.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
@@ -106,6 +122,7 @@ if(BUILD_TESTING)
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
       -statepoint-callsite-position=call-start
+      -verify-machineinstrs
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-derived.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-derived.ll"
@@ -132,6 +149,7 @@ if(BUILD_TESTING)
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
       -statepoint-callsite-position=call-start
+      -verify-machineinstrs
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/multiple-calls.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/multiple-calls.ll"

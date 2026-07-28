@@ -7,6 +7,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
@@ -281,6 +282,7 @@ Error rewriteFunction(Function &F) {
   }
 
   F.setGC(GoALLCGCName.str());
+  F.addFnAttr(goabi::StackGrowthStatepointAttr);
   DominatorTree DT(F);
   LivenessData Data = computeLiveness(F);
   SmallVector<SafepointRecord, 8> Records;

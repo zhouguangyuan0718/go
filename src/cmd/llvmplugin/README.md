@@ -32,9 +32,12 @@ StackMaps and GoObj. It uses the standard
 machine locations into `MCContext`. LLVM's generic `StackMaps.cpp` has no
 GoALLC or GoObj branch. `llvmtoolexec` selects
 `-statepoint-callsite-position=call-start`, so the recorded callsite PC matches
-Go's `PCDATA_StackMapIndex` convention. The map remains active through the
-normal return and resets at the stack-growth slow-path entry, matching the
-range emitted by the Go assembler without relying on a return-PC convention.
+Go's `PCDATA_StackMapIndex` convention. The pass also marks Go ABI functions
+for LLVM to express the late-generated `runtime.morestack` call as a physical
+MIR `STATEPOINT` with empty deopt, GC pointer, GC alloca, and GC relocation
+sections. Its empty locals bitmap starts at the morestack CALL, so ordinary
+and stack-growth calls use the same Machine StackMaps pipeline without relying
+on a return-PC convention.
 GoObj emits the currently constant safe `PCDATA_UnsafePoint` table first and
 the statepoint-derived `PCDATA_StackMapIndex` table second, as required by
 their Go ABI indexes 0 and 1.

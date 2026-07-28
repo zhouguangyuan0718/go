@@ -70,13 +70,13 @@ def main():
     )
     ranges = stack_index["ranges"]
     values = [item["value"] for item in ranges]
-    if values != [-1, 0, 1, -1]:
+    if values != [-1, 0, 1, 2]:
         fail(f"unexpected stack-map range values: {values}")
 
     queries = metadata["stack_map_queries"]
     if len(queries) != 3:
         fail(f"found {len(queries)} call queries, want 3")
-    if [item["stack_map_index"] for item in queries] != [0, 1, -1]:
+    if [item["stack_map_index"] for item in queries] != [0, 1, 2]:
         fail(f"unexpected call stack-map indexes: {queries}")
     for query in queries:
         if pc_value(ranges, query["lookup_pc"]) != query["stack_map_index"]:
@@ -88,25 +88,29 @@ def main():
         fail("first stack-map range does not start at the first CALL")
     if ranges[2]["start"] != queries[1]["call_offset"] - 1:
         fail("second stack-map range does not start at the second CALL")
-    if ranges[3]["start"] >= queries[2]["call_offset"] - 1:
-        fail("stack-map reset does not precede the morestack CALL")
+    if ranges[3]["start"] != queries[2]["call_offset"] - 1:
+        fail("empty stack-growth map does not start at the morestack CALL")
 
     locals_maps = only(
         metadata["funcdata"],
         lambda item: item["kind"] == "locals_pointer_maps",
         "FUNCDATA_LocalsPointerMaps tables",
     )["stack_map"]
-    if locals_maps["count"] != 2:
-        fail(f"locals stack-map count is {locals_maps['count']}, want 2")
+    if locals_maps["count"] != 3:
+        fail(f"locals stack-map count is {locals_maps['count']}, want 3")
     first_bits = set(locals_maps["bitmaps"][0]["set_bits"] or [])
     second_bits = set(locals_maps["bitmaps"][1]["set_bits"] or [])
+    morestack_bits = set(locals_maps["bitmaps"][2]["set_bits"] or [])
     if len(first_bits) != 2 or len(second_bits) != 1:
         fail(f"unexpected live pointer sets: {first_bits}, {second_bits}")
+    if morestack_bits:
+        fail(f"morestack statepoint has GC live pointers: {morestack_bits}")
 
     print(
         f"{FUNCTION}: PCDATA values {values}, "
         f"call maps {[item['stack_map_index'] for item in queries]}, "
-        f"locals bits {sorted(first_bits)} -> {sorted(second_bits)}"
+        f"locals bits {sorted(first_bits)} -> {sorted(second_bits)} "
+        f"-> {sorted(morestack_bits)}"
     )
 
 
