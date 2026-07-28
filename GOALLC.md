@@ -495,16 +495,19 @@ cmake --install "$PLUGIN_BUILD"
 
 插件 core 在 Go 仓库中实现 Go ABI 函数的 pointer liveness、稳定 safepoint
 ID、`gc.statepoint` / `gc.relocate` 和 GC leaf 识别。当前 pointer 分类保守
-且不依赖 addrspace；live aggregate、EH invoke、musttail 等未覆盖形态会
-fail closed。未来 `cmd/compile` 通过 API 进程内集成 LLVM 时复用同一 core，
-而不依赖 `llc` plugin adapter。
+且不依赖 addrspace；活跃的 `alloca` 地址和 alloca-derived pointer 都加入
+`gc-live`，由最终 Machine StackMaps 位置决定是否形成 Go pointer bit。live
+aggregate、EH invoke、musttail 等未覆盖形态会 fail closed。未来
+`cmd/compile` 通过 API 进程内集成 LLVM 时复用同一 core，而不依赖 `llc`
+plugin adapter。
 
 Machine StackMaps 通过插件注册的 `GCMetadataPrinter::emitStackMaps` 接入：
 插件读取 LLVM 已生成的通用机器位置记录并桥接到 GoObj writer，LLVM
 `StackMaps.cpp` 不含 GoALLC/GoObj 特判。当前 `Indirect [SP+offset]` 生成
-locals pointer bit，`Direct SP+offset` 只表示可重建的栈地址、不置位。第一阶段
-ArgsPointerMaps 仍是与 locals map 索引数对齐的空表，StackObjects 尚未实现；
-两者作为后续 P0，不能把当前输出解释为完整 Go ABI 参数图。
+locals pointer bit，`Direct SP+offset` 只表示可重建的栈地址、不置位；追踪
+alloca 地址不等于已经描述 alloca 对象内部的指针字段。第一阶段 ArgsPointerMaps
+仍是与 locals map 索引数对齐的空表，StackObjects 尚未实现；两者作为后续 P0，
+不能把当前输出解释为完整 Go ABI 参数图。
 
 验证 standalone binding：
 

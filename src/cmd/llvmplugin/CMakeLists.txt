@@ -68,7 +68,22 @@ if(BUILD_TESTING)
   )
   set_tests_properties(GoALLCStatepoints.Rewrite PROPERTIES
     PASS_REGULAR_EXPRESSION
-      "llvm.experimental.gc.relocate"
+      "slot.relocated"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.AllocaDerivedRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-derived.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.AllocaDerivedRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "selected.relocated"
   )
 
   add_test(
@@ -79,6 +94,16 @@ if(BUILD_TESTING)
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/statepoint.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.AllocaDerivedGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-derived.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-derived.ll"
   )
 
   add_test(

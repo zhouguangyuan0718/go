@@ -15,7 +15,10 @@ The initial statepoint pass handles ordinary calls in Go ABI functions. It
 computes pointer liveness with a backwards CFG dataflow analysis, assigns
 stable callsite IDs, emits `gc.statepoint` and `gc.relocate`, and respects
 `gc-leaf-function`. Pointer classification is conservative and independent of
-LLVM address spaces.
+LLVM address spaces. The initial implementation keeps live `alloca` addresses
+and alloca-derived pointer values in `gc-live`; it does not try to predict
+whether instruction selection will rematerialize a frame address or spill a
+materialized pointer value.
 
 The first implementation intentionally fails closed for live pointer
 aggregates, relocation paths that require new PHIs, `invoke`, call operand
@@ -29,14 +32,17 @@ StackMaps and GoObj. It uses the standard
 machine locations into `MCContext`. LLVM's generic `StackMaps.cpp` has no
 GoALLC or GoObj branch. The GoObj writer interprets those locations after final
 layout: an `Indirect [SP+offset]` location contributes a locals pointer bit,
-while a `Direct SP+offset` stack address does not.
+while a `Direct SP+offset` stack address does not. This permits conservative IR
+tracking without confusing an alloca's address with pointer data stored in the
+alloca.
 
 The first phase emits count-aligned, empty `FUNCDATA_ArgsPointerMaps`; it does
 not yet classify Go ABI argument home slots. `FUNCDATA_StackObjects` is also
-not implemented. Both remain P0 follow-ups before pointer-containing
-address-taken stack objects or non-empty stack arguments are supported. These
-boundaries should be expanded without moving Go policy into LLVM's generic
-StackMaps implementation.
+not implemented, so pointer-containing address-taken alloca storage is outside
+the supported first phase. Tracking an alloca address across a statepoint does
+not describe the pointer fields stored inside that object. Both stack objects
+and non-empty argument maps remain P0 follow-ups. These boundaries should be
+expanded without moving Go policy into LLVM's generic StackMaps implementation.
 
 Build, test, and install it into the LLVM payload that contains `llc`:
 
