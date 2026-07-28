@@ -19,6 +19,8 @@ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 
 add_llvm_pass_plugin(GoALLCStatepoints
   GoALLCPreCodeGen.cpp
+  GoALLCStackMapPrinter.cpp
+  GoALLCStatepoints.cpp
   GoALLCStatepointPlugin.cpp
 )
 
@@ -52,5 +54,84 @@ if(BUILD_TESTING)
   set_tests_properties(GoALLCStatepoints.Load PROPERTIES
     PASS_REGULAR_EXPRESSION
       "GoALLCStatepoints: ran pre-codegen pipeline for"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.Rewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.Rewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "llvm.experimental.gc.relocate"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.GoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/statepoint.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.LiveAggregateFails
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/live-aggregate.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.LiveAggregateFails PROPERTIES
+    WILL_FAIL TRUE
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.ConditionalRelocationFails
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/conditional-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.ConditionalRelocationFails PROPERTIES
+    WILL_FAIL TRUE
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.InvokeFails
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/unsupported-invoke.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.InvokeFails PROPERTIES
+    WILL_FAIL TRUE
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.ParamAttrFails
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/unsupported-param-attr.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.ParamAttrFails PROPERTIES
+    WILL_FAIL TRUE
   )
 endif()

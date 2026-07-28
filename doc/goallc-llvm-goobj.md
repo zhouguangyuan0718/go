@@ -255,9 +255,24 @@ pass plugin 默认从 `llc` 所属 LLVM payload 的
 `src/cmd/llvmplugin`，不放入 LLVM 源码树。LLVM 只提供通用的
 `-load-pass-plugin` 和 pre-codegen callback；GoALLC statepoint rewrite 及其
 pass 顺序都应继续在这个 Go-owned 工程中实现。当前
-`runPreCodeGenPipeline` 是刻意保留的 no-op 接口，本阶段测试只验证外部插件
-能够被所选 `llc` 加载并在 codegen 前收到 module。未来 compile 进程内集成
-LLVM 时直接复用该 core 入口，不经过 plugin adapter。
+`runPreCodeGenPipeline` 调用 Go-owned statepoint pass：它对 Go ABI 函数执行
+CFG 逆向数据流活跃性分析，为普通调用分配稳定 callsite ID，生成
+`gc.statepoint` / `gc.relocate`，并识别 `gc-leaf-function`。受管指针分类当前
+对 LLVM `ptr` 保守，不依赖 addrspace。第一阶段对 live pointer aggregate、
+`invoke`、`musttail` 和非 leaf inline asm fail closed。未来 compile 进程内
+集成 LLVM 时直接复用该 core 入口，不经过 plugin adapter。
+
+机器位置不通过修改 LLVM 通用 `StackMaps.cpp` 截获。插件为 `goallc` GC
+strategy 注册 `GCMetadataPrinter::emitStackMaps`，在 AsmPrinter 模块收尾阶段
+读取标准 `FnInfos/CSInfos`，跳过 statepoint 的 CC、flags 和 deopt 前缀后，把
+原始 GC locations 写入 MCContext。GoObj writer 在最终 layout 后完成 SP
+校验、`Direct`/`Indirect` 解释、LocalsPointerMaps 和 PCDATA_StackMapIndex
+编码。`Direct SP+offset` 是栈地址本身，不表示该 slot 存有 pointer；只有
+`Indirect [SP+offset]` 在 locals bitmap 置位。
+
+当前 ArgsPointerMaps 只是与 locals map 数量对齐的 `nbit=0` 空表，并未实现
+Go ABI 参数 home/stack slot 分类；StackObjects 也尚未生成。这两个缺口仍是
+后续 P0，首批验证仅覆盖没有 heap pointer store 的活指针跨调用、GC 和栈增长。
 
 在构建 Go toolchain 前，使用同一个 LLVM payload 的 CMake config 构建、
 测试并安装插件：
