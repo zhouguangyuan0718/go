@@ -10,7 +10,7 @@ package codegen
 // LLVM-DAG: @"go:itab.codegen.llvmInterfaceValue,codegen.llvmInterface" = weak constant <{ %go.runtime.ITab, [1 x ptr] }>
 // LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Double"
 // LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Value"
-// LLVM-DAG: !goobj.weak_relocs
+// LLVM-DAG: !goobj.relocs
 // LLVM-DAG: @llvm.compiler.used = appending global
 // LLVM-LABEL: define goabiinternal i64 @codegen.useLLVMInterface(
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmInterface.Value(
