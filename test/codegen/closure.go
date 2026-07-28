@@ -6,7 +6,15 @@
 
 package codegen
 
+// LLVM-LABEL: define goabiinternal { i64, i64 } @codegen.callLLVMPairClosureTwice(
+// LLVM-NOT: alloca
+// LLVM: load volatile i8, ptr %f, align 1
+// LLVM: call goabiinternal { i64, i64 } {{%.*}}(i64 %x, ptr nest %f)
+// LLVM: load volatile i8, ptr %f, align 1
+// LLVM: call goabiinternal { i64, i64 } {{%.*}}(i64 {{%.*}}, ptr nest %f)
+
 // LLVM-LABEL: define goabiinternal { i64, i64 } @codegen.callLLVMPairClosure(
+// LLVM-NOT: alloca
 // LLVM: load volatile i8, ptr %f, align 1
 // LLVM-NEXT: {{%.*}} = load ptr, ptr %f, align 8
 // LLVM-NEXT: {{%.*}} = call goabiinternal { i64, i64 } {{%.*}}(i64 %x, ptr nest %f)
@@ -23,8 +31,14 @@ func callLLVMPairClosure(f func(int) (int, int), x int) (int, int) {
 	return f(x)
 }
 
+//go:noinline
+func callLLVMPairClosureTwice(f func(int) (int, int), x int) (int, int) {
+	a, b := f(x)
+	c, d := f(x + 1)
+	return a + c, b + d
+}
+
 // LLVM-LABEL: define goabiinternal void @codegen.llvmAllocaLoop(
-// LLVM: alloca i64, align 8
 // LLVM: alloca i64, align 8
 // LLVM: br label
 // LLVM-NOT: alloca

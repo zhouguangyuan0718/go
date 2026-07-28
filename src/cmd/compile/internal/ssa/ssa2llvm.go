@@ -506,6 +506,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpKeepAlive:
 		lVal = arg1()
 	case OpLocalAddr:
+		if v.Uses == 0 {
+			break
+		}
 		_, key := llvmLocalName(v)
 		slot, ok := lfc.Locals[key]
 		if !ok {
@@ -918,7 +921,7 @@ func LLVMCompile(f *Func) {
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
-			if v.Op != OpLocalAddr {
+			if v.Op != OpLocalAddr || v.Uses == 0 {
 				continue
 			}
 			name, key := llvmLocalName(v)

@@ -18,6 +18,13 @@ func applyPair(f func(int) (int, int), x int) (int, int) {
 	return f(x)
 }
 
+//go:noinline
+func applyPairTwice(f func(int) (int, int), x int) (int, int) {
+	a, b := f(x)
+	c, d := f(x + 1)
+	return a + c, b + d
+}
+
 // makeDeepPair recursively invokes the closure until the closure itself takes
 // the GoObj morestack slow path. The hidden funcval context must survive stack
 // growth in REGCTXT.
@@ -40,6 +47,11 @@ func main() {
 	a, b := applyPair(f, 2)
 	if a != 42 || b != 38 {
 		panic("bad closure result")
+	}
+
+	a, b = applyPairTwice(f, 2)
+	if a != 85 || b != 75 {
+		panic("bad repeated closure result")
 	}
 
 	f = makeDeepPair(10040)
