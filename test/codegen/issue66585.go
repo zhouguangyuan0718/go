@@ -6,6 +6,14 @@
 
 package codegen
 
+// LLVM-DAG: define goabiinternal void @codegen.init()
+// LLVM-DAG: store i64 1, ptr {{%.*}}, align 4
+// LLVM-DAG: store i64 {{%.*}}, ptr @codegen.x, align 4
+// LLVM-DAG: define goabiinternal void @codegen.f(ptr %p)
+// LLVM-DAG: load volatile i8, ptr %p, align 1
+// LLVM-DAG: store i64 1, ptr %p, align 4
+// LLVM-DAG: !{ptr @codegen.x, ptr @"type:int"}
+
 var x = func() int {
 	n := 0
 	f(&n)

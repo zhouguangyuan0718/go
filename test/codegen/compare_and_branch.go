@@ -6,6 +6,13 @@
 
 package codegen
 
+// LLVM-DAG: define goabiinternal void @codegen.ui64x8()
+// LLVM-DAG: icmp ult i64 {{%.*}}, 128
+// LLVM-DAG: define goabiinternal void @codegen.si64x8(i64 %{{.*}})
+// LLVM-DAG: icmp slt i64 {{%.*}}, 128
+// LLVM-DAG: call goabiinternal void @codegen.dummy()
+// LLVM-DAG: br i1
+
 //go:noinline
 func dummy() {}
 

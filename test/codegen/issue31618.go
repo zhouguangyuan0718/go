@@ -6,6 +6,14 @@
 
 package codegen
 
+// LLVM-LABEL: define goabiinternal i64 @codegen.f(i64 %x)
+// LLVM: ashr i64 %x, 3
+// LLVM: add i64 {{%.*}}, 5
+// LLVM: ashr i64 {{%.*}}, 3
+// LLVM: add i64 {{%.*}}, 6
+// LLVM-LABEL: define goabiinternal i64 @codegen.g(i64 %x)
+// LLVM: ashr i64 %x, 3
+
 // Make sure we remove both inline marks in the following code.
 // Both +5 and +6 should map to real instructions, which can
 // be used as inline marks instead of explicit nops.
