@@ -35,6 +35,9 @@ GoALLC or GoObj branch. `llvmtoolexec` selects
 Go's `PCDATA_StackMapIndex` convention. The map remains active through the
 normal return and resets at the stack-growth slow-path entry, matching the
 range emitted by the Go assembler without relying on a return-PC convention.
+GoObj emits the currently constant safe `PCDATA_UnsafePoint` table first and
+the statepoint-derived `PCDATA_StackMapIndex` table second, as required by
+their Go ABI indexes 0 and 1.
 The GoObj writer interprets locations after final layout: an
 `Indirect [SP+offset]` location contributes a locals pointer bit, while a
 `Direct SP+offset` stack address does not. This permits conservative IR
@@ -62,6 +65,11 @@ cmake --build "$PLUGIN_BUILD"
 ctest --test-dir "$PLUGIN_BUILD" --output-on-failure
 cmake --install "$PLUGIN_BUILD"
 ```
+
+When the canonical `objview` implementation is available, pass
+`-DGOALLC_OBJVIEW_EXECUTABLE=/path/to/objview` at configure time. This enables
+the structured multiple-call test, which verifies both numbered PCDATA tables,
+the map selected at each CALL, and the corresponding locals pointer bitmaps.
 
 The installed file is `lib/GoALLCStatepoints.dylib` on Darwin or
 `lib/GoALLCStatepoints.so` on Linux. Do not build the plugin against a different

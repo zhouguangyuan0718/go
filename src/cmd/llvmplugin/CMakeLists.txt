@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 
 project(GoALLCStatepoints LANGUAGES C CXX)
 
+set(GOALLC_OBJVIEW_EXECUTABLE "" CACHE FILEPATH
+  "optional objview executable for structured GoObj checks")
+
 find_package(LLVM REQUIRED CONFIG)
 if(NOT LLVM_VERSION_MAJOR EQUAL 23)
   message(FATAL_ERROR
@@ -107,6 +110,52 @@ if(BUILD_TESTING)
       -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-derived.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-derived.ll"
   )
+
+  add_test(
+    NAME GoALLCStatepoints.MultipleCallsRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/multiple-calls.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.MultipleCallsRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "q.relocated2"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.MultipleCallsGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -statepoint-callsite-position=call-start
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/multiple-calls.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/multiple-calls.ll"
+  )
+
+  if(GOALLC_OBJVIEW_EXECUTABLE)
+    if(NOT EXISTS "${GOALLC_OBJVIEW_EXECUTABLE}")
+      message(FATAL_ERROR
+        "GOALLC_OBJVIEW_EXECUTABLE does not exist: "
+        "${GOALLC_OBJVIEW_EXECUTABLE}")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(
+      NAME GoALLCStatepoints.MultipleCallsObjView
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-multiple-calls.py"
+        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
+        --object "${CMAKE_CURRENT_BINARY_DIR}/multiple-calls.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.MultipleCallsObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.MultipleCallsGoObj
+    )
+  endif()
 
   add_test(
     NAME GoALLCStatepoints.LiveAggregateFails

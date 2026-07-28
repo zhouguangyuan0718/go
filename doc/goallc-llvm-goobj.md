@@ -271,7 +271,10 @@ strategy 注册 `GCMetadataPrinter::emitStackMaps`，在 AsmPrinter 模块收尾
 校验、`Direct`/`Indirect` 解释、LocalsPointerMaps 和 PCDATA_StackMapIndex
 编码。GoALLC 要求 StackMaps 记录 CALL 起点；map 从 CALL 开始，并在 pcsp
 之外单独记录的栈增长 slow path 入口恢复 `-1`，从而覆盖正常路径的 RET，
-且不依赖 return PC 反推调用范围。`Direct SP+offset` 是栈地址本身，不表示该
+且不依赖 return PC 反推调用范围。GoObj 先写索引 0 的
+`PCDATA_UnsafePoint`（当前恒为 safe 的 `-1`），再写索引 1 的
+`PCDATA_StackMapIndex`；不能只写后一张表，否则 linker 会把它误认成索引 0。
+`Direct SP+offset` 是栈地址本身，不表示该
 slot 存有 pointer，因此
 不会设置 locals bitmap；`Indirect [SP+offset]` 才表示该槽保存指针值并置位。
 这允许 IR 层保守追踪所有 alloca，同时避免把 alloca 对象内容误当成指针。
