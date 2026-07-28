@@ -47,8 +47,10 @@ schema 的辅助数据仍以 bytes/relocations 表示。这个边界刻意位于
   `runtime.memequal64`）。
 
 LLVM IR 优先使用原生 linkage 和语义类型交接这些属性：Local 对应
-`internal`，非 Local 的 DUPOK 对应 `weak`，`%go.descriptor.*` 和
-`%go.itab.*` 分别标识 Go type 与 itab。`!goobj.symbol.flags` 只保留 typelink、
+`internal`，非 Local 的 DUPOK 对应 `weak`。Go type descriptor 与 itab 的
+外层使用匿名 packed struct，内部字段继续使用 `%go.runtime.*` ABI 类型；descriptor
+和 itab 的身份由真实的 `type:*` / `go:itab.*` global symbol 表达，避免重复生成
+既长又不提供额外 LLVM 语义的 identified wrapper type。`!goobj.symbol.flags` 只保留 typelink、
 UsedInIface、linkname 以及 Local+DUPOK 重叠等没有等价 LLVM 表示的位。
 普通 address、type offset 和 method offset 都由 LLVM initializer 与语义类型
 直接推导；`!goobj.weak_relocs` 只记录无法由 LLVM 表达的逐 relocation weak

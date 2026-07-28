@@ -18,21 +18,21 @@ import "unsafe"
 // LLVM-DAG: %go.runtime.SliceType = type <{
 // LLVM-DAG: %go.runtime.StructType = type <{
 // LLVM-DAG: %go.runtime.Imethod = type <{
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorBool = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorInt8 = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorUintptr = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorFloat32 = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorComplex128 = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorString = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorUnsafePointer = type <{ %go.runtime.Type, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorArray = type <{ %go.runtime.ArrayType, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorChan = type <{ %go.runtime.ChanType, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorFunc = type <{ %go.runtime.FuncType, %go.runtime.UncommonType, [4 x ptr] }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorInterface = type <{ %go.runtime.InterfaceType, %go.runtime.UncommonType, [0 x %go.runtime.Imethod] }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorMap = type <{ %go.runtime.MapType, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorPtr = type <{ %go.runtime.PtrType, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorSlice = type <{ %go.runtime.SliceType, %go.runtime.UncommonType }>
-// LLVM-DAG: %go.descriptor.codegen.llvmDescriptorStruct = type <{ %go.runtime.StructType, %go.runtime.UncommonType, [2 x %go.runtime.StructField] }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorBool" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorInt8" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorUintptr" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorFloat32" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorComplex128" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorString" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorUnsafePointer" = constant <{ %go.runtime.Type, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorArray" = constant <{ %go.runtime.ArrayType, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorChan" = constant <{ %go.runtime.ChanType, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorFunc" = constant <{ %go.runtime.FuncType, %go.runtime.UncommonType, [4 x ptr] }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorInterface" = constant <{ %go.runtime.InterfaceType, %go.runtime.UncommonType, [0 x %go.runtime.Imethod] }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorMap" = constant <{ %go.runtime.MapType, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorPtr" = constant <{ %go.runtime.PtrType, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorSlice" = constant <{ %go.runtime.SliceType, %go.runtime.UncommonType }>
+// LLVM-DAG: @"type:codegen.llvmDescriptorStruct" = constant <{ %go.runtime.StructType, %go.runtime.UncommonType, [2 x %go.runtime.StructField] }>
 
 type llvmDescriptorBool bool
 type llvmDescriptorInt8 int8

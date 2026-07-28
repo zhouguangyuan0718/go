@@ -9,7 +9,6 @@ import (
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
 	"sort"
-	"strings"
 
 	"github.com/goallc/go-llvm"
 )
@@ -120,24 +119,19 @@ func (l *llvmDataLowerer) itabType(s *obj.LSym) llvm.Type {
 	if result, ok := l.descriptorTypes[s]; ok {
 		return result
 	}
-	name := "go.itab." + llvmSafeTypeName(strings.TrimPrefix(s.Name, "go:itab."))
-	result := CurrentModule.GetTypeByName(name)
-	if result.IsNil() {
-		result = GlobalCtxt.StructCreateNamed(name)
-	}
-	l.descriptorTypes[s] = result
 	fields := l.descriptorFields(s, llvmItabParts(s), nil)
 	fieldTypes := make([]llvm.Type, len(fields))
 	for i, field := range fields {
 		fieldTypes[i] = field.Type()
 	}
-	result.StructSetBody(fieldTypes, true)
+	result := GlobalCtxt.StructType(fieldTypes, true)
+	l.descriptorTypes[s] = result
 	return result
 }
 
 func (l *llvmDataLowerer) itabInitializer(s *obj.LSym, globals map[*obj.LSym]llvm.Value) llvm.Value {
-	typ := l.itabType(s)
-	return llvm.ConstNamedStruct(typ, l.descriptorFields(s, llvmItabParts(s), globals))
+	_ = l.itabType(s)
+	return GlobalCtxt.ConstStruct(l.descriptorFields(s, llvmItabParts(s), globals), true)
 }
 
 // descriptorParts mirrors reflectdata.writeType. It uses the runtime ABI
@@ -230,25 +224,20 @@ func (l *llvmDataLowerer) descriptorType(s *obj.LSym, t *types.Type) llvm.Type {
 	if result, ok := l.descriptorTypes[s]; ok {
 		return result
 	}
-	name := "go.descriptor." + llvmSafeTypeName(strings.TrimPrefix(s.Name, "type:"))
-	result := CurrentModule.GetTypeByName(name)
-	if result.IsNil() {
-		result = GlobalCtxt.StructCreateNamed(name)
-	}
-	l.descriptorTypes[s] = result
 	parts := descriptorParts(t, llvmDataSize(s))
 	fields := l.descriptorFields(s, parts, nil)
 	types := make([]llvm.Type, len(fields))
 	for i, f := range fields {
 		types[i] = f.Type()
 	}
-	result.StructSetBody(types, true)
+	result := GlobalCtxt.StructType(types, true)
+	l.descriptorTypes[s] = result
 	return result
 }
 
 func (l *llvmDataLowerer) descriptorInitializer(s *obj.LSym, t *types.Type, globals map[*obj.LSym]llvm.Value) llvm.Value {
-	typ := l.descriptorType(s, t)
-	return llvm.ConstNamedStruct(typ, l.descriptorFields(s, descriptorParts(t, llvmDataSize(s)), globals))
+	_ = l.descriptorType(s, t)
+	return GlobalCtxt.ConstStruct(l.descriptorFields(s, descriptorParts(t, llvmDataSize(s)), globals), true)
 }
 
 func (l *llvmDataLowerer) descriptorFields(s *obj.LSym, parts []llvmDescriptorPart, globals map[*obj.LSym]llvm.Value) []llvm.Value {
@@ -585,13 +574,4 @@ func llvmSameStructLayout(a, b *types.Type) bool {
 		}
 	}
 	return true
-}
-
-func llvmSafeTypeName(name string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' {
-			return r
-		}
-		return '_'
-	}, name)
 }
