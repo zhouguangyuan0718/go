@@ -11,6 +11,9 @@ package codegen
 // LLVM-DAG: %go.runtime.StructField = type <{
 // LLVM-DAG: @"type:codegen.llvmTypeDescriptor" = constant <{ %go.runtime.StructType, %go.runtime.UncommonType, [2 x %go.runtime.StructField] }>
 // LLVM-DAG: @"type:*codegen.llvmTypeDescriptor" = constant <{ %go.runtime.PtrType }>{{.*}}!goobj.symbol.flags
+// Ordinary R_ADDR is fully represented by the pointer initializer and must not
+// acquire a redundant !goobj.relocs attachment.
+// LLVM-DAG: @"runtime.memequal64{{.*}}" = weak constant <{ ptr }> <{ ptr @runtime.memequal64 }>, section ".rodata"{{$}}
 // LLVM-DAG: !goobj.relocs
 
 // llvmTypeDescriptor exercises the compiler-owned reflectdata path. LLVM data
