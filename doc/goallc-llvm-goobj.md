@@ -46,9 +46,12 @@ schema 的辅助数据仍以 bytes/relocations 表示。这个边界刻意位于
 - runtime ABIInternal 函数引用（例如 type equality closure 中的
   `runtime.memequal64`）。
 
-LLVM IR 使用 global attachment `!goobj.symbol.flags` 和 `!goobj.relocs` 交接
-这些 Go-only 属性。GoObj writer 消费该 metadata，在默认 relocation 推导前恢复
-精确的 Go relocation type，特别是 weak offset relocation。零宽度的 linker
+LLVM IR 优先使用原生 linkage 和语义类型交接这些属性：Local 对应
+`internal`，非 Local 的 DUPOK 对应 `weak`，`%go.descriptor.*` 和
+`%go.itab.*` 分别标识 Go type 与 itab。`!goobj.symbol.flags` 只保留 typelink、
+UsedInIface、linkname 以及 Local+DUPOK 重叠等没有等价 LLVM 表示的位。
+`!goobj.relocs` 仍在默认 relocation 推导前恢复精确的 Go relocation type，
+特别是 weak offset relocation。零宽度的 linker
 保活边 `R_KEEP` 不伪装为地址常量，而用 `!goobj.keep` 记录其 target symbol，
 由 writer 合成 GoObj relocation。最终链路仍只有
 `__.PKGDEF + _go_.o` 两个有意义的 archive members；不会生成或合并 native data

@@ -10,7 +10,7 @@ package codegen
 // LLVM-DAG: %go.runtime.UncommonType = type <{
 // LLVM-DAG: %go.runtime.StructField = type <{
 // LLVM-DAG: %go.descriptor.codegen.llvmTypeDescriptor = type <{
-// LLVM-DAG: @"type:codegen.llvmTypeDescriptor" = constant %go.descriptor.codegen.llvmTypeDescriptor{{.*}}!goobj.symbol.flags{{.*}}!goobj.relocs
+// LLVM-DAG: @"type:codegen.llvmTypeDescriptor" = constant %go.descriptor.codegen.llvmTypeDescriptor{{.*}}!goobj.relocs
 // LLVM-DAG: @"type:*codegen.llvmTypeDescriptor" = constant %go.descriptor._codegen.llvmTypeDescriptor{{.*}}!goobj.symbol.flags{{.*}}!goobj.relocs
 
 // llvmTypeDescriptor exercises the compiler-owned reflectdata path. LLVM data

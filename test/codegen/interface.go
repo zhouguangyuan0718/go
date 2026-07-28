@@ -8,10 +8,9 @@ package codegen
 
 // LLVM-DAG: %go.runtime.ITab = type <{ ptr, ptr, i32, [4 x i8], [1 x ptr] }>
 // LLVM-DAG: %go.itab.codegen.llvmInterfaceValue_codegen.llvmInterface = type <{ %go.runtime.ITab, [1 x ptr] }>
-// LLVM-DAG: @"go:itab.codegen.llvmInterfaceValue,codegen.llvmInterface" = constant %go.itab.codegen.llvmInterfaceValue_codegen.llvmInterface
+// LLVM-DAG: @"go:itab.codegen.llvmInterfaceValue,codegen.llvmInterface" = weak constant %go.itab.codegen.llvmInterfaceValue_codegen.llvmInterface
 // LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Double"
 // LLVM-DAG: ptr @"codegen.(*llvmInterfaceValue).Value"
-// LLVM-DAG: !goobj.symbol.flags
 // LLVM-DAG: !goobj.relocs
 // LLVM-LABEL: define goabiinternal i64 @codegen.useLLVMInterface(
 // LLVM-SAME: !goobj.marker_relocs

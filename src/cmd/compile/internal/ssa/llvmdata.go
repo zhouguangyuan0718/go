@@ -7,7 +7,6 @@ import (
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
 	"sort"
-	"strings"
 
 	"github.com/goallc/go-llvm"
 )
@@ -77,6 +76,7 @@ func LowerGoObjTypeData() {
 		}
 		g.SetSection(llvmDataSection(s))
 		g.SetGlobalConstant(llvmDataIsReadOnly(s))
+		setLLVMDataLinkage(g, s)
 		if s.Align != 0 {
 			g.SetAlignment(int(s.Align))
 		}
@@ -284,25 +284,27 @@ func llvmDataIsReadOnly(s *obj.LSym) bool {
 	}
 }
 
+func setLLVMDataLinkage(g llvm.Value, s *obj.LSym) {
+	if s.Local() {
+		g.SetLinkage(llvm.InternalLinkage)
+	} else if s.DuplicateOK() {
+		g.SetLinkage(llvm.WeakAnyLinkage)
+	}
+}
+
 func setGoObjDataFlags(g llvm.Value, s *obj.LSym) {
 	var flag, flag2 uint64
-	if s.DuplicateOK() {
+	// Local and non-local Dupok symbols use LLVM linkage. LLVM cannot encode
+	// both properties at once, so only a Local+Dupok overlap needs a residual
+	// metadata bit.
+	if s.Local() && s.DuplicateOK() {
 		flag |= 1 << 0 // goobj.SymFlagDupok
-	}
-	if s.Local() {
-		flag |= 1 << 1 // goobj.SymFlagLocal
 	}
 	if s.MakeTypelink() {
 		flag |= 1 << 2 // goobj.SymFlagTypelink
 	}
-	if strings.HasPrefix(s.Name, "type:") && len(s.Name) > len("type:") && s.Name[5] != '.' && s.Type == objabi.SRODATA {
-		flag |= 1 << 6 // goobj.SymFlagGoType
-	}
 	if s.UsedInIface() {
 		flag2 |= 1 << 0 // goobj.SymFlagUsedInIface
-	}
-	if strings.HasPrefix(s.Name, "go:itab.") && s.Type == objabi.SRODATA {
-		flag2 |= 1 << 1 // goobj.SymFlagItab
 	}
 	if s.IsLinkname() {
 		flag2 |= 1 << 4 // goobj.SymFlagLinkname
