@@ -5,6 +5,7 @@
       "codegen/alloc.go": "zero-sized allocations and slice literals through runtime.zerobase",
       "codegen/arithmetic.go": "integer arithmetic, constant folding, division, remainder, and bounds-checked memory updates",
       "codegen/bitfield.go": "bitfield extraction, insertion, masking, shifts, and multi-result tuple construction",
+      "codegen/closure.go": "funcval calls with hidden closure context, tuple returns, and entry-block stack slots",
       "codegen/compare_and_branch.go": "signed and unsigned compare-and-branch control flow including channel receives",
       "codegen/divmod.go": "integer division, remainder, overflow handling, and tuple ABI",
       "codegen/interface.go": "static multi-method itabs, interface conversions and indirect method calls",
@@ -66,7 +67,8 @@
       "llvm_interface_conversion.go": "dynamic interface-to-interface conversion cache, runtime fallback, nil conversion, and execution",
       "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
       "llvm_interface_equality.go": "empty and non-empty interface equality for matching and differing dynamic values",
-      "llvm_interface_switch.go": "nil, concrete, multiple interface, and default type-switch cases with execution"
+      "llvm_interface_switch.go": "nil, concrete, multiple interface, and default type-switch cases with execution",
+      "llvm_closure.go": "escaping funcval allocation, hidden closure context, indirect call, capture access, and tuple return"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"

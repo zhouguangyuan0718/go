@@ -11,7 +11,8 @@ package codegen
 // LLVM-DAG: %go.runtime.StructField = type <{
 // LLVM-DAG: @"type:codegen.llvmTypeDescriptor" = constant <{ %go.runtime.StructType, %go.runtime.UncommonType, [2 x %go.runtime.StructField] }>
 // LLVM-DAG: @"type:*codegen.llvmTypeDescriptor" = constant <{ %go.runtime.PtrType }>{{.*}}!goobj.symbol.flags
-// LLVM-NOT: !goobj.relocs
+// LLVM-DAG: !goobj.relocs
+// LLVM-DAG: !{i32 {{[0-9]+}}, i32 5}
 
 // llvmTypeDescriptor exercises the compiler-owned reflectdata path. LLVM data
 // lowering must preserve the resulting Go type descriptors and relocation
