@@ -38,6 +38,7 @@
       "codegen/shortcircuit.go": "empty-interface extraction and concrete type comparison",
       "codegen/smallintiface.go": "small scalar boxing through runtime.staticuint64s",
       "codegen/spills.go": "integer and floating-point values preserved across calls",
+      "codegen/statepoint.go": "frontend-owned Go GC strategy and stack-growth statepoint function markers",
       "codegen/structs.go": "typed struct initialization and zeroing",
       "codegen/type_descriptor.go": "compiler-owned runtime type descriptor data and GoObj metadata",
       "codegen/type_descriptor_kinds.go": "all runtime type descriptor layouts and variable descriptor data",
@@ -49,10 +50,16 @@
   },
   "runtime": {
     "whitelist": {
+      "abi/zombie_struct_select.go": "non-leaf Go frame with register-ABI struct arguments and a nested call",
       "alias1.go": "byte and rune aliases in concrete interface type switches",
       "char_lit.go": "character literal constants and external os.Exit reference",
+      "closure1.go": "immediately invoked closures sharing a captured stack variable",
+      "closure7.go": "exported function containing a non-escaping closure argument",
       "compos.go": "heap allocation of escaping composite literals and pointer inequality",
       "const8.go": "implicit constant declarations and iota shadowing",
+      "dwarf/linedirectives.go": "line directives preserved through LLVM compilation, GoObj linking, and execution",
+      "escape3.go": "non-escaping composite initialization, updates, and value return",
+      "func6.go": "immediately invoked closures in boolean conditions",
       "helloworld.go": "basic main-to-runtime call and execution",
       "int_lit.go": "integer literal constants and external os.Exit reference",
       "iota.go": "integer, float, string, boolean, and paired iota constants",
@@ -68,7 +75,8 @@
       "llvm_interface_assertion.go": "comma-ok and panic-form assertions, cache fallback, mismatch, nil, and execution",
       "llvm_interface_equality.go": "empty and non-empty interface equality for matching and differing dynamic values",
       "llvm_interface_switch.go": "nil, concrete, multiple interface, and default type-switch cases with execution",
-      "llvm_closure.go": "escaping funcval allocation, hidden closure context, indirect call, capture access, and tuple return"
+      "llvm_closure.go": "escaping funcval allocation, hidden closure context, indirect call, capture access, and tuple return",
+      "llvm_statepoint_gc.go": "heap pointer liveness across runtime.GC"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"

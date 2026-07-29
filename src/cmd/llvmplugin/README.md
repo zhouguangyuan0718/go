@@ -11,6 +11,11 @@ repository. The core entry point is separate from the plugin adapter so a
 future in-process `cmd/compile` integration can call the same pipeline without
 going through `llc`.
 
+The SSA-to-LLVM lowering owns the function-level contract: Go ABI definitions
+carry `gc "goallc"` and the `go-stack-growth-statepoint` attribute. Loading this
+plugin registers the named GC strategy and its metadata printer; the rewrite
+pass consumes the frontend markers rather than adding them.
+
 The initial statepoint pass handles ordinary calls in Go ABI functions. It
 computes pointer liveness with a backwards CFG dataflow analysis, assigns
 stable callsite IDs, emits `gc.statepoint` and `gc.relocate`, and respects
@@ -30,14 +35,16 @@ phase.
 StackMaps and GoObj. It uses the standard
 `AsmPrinter -> GCMetadataPrinter::emitStackMaps` hook and copies only raw
 machine locations into `MCContext`. LLVM's generic `StackMaps.cpp` has no
-GoALLC or GoObj branch. `llvmtoolexec` selects
-`-statepoint-callsite-position=call-start`, so the recorded callsite PC matches
-Go's `PCDATA_StackMapIndex` convention. The pass also marks Go ABI functions
-for LLVM to express the late-generated `runtime.morestack` call as a physical
+GoALLC or GoObj branch. LLVM records GoObj statepoint callsites at the CALL
+start, matching Go's `PCDATA_StackMapIndex` convention without a command-line
+mode. The frontend's stack-growth attribute
+asks LLVM to express the late-generated `runtime.morestack` call as a physical
 MIR `STATEPOINT` with empty deopt, GC pointer, GC alloca, and GC relocation
-sections. Its empty locals bitmap starts at the morestack CALL, so ordinary
-and stack-growth calls use the same Machine StackMaps pipeline without relying
-on a return-PC convention.
+sections. Its empty locals bitmap starts at the morestack CALL, so ordinary and
+stack-growth calls use the same Machine StackMaps pipeline without relying on
+a return-PC convention. GoObj functions that already contain a Machine
+`STATEPOINT` but lack the frontend stack-growth attribute fail closed; there is
+no slow-path reset-label fallback for a raw morestack call.
 GoObj emits the currently constant safe `PCDATA_UnsafePoint` table first and
 the statepoint-derived `PCDATA_StackMapIndex` table second, as required by
 their Go ABI indexes 0 and 1.
@@ -46,6 +53,17 @@ The GoObj writer interprets locations after final layout: an
 `Direct SP+offset` stack address does not. This permits conservative IR
 tracking without confusing an alloca's address with pointer data stored in the
 alloca.
+
+For AArch64 GoObj, target frame lowering uses Go's frame-chain layout instead
+of the platform ABI frame record: LR is at `SP+0`, this function writes its FP
+link at `SP-8` for a future callee, and the caller's existing FP-link word is at
+the top of this function's physical frame. The writer derives
+`_func.locals = StackSize - 8` and the locals bitmap range
+`[SP+8, SP+StackSize-8)` from the final physical `StackSize`. No separate
+lowering-to-writer locals-size channel is part of the contract. As in the
+native arm64 backend, small frames atomically save LR while updating SP with a
+pre-indexed store; frames above `0xf0` compute NewSP and save `(FP, LR)` before
+moving SP so asynchronous traceback cannot observe a half-built frame.
 
 The first phase emits count-aligned, empty `FUNCDATA_ArgsPointerMaps`; it does
 not yet classify Go ABI argument home slots. `FUNCDATA_StackObjects` is also
@@ -69,7 +87,7 @@ ctest --test-dir "$PLUGIN_BUILD" --output-on-failure
 cmake --install "$PLUGIN_BUILD"
 ```
 
-When the canonical `objview` implementation is available, pass
+Build the canonical `cmd/objview` from this checkout and pass
 `-DGOALLC_OBJVIEW_EXECUTABLE=/path/to/objview` at configure time. This enables
 the structured multiple-call test, which verifies both numbered PCDATA tables,
 the map selected at each CALL, and the corresponding locals pointer bitmaps.

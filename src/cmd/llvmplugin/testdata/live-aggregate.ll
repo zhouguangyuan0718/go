@@ -2,7 +2,7 @@ target triple = "x86_64-unknown-linux-goobj"
 
 declare goabiinternal void @callee()
 
-define goabiinternal ptr @live_pointer_aggregate({ ptr, i64 } %value) {
+define goabiinternal ptr @live_pointer_aggregate({ ptr, i64 } %value) "go-stack-growth-statepoint" gc "goallc" {
 entry:
   call goabiinternal void @callee()
   %pointer = extractvalue { ptr, i64 } %value, 0

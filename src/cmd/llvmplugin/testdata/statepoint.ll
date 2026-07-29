@@ -4,14 +4,14 @@ declare goabiinternal void @callee()
 declare goabiinternal void @leaf_callee() #0
 declare goabiinternal ptr @make_pointer()
 
-define goabiinternal i64 @pointer_live_across_call(ptr %p) {
+define goabiinternal i64 @pointer_live_across_call(ptr %p) #1 gc "goallc" {
 entry:
   call goabiinternal void @callee()
   %value = load i64, ptr %p, align 8
   ret i64 %value
 }
 
-define goabiinternal i64 @stack_address_live_across_call() {
+define goabiinternal i64 @stack_address_live_across_call() #1 gc "goallc" {
 entry:
   %slot = alloca i64, align 8
   store i64 42, ptr %slot, align 8
@@ -20,13 +20,13 @@ entry:
   ret i64 %value
 }
 
-define goabiinternal void @explicit_leaf_call() {
+define goabiinternal void @explicit_leaf_call() #1 gc "goallc" {
 entry:
   call goabiinternal void @leaf_callee()
   ret void
 }
 
-define goabiinternal i64 @pointer_live_across_two_calls(ptr %p) {
+define goabiinternal i64 @pointer_live_across_two_calls(ptr %p) #1 gc "goallc" {
 entry:
   call goabiinternal void @callee()
   call goabiinternal void @callee()
@@ -34,7 +34,7 @@ entry:
   ret i64 %value
 }
 
-define goabiinternal i64 @pointer_live_into_cfg(ptr %p, i1 %take_left) {
+define goabiinternal i64 @pointer_live_into_cfg(ptr %p, i1 %take_left) #1 gc "goallc" {
 entry:
   call goabiinternal void @callee()
   br i1 %take_left, label %left, label %right
@@ -52,7 +52,7 @@ done:
   ret i64 %value
 }
 
-define goabiinternal ptr @call_result_live_across_call() {
+define goabiinternal ptr @call_result_live_across_call() #1 gc "goallc" {
 entry:
   %pointer = call goabiinternal ptr @make_pointer()
   call goabiinternal void @callee()
@@ -60,3 +60,4 @@ entry:
 }
 
 attributes #0 = { "gc-leaf-function" }
+attributes #1 = { "go-stack-growth-statepoint" }

@@ -7,7 +7,6 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
@@ -206,11 +205,15 @@ Error validateSafepoint(const SafepointRecord &Record, DominatorTree &DT) {
     return createStringError(
         std::errc::not_supported,
         "GoALLC statepoints do not yet support call operand bundles");
-  for (unsigned I = 0; I != Call.arg_size(); ++I)
-    if (Call.getAttributes().getParamAttrs(I).hasAttributes())
-      return createStringError(
-          std::errc::not_supported,
-          "GoALLC statepoints do not yet support call parameter attributes");
+  for (unsigned I = 0; I != Call.arg_size(); ++I) {
+    for (Attribute Attr : Call.getAttributes().getParamAttrs(I)) {
+      if (!Attr.hasAttribute(Attribute::Nest))
+        return createStringError(
+            std::errc::not_supported,
+            "GoALLC statepoints only support the nest call parameter "
+            "attribute");
+    }
+  }
   for (Value *V : Record.Live) {
     if (!V->getType()->isPointerTy())
       return createStringError(
@@ -244,6 +247,10 @@ Error rewriteCall(SafepointRecord &Record, DominatorTree &DT) {
   CallInst *Statepoint = Builder.CreateGCStatepointCall(
       Record.ID, 0, Callee, CallArgs, std::nullopt, GCLive, "statepoint_token");
   Statepoint->setCallingConv(Call->getCallingConv());
+  for (unsigned I = 0; I != Call->arg_size(); ++I) {
+    for (Attribute Attr : Call->getAttributes().getParamAttrs(I))
+      Statepoint->addParamAttr(GCStatepointInst::CallArgsBeginPos + I, Attr);
+  }
 
   Instruction *InsertBefore = Call->getNextNode();
   Builder.SetInsertPoint(InsertBefore);
@@ -281,8 +288,6 @@ Error rewriteFunction(Function &F) {
     return Error::success();
   }
 
-  F.setGC(GoALLCGCName.str());
-  F.addFnAttr(goabi::StackGrowthStatepointAttr);
   DominatorTree DT(F);
   LivenessData Data = computeLiveness(F);
   SmallVector<SafepointRecord, 8> Records;
@@ -314,7 +319,8 @@ Error rewriteFunction(Function &F) {
 
 Error goallc::rewriteStatepoints(Module &M, TargetMachine &) {
   for (Function &F : M) {
-    if (F.isDeclaration() || !isGoCallingConv(F.getCallingConv()))
+    if (F.isDeclaration() || !isGoCallingConv(F.getCallingConv()) ||
+        !F.hasGC() || F.getGC() != GoALLCGCName)
       continue;
     if (Error Err = rewriteFunction(F))
       return Err;

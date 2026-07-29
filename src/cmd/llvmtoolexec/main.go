@@ -60,7 +60,13 @@ func main() {
 		fatalf("compiler did not produce %s: %v", irPath, err)
 	}
 	objPath := filepath.Join(filepath.Dir(output), "llvm-goobj.o")
-	run(*llcPath, makeLLCArgs(pluginPath, irPath, objPath)...)
+	llcArgs := []string{
+		"-load-pass-plugin=" + pluginPath,
+		"-filetype=obj",
+		irPath,
+		"-o", objPath,
+	}
+	run(*llcPath, llcArgs...)
 	// cmd/link identifies the package linker object by this archive member
 	// name. Unlike the mixed native/LLVM path, this is the sole linker member.
 	appendArchiveMember(output, "_go_.o", objPath)
@@ -71,16 +77,6 @@ func main() {
 		if err := os.Remove(irPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fatalf("remove %s: %v", irPath, err)
 		}
-	}
-}
-
-func makeLLCArgs(pluginPath, irPath, objPath string) []string {
-	return []string{
-		"-load-pass-plugin=" + pluginPath,
-		"-statepoint-callsite-position=call-start",
-		"-filetype=obj",
-		irPath,
-		"-o", objPath,
 	}
 }
 

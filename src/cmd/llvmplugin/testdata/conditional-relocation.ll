@@ -2,7 +2,7 @@ target triple = "x86_64-unknown-linux-goobj"
 
 declare goabiinternal void @callee()
 
-define goabiinternal i64 @conditional_safepoint(ptr %p, i1 %take_call) {
+define goabiinternal i64 @conditional_safepoint(ptr %p, i1 %take_call) "go-stack-growth-statepoint" gc "goallc" {
 entry:
   br i1 %take_call, label %call, label %skip
 

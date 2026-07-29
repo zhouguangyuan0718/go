@@ -75,7 +75,7 @@ if(BUILD_TESTING)
   )
 
   add_test(
-    NAME GoALLCStatepoints.StackGrowthAttribute
+    NAME GoALLCStatepoints.FrontendMarkersPreserved
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
@@ -84,9 +84,38 @@ if(BUILD_TESTING)
       -o -
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
   )
-  set_tests_properties(GoALLCStatepoints.StackGrowthAttribute PROPERTIES
+  set_tests_properties(GoALLCStatepoints.FrontendMarkersPreserved PROPERTIES
     PASS_REGULAR_EXPRESSION
       "go-stack-growth-statepoint"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.NestParamAttrRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nest-param-attr.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.NestParamAttrRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "ptr nest %context"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.IndirectCalleeConservativeRoot
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.IndirectCalleeConservativeRoot PROPERTIES
+    PASS_REGULAR_EXPRESSION "gc-live"
   )
 
   add_test(
@@ -109,7 +138,6 @@ if(BUILD_TESTING)
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
-      -statepoint-callsite-position=call-start
       -verify-machineinstrs
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/statepoint.goobj"
@@ -121,11 +149,21 @@ if(BUILD_TESTING)
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
-      -statepoint-callsite-position=call-start
       -verify-machineinstrs
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-derived.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-derived.ll"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.AArch64FrameGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/aarch64-frame.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aarch64-frame.ll"
   )
 
   add_test(
@@ -148,7 +186,6 @@ if(BUILD_TESTING)
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
-      -statepoint-callsite-position=call-start
       -verify-machineinstrs
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/multiple-calls.goobj"
@@ -172,6 +209,18 @@ if(BUILD_TESTING)
     )
     set_tests_properties(GoALLCStatepoints.MultipleCallsObjView PROPERTIES
       DEPENDS GoALLCStatepoints.MultipleCallsGoObj
+    )
+
+    add_test(
+      NAME GoALLCStatepoints.AArch64FrameObjView
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-aarch64-frame.py"
+        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
+        --object "${CMAKE_CURRENT_BINARY_DIR}/aarch64-frame.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.AArch64FrameObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.AArch64FrameGoObj
     )
   endif()
 

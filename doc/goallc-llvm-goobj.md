@@ -227,8 +227,8 @@ header。`llc` 在建立 code-generation pipeline 前读取并严格校验这些
 
 1. 为选中的 compile 调用增加 `-enablellvm -llvmironly`；
 2. 调用
-   `llc -load-pass-plugin=<GoALLCStatepoints>
-   -statepoint-callsite-position=call-start -filetype=obj`；插件的
+   `llc -load-pass-plugin=<GoALLCStatepoints> -filetype=obj`；GoObj 固定以
+   CALL 起点记录 statepoint。插件的
    pre-codegen callback 是当前外部链路与未来 compiler 进程内 LLVM
    集成共用的 pass pipeline 入口，wrapper 不在命令行中重建 pipeline；
 3. 使用 `cmd/internal/archive` 打开 compiler archive，并将对象以 `_go_.o`
@@ -264,23 +264,38 @@ CFG 逆向数据流活跃性分析，为普通调用分配稳定 callsite ID，�
 aggregate、`invoke`、`musttail` 和非 leaf inline asm fail closed。未来
 compile 进程内集成 LLVM 时直接复用该 core 入口，不经过 plugin adapter。
 
-机器位置不通过修改 LLVM 通用 `StackMaps.cpp` 截获。插件为 `goallc` GC
-strategy 注册 `GCMetadataPrinter::emitStackMaps`，在 AsmPrinter 模块收尾阶段
+机器位置不通过修改 LLVM 通用 `StackMaps.cpp` 截获。SSA→LLVM IR 前端为 Go ABI
+函数声明 `gc "goallc"` 和 `go-stack-growth-statepoint`，插件只负责注册对应的
+GC strategy 与 `GCMetadataPrinter::emitStackMaps`，并消费这些前端标记。在
+AsmPrinter 模块收尾阶段
 读取标准 `FnInfos/CSInfos`，跳过 statepoint 的 CC、flags 和 deopt 前缀后，把
 原始 GC locations 写入 MCContext。GoObj writer 在最终 layout 后完成 SP
 校验、`Direct`/`Indirect` 解释、LocalsPointerMaps 和 PCDATA_StackMapIndex
-编码。GoALLC 要求 StackMaps 记录 CALL 起点；map 从 CALL 开始。插件给 Go ABI
-函数添加 `go-stack-growth-statepoint` 属性，使 LLVM 在 PEI 阶段把
+编码。GoALLC 要求 StackMaps 记录 CALL 起点；map 从 CALL 开始。前端添加的
+`go-stack-growth-statepoint` 属性使 LLVM 在 PEI 阶段把
 `runtime.morestack` 调用生成为不含 deopt、GC pointer、GC alloca 和
 base/derived map 的物理 MIR `STATEPOINT`。它从 morestack CALL 起点选择空 locals
 bitmap，因此普通调用与栈增长调用走同一 Machine StackMaps 链路，且不依赖
-return PC 反推调用范围。GoObj 先写索引 0 的
+return PC 反推调用范围。已有 Machine `STATEPOINT` 但缺少该前端属性时，
+LLVM target lowering 会 fail closed；不再使用 slow-path reset label 兼容普通
+morestack CALL。GoObj 先写索引 0 的
 `PCDATA_UnsafePoint`（当前恒为 safe 的 `-1`），再写索引 1 的
 `PCDATA_StackMapIndex`；不能只写后一张表，否则 linker 会把它误认成索引 0。
 `Direct SP+offset` 是栈地址本身，不表示该
 slot 存有 pointer，因此
 不会设置 locals bitmap；`Indirect [SP+offset]` 才表示该槽保存指针值并置位。
 这允许 IR 层保守追踪所有 alloca，同时避免把 alloca 对象内容误当成指针。
+
+AArch64 GoObj 的 prologue 采用 Go arm64 栈链约定，而不是平台 ABI 的
+in-frame `(FP, LR)` record。若最终物理 frame 大小为 `StackSize`，则
+`LR` 位于 `SP+0`，当前函数为未来 callee 写入的 FP link 位于 `SP-8`，
+caller 已写入的 FP link 占据 frame 顶部 `SP+StackSize-8`。因此 GoObj
+writer 直接由最终 `StackSize` 推导 `_func.locals=StackSize-8`，locals
+pointer bitmap 只描述 `[SP+8, SP+StackSize-8)`。这里不从 IR lowering
+额外传递 locals size：底部 LR 和顶部 FP link 是 target frame layout
+已经确定的两个保留槽。与原生 arm64 backend 一样，小 frame 用 pre-index
+`STR LR` 原子地保存 LR 并移动 SP；超过 `0xf0` 的大 frame 则先计算 NewSP，
+在移动 SP 前保存 `(FP, LR)`，避免异步 traceback 看到半构造的 frame。
 
 当前 ArgsPointerMaps 只是与 locals map 数量对齐的 `nbit=0` 空表，并未实现
 Go ABI 参数 home/stack slot 分类；StackObjects 也尚未生成。这两个缺口仍是

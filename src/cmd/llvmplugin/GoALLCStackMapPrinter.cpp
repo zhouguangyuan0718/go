@@ -88,13 +88,7 @@ bool GoALLCStackMapPrinter::emitStackMaps(StackMaps &SM, AsmPrinter &AP) {
             "GoALLC stack-growth statepoint contains GC live locations");
 
       MCContext::GoObjStackMapEntry Entry{
-          CSI.CSOffsetExpr,
-          CSI.ID,
-          Info.StackSize,
-          PointerSize,
-          SM.getStatepointCallsitePosition() ==
-              StackMaps::StatepointCallsitePosition::CallStart,
-          {}};
+          CSI.CSOffsetExpr, CSI.ID, Info.StackSize, PointerSize, {}};
       Entry.Locations.reserve(CSI.Locations.size() - FirstGCLocation);
       for (const StackMaps::Location &Location :
            ArrayRef(CSI.Locations).drop_front(FirstGCLocation)) {

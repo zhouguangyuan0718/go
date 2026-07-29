@@ -27,22 +27,6 @@ func TestToolFlag(t *testing.T) {
 	}
 }
 
-func TestMakeLLCArgsUsesCallStartStatepoints(t *testing.T) {
-	args := makeLLCArgs("/plugin", "input.ll", "output.o")
-	if !containsArg(args, "-statepoint-callsite-position=call-start") {
-		t.Fatalf("makeLLCArgs() = %q, missing call-start statepoint position", args)
-	}
-}
-
-func containsArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
-}
-
 func TestResolvePassPluginExplicit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "plugin")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {

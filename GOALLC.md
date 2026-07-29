@@ -503,10 +503,13 @@ plugin adapter。
 
 Machine StackMaps 通过插件注册的 `GCMetadataPrinter::emitStackMaps` 接入：
 插件读取 LLVM 已生成的通用机器位置记录并桥接到 GoObj writer，LLVM
-`StackMaps.cpp` 不含 GoALLC/GoObj 特判。外部通过
-`-statepoint-callsite-position=call-start` 选择 CALL 起点，使
-PCDATA_StackMapIndex 区间与 Go 的 call-site 约定一致；单独的栈增长
-slow-path 入口标签负责在正常 RET 之后恢复 `-1`，不使用 return PC。当前
+`StackMaps.cpp` 不含 GoALLC/GoObj 特判。GoObj 固定记录 CALL 起点，使
+PCDATA_StackMapIndex 区间与 Go 的 call-site 约定一致；`runtime.morestack`
+自身的空 statepoint 从 CALL 起点选择空 map，不使用 reset label 或 return PC。
+已有 Machine `STATEPOINT` 但缺少前端栈增长属性的 GoObj 函数会 fail closed，
+不再保留普通 morestack CALL 加 reset label 的兼容路径。
+栈增长 slow path 在 CALL 之前的 spill/check 区间仍需由后续
+`PCDATA_UnsafePoint`/restart-at-entry 实现覆盖。当前
 `Indirect [SP+offset]` 生成
 locals pointer bit，`Direct SP+offset` 只表示可重建的栈地址、不置位；追踪
 alloca 地址不等于已经描述 alloca 对象内部的指针字段。第一阶段 ArgsPointerMaps
