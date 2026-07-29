@@ -239,6 +239,18 @@ if(BUILD_TESTING)
     set_tests_properties(GoALLCStatepoints.AArch64FrameObjView PROPERTIES
       DEPENDS GoALLCStatepoints.AArch64FrameGoObj
     )
+
+    add_test(
+      NAME GoALLCStatepoints.ConditionalRelocationObjView
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-conditional-relocation.py"
+        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
+        --object "${CMAKE_CURRENT_BINARY_DIR}/conditional-relocation.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.ConditionalRelocationObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.ConditionalRelocationGoObj
+    )
   endif()
 
   add_test(
@@ -256,7 +268,7 @@ if(BUILD_TESTING)
   )
 
   add_test(
-    NAME GoALLCStatepoints.ConditionalRelocationFails
+    NAME GoALLCStatepoints.ConditionalRelocationRewrite
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
@@ -265,8 +277,140 @@ if(BUILD_TESTING)
       -o -
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/conditional-relocation.ll"
   )
-  set_tests_properties(GoALLCStatepoints.ConditionalRelocationFails PROPERTIES
-    WILL_FAIL TRUE
+  set_tests_properties(GoALLCStatepoints.ConditionalRelocationRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "p\\.relocated\\.merge.* = phi ptr"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.ConditionalPhiEdgeUseRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/conditional-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.ConditionalPhiEdgeUseRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "selected = phi ptr \\[ %p\\.relocated, %call \\]"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.ConditionalRelocationStableID
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/conditional-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.ConditionalRelocationStableID PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "i64 -6495201133029790441"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.ConditionalRelocationGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/conditional-relocation.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/conditional-relocation.ll"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.BranchSafepointsRelocationRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/branch-safepoints-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.BranchSafepointsRelocationRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "p\\.relocated\\.merge.* = phi ptr"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.SequentialConditionalRelocationRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/sequential-conditional-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.SequentialConditionalRelocationRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "p\\.relocated\\.merge.* = phi ptr"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.SequentialConditionalLiveSetRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/sequential-conditional-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.SequentialConditionalLiveSetRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\"gc-live\"\\(ptr %p\\.relocated\\.merge"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.SameBlockRelocationChainRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.SameBlockRelocationChainRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "\"gc-live\"\\(ptr %p\\.relocated2"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.LoopRelocationRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/loop-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.LoopRelocationRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "p\\.relocated\\.merge\\.1 = phi ptr"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.IrreducibleRelocationRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/irreducible-relocation.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.IrreducibleRelocationRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "p\\.relocated\\.merge.* = phi ptr"
   )
 
   add_test(
