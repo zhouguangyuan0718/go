@@ -22,16 +22,77 @@ stable callsite IDs, emits `gc.statepoint` and `gc.relocate`, and respects
 LLVM's `gc-leaf-function` attribute on callees and individual call sites.
 Definitions carrying that attribute are verified to contain only GC-leaf calls.
 Pointer classification is conservative and independent of LLVM address spaces.
+After all calls have been rewritten, the pass models each original pointer and
+all of its relocates as definitions of a temporary promotable alloca. Loads at
+the old uses make the required reaching definition explicit, and LLVM's public
+`PromoteMemToReg` utility removes the temporary memory operations and forms the
+relocation PHIs. This applies the same SSA construction to straight-line code,
+conditional paths, loop backedges, and irreducible control flow.
 The initial implementation keeps live `alloca` addresses and alloca-derived
 pointer values in `gc-live`; it does not try to predict whether instruction
 selection will rematerialize a frame address or spill a materialized pointer
 value.
 
-The first implementation intentionally fails closed for live pointer
-aggregates, relocation paths that require new PHIs, `invoke`, call operand
-bundles, call parameter attributes, `musttail`, and non-leaf inline assembly.
-Base and derived pointers share a stack-map location for this non-moving-heap
-phase.
+The current SSA value and CFG rewrite support matrix is:
+
+| Value or control-flow shape | Status | Current contract |
+| --- | --- | --- |
+| Pointer arguments | Supported | Tracked independently at every safepoint. |
+| `alloca` and alloca-derived pointers | Supported | The pointer value is live; pointer fields stored in the allocation are not described. |
+| `select`, GEP, and pointer casts | Supported | Each resulting pointer SSA value is tracked conservatively. |
+| Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
+| Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
+| Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
+| Loops and irreducible CFG | Supported | Relocation definitions are propagated through backedge and multi-entry PHIs without a shape-specific algorithm. |
+| Pointer-containing aggregates | Unsupported | Fails closed before rewriting. |
+| General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
+| `invoke`, `callbr`, operand bundles, non-`nest` parameter attributes, and `musttail` | Unsupported | Fails closed rather than widening the call contract. |
+
+This matrix describes verified IR rewriting, not full runtime qualification.
+The Darwin/arm64 Go execution whitelist additionally covers one unconditional
+`runtime.GC`, a conditional call/skip merge, two branch-local GC safepoints,
+and a nested conditional GC. Sequential safepoints in one activation, loop
+backedges, multiple simultaneously live pointers, and pointer-valued call
+results have IR and verifier coverage, but are not yet runtime-qualified:
+focused execution trials currently expose invalid post-call values or
+traceback/stack-map failures in those shapes.
+
+LLVM's generic `RewriteStatepointsForGC` pass is the design reference for
+liveness and relocation SSA formation. GoALLC does not run it directly:
+that pass also owns base-pointer inference, EH/invoke rewriting, deopt bundles,
+and module-wide attribute cleanup. Those policies exceed the deliberately
+narrow Go ABI contract above.
+
+The staged reuse plan is:
+
+1. **Global relocation SSA (current).** Keep GoALLC's call eligibility,
+   stable IDs, per-safepoint live sets, and base-equals-derived convention.
+   Adapt the structure of LLVM's
+   `relocationViaAlloca`: model the original definition and every relocate as
+   stores to temporary promotable allocas, rewrite old uses through loads, and
+   call the public `PromoteMemToReg` utility. This handles loop/backedge PHIs,
+   multiple relocation definitions in one block, and irreducible CFG without
+   importing the generic pass's broader call policy. GoALLC validation remains
+   in front of the transform.
+2. **Base/derived pointers.** Adapt the scalar GEP/cast path of LLVM's
+   `findBasePointer` first, then add `select` and PHI conflict handling. Inserted
+   base PHIs become explicit definitions, and liveness must be recomputed before
+   finalizing each statepoint live set. Ambiguous relationships continue to
+   fail closed.
+3. **Aggregates and rematerialization.** Add pointer aggregate decomposition
+   and only then consider LLVM's GEP/cast rematerialization optimization.
+   `ArgsPointerMaps`, `StackObjects`, and write barriers remain separate Go
+   runtime metadata projects.
+4. **Additional call shapes only when required by Go.** Do not import generic
+   deopt, transition-bundle, invoke/EH edge normalization, or module-wide
+   attribute stripping merely because the LLVM pass supports them.
+
+Most useful LLVM implementation helpers are private to
+`RewriteStatepointsForGC.cpp`, so GoALLC will reuse their algorithms through
+public LLVM IR and utility APIs rather than depending on private symbols. If a
+non-trivial implementation block is copied verbatim, it must live in a
+separately attributed source file retaining LLVM's Apache-2.0-with-exception
+notice; BSD-only Go source files should not silently absorb copied code.
 
 `GoALLCStackMapPrinter.cpp` is the Go-owned boundary between LLVM Machine
 StackMaps and GoObj. It uses the standard
