@@ -493,9 +493,28 @@ ctest --test-dir "$PLUGIN_BUILD" --output-on-failure
 cmake --install "$PLUGIN_BUILD"
 ```
 
-当前插件 core 是 no-op，只建立稳定的 pre-codegen 接口和独立构建边界。
-后续 statepoint rewrite 放在 Go 仓库中实现；未来 `cmd/compile` 通过 API
-进程内集成 LLVM 时复用同一 core，而不依赖 `llc` plugin adapter。
+插件 core 在 Go 仓库中实现 Go ABI 函数的 pointer liveness、稳定 safepoint
+ID、`gc.statepoint` / `gc.relocate` 和 GC leaf 识别。当前 pointer 分类保守
+且不依赖 addrspace；活跃的 `alloca` 地址和 alloca-derived pointer 都加入
+`gc-live`，由最终 Machine StackMaps 位置决定是否形成 Go pointer bit。live
+aggregate、EH invoke、musttail 等未覆盖形态会 fail closed。未来
+`cmd/compile` 通过 API 进程内集成 LLVM 时复用同一 core，而不依赖 `llc`
+plugin adapter。
+
+Machine StackMaps 通过插件注册的 `GCMetadataPrinter::emitStackMaps` 接入：
+插件读取 LLVM 已生成的通用机器位置记录并桥接到 GoObj writer，LLVM
+`StackMaps.cpp` 不含 GoALLC/GoObj 特判。GoObj 固定记录 CALL 起点，使
+PCDATA_StackMapIndex 区间与 Go 的 call-site 约定一致；`runtime.morestack`
+自身的空 statepoint 从 CALL 起点选择空 map，不使用 reset label 或 return PC。
+已有 Machine `STATEPOINT` 但缺少前端栈增长属性的 GoObj 函数会 fail closed，
+不再保留普通 morestack CALL 加 reset label 的兼容路径。
+栈增长 slow path 在 CALL 之前的 spill/check 区间仍需由后续
+`PCDATA_UnsafePoint`/restart-at-entry 实现覆盖。当前
+`Indirect [SP+offset]` 生成
+locals pointer bit，`Direct SP+offset` 只表示可重建的栈地址、不置位；追踪
+alloca 地址不等于已经描述 alloca 对象内部的指针字段。第一阶段 ArgsPointerMaps
+仍是与 locals map 索引数对齐的空表，StackObjects 尚未实现；两者作为后续 P0，
+不能把当前输出解释为完整 Go ABI 参数图。
 
 验证 standalone binding：
 

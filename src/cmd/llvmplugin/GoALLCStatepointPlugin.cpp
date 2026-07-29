@@ -19,6 +19,11 @@ cl::opt<bool> ReportInvocation(
     cl::desc("Report invocation of the GoALLC pre-codegen plugin"),
     cl::init(false));
 
+cl::opt<bool>
+    EmitIR("goallc-pass-plugin-emit-ir", cl::Hidden,
+           cl::desc("Emit IR after the GoALLC pre-codegen pipeline and stop"),
+           cl::init(false));
+
 bool runPreCodeGenCallback(Module &M, TargetMachine &TM, CodeGenFileType,
                            raw_pwrite_stream &) {
   if (Error Err = goallc::runPreCodeGenPipeline(M, TM)) {
@@ -29,6 +34,10 @@ bool runPreCodeGenCallback(Module &M, TargetMachine &TM, CodeGenFileType,
   if (ReportInvocation)
     errs() << "GoALLCStatepoints: ran pre-codegen pipeline for "
            << M.getModuleIdentifier() << '\n';
+  if (EmitIR) {
+    M.print(errs(), nullptr);
+    return true;
+  }
   return false;
 }
 

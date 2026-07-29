@@ -47,6 +47,10 @@ type llvmStackSlot struct {
 const goABIInternalCallConv llvm.CallConv = 22
 const goABI0CallConv llvm.CallConv = 23
 const goResultsTupleAttr = "go_results_tuple"
+const goGCStrategy = "goallc"
+const goStackGrowthStatepointAttr = "go-stack-growth-statepoint"
+const llvmFramePointerAttr = "frame-pointer"
+const llvmFramePointerNonLeaf = "non-leaf"
 
 type llvmFuncSignature struct {
 	Type                llvm.Type
@@ -886,6 +890,12 @@ func LLVMCompile(f *Func) {
 	if FCtxt.LF.BasicBlocksCount() != 0 {
 		f.fe.Fatalf(f.Entry.Pos, "duplicate LLVM definition for %s", f.OwnAux.Fn.Name)
 	}
+	FCtxt.LF.SetGC(goGCStrategy)
+	// TODO(goallc): Once LLVM lowering propagates the compiler's precise
+	// morestack policy, attach this only to functions whose prologue can grow
+	// the Go stack.
+	FCtxt.LF.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goStackGrowthStatepointAttr, ""))
+	FCtxt.LF.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(llvmFramePointerAttr, llvmFramePointerNonLeaf))
 	setGoObjFunctionRelocMetadata(FCtxt.LF, f.OwnAux.Fn)
 	if sig.HasClosureContext {
 		FCtxt.ClosureContext = FCtxt.LF.Param(sig.ClosureContextIndex)
