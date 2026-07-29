@@ -19,11 +19,13 @@ pass consumes the frontend markers rather than adding them.
 The initial statepoint pass handles ordinary calls in Go ABI functions. It
 computes pointer liveness with a backwards CFG dataflow analysis, assigns
 stable callsite IDs, emits `gc.statepoint` and `gc.relocate`, and respects
-`gc-leaf-function`. Pointer classification is conservative and independent of
-LLVM address spaces. The initial implementation keeps live `alloca` addresses
-and alloca-derived pointer values in `gc-live`; it does not try to predict
-whether instruction selection will rematerialize a frame address or spill a
-materialized pointer value.
+LLVM's `gc-leaf-function` attribute on callees and individual call sites.
+Definitions carrying that attribute are verified to contain only GC-leaf calls.
+Pointer classification is conservative and independent of LLVM address spaces.
+The initial implementation keeps live `alloca` addresses and alloca-derived
+pointer values in `gc-live`; it does not try to predict whether instruction
+selection will rematerialize a frame address or spill a materialized pointer
+value.
 
 The first implementation intentionally fails closed for live pointer
 aggregates, relocation paths that require new PHIs, `invoke`, call operand

@@ -28,7 +28,6 @@ using namespace llvm;
 namespace {
 
 constexpr StringLiteral GoALLCGCName = "goallc";
-constexpr StringLiteral GoALLCLeafAttr = "goallc-gc-leaf";
 constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
 
 // This strategy exists for statepoint verification and lowering. GoALLC owns
@@ -96,8 +95,7 @@ bool isLeafCall(const CallBase &Call) {
   if (Call.hasFnAttr(GCLeafAttr))
     return true;
   if (const Function *Callee = Call.getCalledFunction())
-    return Callee->isIntrinsic() || Callee->hasFnAttribute(GCLeafAttr) ||
-           Callee->hasFnAttribute(GoALLCLeafAttr);
+    return Callee->isIntrinsic() || Callee->hasFnAttribute(GCLeafAttr);
   return false;
 }
 
@@ -283,8 +281,16 @@ Error rewriteCall(SafepointRecord &Record, DominatorTree &DT) {
 }
 
 Error rewriteFunction(Function &F) {
-  if (F.hasFnAttribute(GoALLCLeafAttr)) {
-    F.addFnAttr(GCLeafAttr);
+  if (F.hasFnAttribute(GCLeafAttr)) {
+    for (Instruction &I : instructions(F)) {
+      auto *Call = dyn_cast<CallBase>(&I);
+      if (!Call)
+        continue;
+      if (isa<GCStatepointInst>(Call) || !isLeafCall(*Call))
+        return createStringError(
+            std::errc::invalid_argument,
+            "GoALLC gc-leaf-function contains a non-leaf call");
+    }
     return Error::success();
   }
 
