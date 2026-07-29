@@ -2,33 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Objdump disassembles executable files.
+// Objview inspects Go object files and package archives.
 //
 // Usage:
 //
-//	go tool objdump [-s symregexp] binary
+//	go tool objview [-json] object-or-archive
 //
-// Objdump prints a disassembly of all text symbols (code) in the binary.
-// If the -s option is present, objdump only disassembles
-// symbols with names matching the regular expression.
-//
-// Alternate usage:
-//
-//	go tool objdump binary start end
-//
-// In this mode, objdump disassembles the binary starting at the start address and
-// stopping at the end address. The start and end addresses are program
-// counters written in hexadecimal with optional leading 0x prefix.
-// In this mode, objdump prints a sequence of stanzas of the form:
-//
-//	file:line
-//	 address: assembly
-//	 address: assembly
-//	 ...
-//
-// Each stanza gives the disassembly for a contiguous range of addresses
-// all mapped to the same original source file and line number.
-// This mode is intended for use by pprof.
+// The default output is a diagnostic hexadecimal/text dump. -json prints a
+// deterministic structured representation for machine comparison.
 package main
 
 import (
@@ -40,6 +21,7 @@ import (
 	"cmd/internal/telemetry/counter"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"internal/abi"
@@ -51,8 +33,10 @@ import (
 	"unsafe"
 )
 
+var jsonOutput = flag.Bool("json", false, "print canonical, machine-readable JSON")
+
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: go tool objview binary\n\n")
+	fmt.Fprintf(os.Stderr, "usage: go tool objview [-json] binary\n\n")
 	flag.PrintDefaults()
 	os.Exit(2)
 }
@@ -64,10 +48,23 @@ func main() {
 
 	flag.Usage = usage
 	flag.Parse()
-	counter.Inc("objdump/invocations")
-	counter.CountFlags("objdump/flag:", *flag.CommandLine)
+	counter.Inc("objview/invocations")
+	counter.CountFlags("objview/flag:", *flag.CommandLine)
 	if flag.NArg() != 1 {
 		usage()
+	}
+	if *jsonOutput {
+		doc, err := parseCanonicalFile(flag.Arg(0))
+		if err != nil {
+			log.Fatal(err)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(doc); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	f, err := os.Open(flag.Arg(0))
 	if err != nil {
@@ -473,9 +470,12 @@ func extractSymData(r *goobj.Reader, i uint32, sym *goobj.Sym, content string, d
 		b := r.Data(i)
 		content = tryAux(sym, content, i, b)
 	case objabi.STEXT:
-		var sb strings.Builder
-		dis.Print(&sb, nil, uint64(offset), uint64(offset)+uint64(sym.Siz()), false, false)
-		content += fmt.Sprintf("%v %v\n", i, sb.String())
+		text, err := disassembleText(dis, uint64(offset), uint64(offset)+uint64(sym.Siz()))
+		if err != nil {
+			content += fmt.Sprintf("%v disassembly unavailable: %v; code=%x\n", i, err, r.Data(i))
+		} else {
+			content += fmt.Sprintf("%v %v\n", i, text)
+		}
 	case objabi.Sxxx:
 	case objabi.SBSS:
 	case objabi.SNOPTRBSS:
@@ -500,6 +500,21 @@ func extractSymData(r *goobj.Reader, i uint32, sym *goobj.Sym, content string, d
 	case objabi.SSEHUNWINDINFO:
 	}
 	return content
+}
+
+func disassembleText(dis *disasm.Disasm, start, end uint64) (text string, err error) {
+	if dis == nil {
+		return "", fmt.Errorf("disassembler is unavailable")
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			text = ""
+			err = fmt.Errorf("%v", p)
+		}
+	}()
+	var out strings.Builder
+	dis.Print(&out, nil, start, end, false, false)
+	return out.String(), nil
 }
 
 type stackObjectRecord struct {
