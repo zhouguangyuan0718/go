@@ -76,7 +76,10 @@
       "llvm_interface_equality.go": "empty and non-empty interface equality for matching and differing dynamic values",
       "llvm_interface_switch.go": "nil, concrete, multiple interface, and default type-switch cases with execution",
       "llvm_closure.go": "escaping funcval allocation, hidden closure context, indirect call, capture access, and tuple return",
-      "llvm_statepoint_gc.go": "heap pointer liveness across runtime.GC"
+      "llvm_statepoint_branch_gc.go": "pointer relocation across either arm of a two-safepoint branch",
+      "llvm_statepoint_conditional_gc.go": "pointer relocation merged with the original value when a path skips runtime.GC",
+      "llvm_statepoint_gc.go": "heap pointer liveness across runtime.GC",
+      "llvm_statepoint_nested_gc.go": "pointer relocation through nested conditional control flow"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"

@@ -5,9 +5,9 @@
 #include "GoALLCStatepoints.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/IR/CFG.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
@@ -15,13 +15,15 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Error.h"
-#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include <optional>
+#include <string>
 
 using namespace llvm;
 
@@ -69,6 +71,8 @@ struct SafepointRecord {
   CallInst *Call;
   uint64_t ID;
   ValueSet Live;
+  CallInst *Statepoint = nullptr;
+  SmallVector<CallInst *, 8> Relocates;
 };
 
 bool isGoCallingConv(CallingConv::ID CC) {
@@ -190,7 +194,7 @@ ValueSet liveAtCall(CallInst &Call, LivenessData &Data) {
   return Live;
 }
 
-Error validateSafepoint(const SafepointRecord &Record, DominatorTree &DT) {
+Error validateSafepoint(const SafepointRecord &Record) {
   const CallInst &Call = *Record.Call;
   if (Call.isInlineAsm())
     return createStringError(
@@ -217,23 +221,11 @@ Error validateSafepoint(const SafepointRecord &Record, DominatorTree &DT) {
       return createStringError(
           std::errc::not_supported,
           "GoALLC statepoints do not yet support live pointer aggregates");
-    for (const Use &U : V->uses()) {
-      auto *User = dyn_cast<Instruction>(U.getUser());
-      if (!User || User == &Call)
-        continue;
-      if (User->getParent() == Call.getParent() && !Call.comesBefore(User))
-        continue;
-      if (DT.dominates(&Call, U) || DT.dominates(User, &Call))
-        continue;
-      return createStringError(
-          std::errc::not_supported,
-          "GoALLC statepoints do not yet support conditional relocation PHIs");
-    }
   }
   return Error::success();
 }
 
-Error rewriteCall(SafepointRecord &Record, DominatorTree &DT) {
+Error rewriteCall(SafepointRecord &Record) {
   CallInst *Call = Record.Call;
 
   SmallVector<Value *, 8> CallArgs(Call->args());
@@ -242,12 +234,13 @@ Error rewriteCall(SafepointRecord &Record, DominatorTree &DT) {
 
   IRBuilder<> Builder(Call);
   Builder.SetCurrentDebugLocation(Call->getDebugLoc());
-  CallInst *Statepoint = Builder.CreateGCStatepointCall(
+  Record.Statepoint = Builder.CreateGCStatepointCall(
       Record.ID, 0, Callee, CallArgs, std::nullopt, GCLive, "statepoint_token");
-  Statepoint->setCallingConv(Call->getCallingConv());
+  Record.Statepoint->setCallingConv(Call->getCallingConv());
   for (unsigned I = 0; I != Call->arg_size(); ++I) {
     for (Attribute Attr : Call->getAttributes().getParamAttrs(I))
-      Statepoint->addParamAttr(GCStatepointInst::CallArgsBeginPos + I, Attr);
+      Record.Statepoint->addParamAttr(GCStatepointInst::CallArgsBeginPos + I,
+                                      Attr);
   }
 
   Instruction *InsertBefore = Call->getNextNode();
@@ -256,28 +249,113 @@ Error rewriteCall(SafepointRecord &Record, DominatorTree &DT) {
 
   CallInst *Result = nullptr;
   if (!Call->getType()->isVoidTy() && !Call->use_empty()) {
-    Result = Builder.CreateGCResult(Statepoint, Call->getType());
+    Result = Builder.CreateGCResult(Record.Statepoint, Call->getType());
     Result->setAttributes(
         AttributeList::get(Call->getContext(), AttributeList::ReturnIndex,
                            Call->getAttributes().getRetAttrs()));
   }
 
-  SmallVector<CallInst *, 8> Relocates;
   for (auto [Index, V] : llvm::enumerate(GCLive)) {
     CallInst *Relocate = Builder.CreateGCRelocate(
-        Statepoint, Index, Index, V->getType(),
+        Record.Statepoint, Index, Index, V->getType(),
         V->hasName() ? V->getName() + ".relocated" : "");
     Relocate->setCallingConv(CallingConv::Cold);
-    Relocates.push_back(Relocate);
+    Record.Relocates.push_back(Relocate);
   }
 
   if (Result)
     Call->replaceAllUsesWith(Result);
   Call->eraseFromParent();
-
-  for (auto [Index, V] : llvm::enumerate(GCLive))
-    replaceDominatedUsesWith(V, Relocates[Index], DT, Relocates[Index]);
+  Record.Call = nullptr;
   return Error::success();
+}
+
+void repairRelocationSSA(Function &F, DominatorTree &DT,
+                         ArrayRef<SafepointRecord> Records) {
+  // Re-read gc-live after every ordinary call has been replaced. A
+  // pointer-valued call in an earlier record may now be a gc.result operand of
+  // a later statepoint, so the pre-rewrite liveness records can contain erased
+  // instructions.
+  ValueSet Live;
+  for (const SafepointRecord &Record : Records)
+    Live.insert_range(cast<GCStatepointInst>(Record.Statepoint)->gc_live());
+  if (Live.empty())
+    return;
+
+  const DataLayout &DL = F.getDataLayout();
+  MapVector<Value *, AllocaInst *> Slots;
+  SmallVector<AllocaInst *, 16> PromotableAllocas;
+  PromotableAllocas.reserve(Live.size());
+  for (Value *V : Live) {
+    StringRef Name = V->hasName() ? V->getName() : "pointer";
+    auto *Slot = new AllocaInst(V->getType(), DL.getAllocaAddrSpace(),
+                                (Name + ".relocated.merge").str(),
+                                F.getEntryBlock().getFirstNonPHIIt());
+    Slots[V] = Slot;
+    PromotableAllocas.push_back(Slot);
+  }
+
+  // A relocate is a new reaching definition of its original gc-live value.
+  // Insert these stores before rewriting the statepoint operands themselves:
+  // getDerivedPtr() still identifies the alloca which owns each relocate.
+  for (const SafepointRecord &Record : Records) {
+    for (CallInst *RelocateCall : Record.Relocates) {
+      auto *Relocate = cast<GCRelocateInst>(RelocateCall);
+      Value *Original = Relocate->getDerivedPtr();
+      auto Slot = Slots.find(Original);
+      assert(Slot != Slots.end() && "relocate is missing its gc-live value");
+      new StoreInst(RelocateCall, Slot->second,
+                    std::next(RelocateCall->getIterator()));
+    }
+  }
+
+  // Express every old use as a load from the pointer's temporary slot, then
+  // seed that slot immediately after the original definition. PromoteMemToReg
+  // removes all of this memory traffic and constructs the required SSA PHIs
+  // for arbitrary CFGs, including loop backedges and irreducible regions.
+  for (auto [Original, Slot] : Slots) {
+    SmallVector<Instruction *, 16> Users;
+    SmallPtrSet<Instruction *, 16> Seen;
+    for (User *U : Original->users())
+      if (auto *I = dyn_cast<Instruction>(U); I && Seen.insert(I).second)
+        Users.push_back(I);
+
+    StringRef Name = Original->hasName() ? Original->getName() : "pointer";
+    std::string LoadName = (Name + ".relocated.current").str();
+    for (Instruction *User : Users) {
+      if (auto *Phi = dyn_cast<PHINode>(User)) {
+        for (unsigned I = 0; I != Phi->getNumIncomingValues(); ++I) {
+          if (Phi->getIncomingValue(I) != Original)
+            continue;
+          auto *Load = new LoadInst(
+              Original->getType(), Slot, LoadName,
+              Phi->getIncomingBlock(I)->getTerminator()->getIterator());
+          Phi->setIncomingValue(I, Load);
+        }
+        continue;
+      }
+      auto *Load = new LoadInst(Original->getType(), Slot, LoadName,
+                                User->getIterator());
+      User->replaceUsesOfWith(Original, Load);
+    }
+
+    auto *Store = new StoreInst(Original, Slot, false,
+                                DL.getABITypeAlign(Original->getType()));
+    if (auto *Definition = dyn_cast<Instruction>(Original)) {
+      if (isa<PHINode>(Definition))
+        Store->insertBefore(Definition->getParent()->getFirstNonPHIIt());
+      else {
+        assert(!Definition->isTerminator() &&
+               "GoALLC does not support value-producing terminators");
+        Store->insertAfter(Definition->getIterator());
+      }
+    } else {
+      assert(isa<Argument>(Original) && "expected local pointer definition");
+      Store->insertAfter(Slot->getIterator());
+    }
+  }
+
+  PromoteMemToReg(PromotableAllocas, DT);
 }
 
 Error rewriteFunction(Function &F) {
@@ -313,11 +391,12 @@ Error rewriteFunction(Function &F) {
                        liveAtCall(*OrdinaryCall, Data)});
   }
   for (const SafepointRecord &Record : Records)
-    if (Error Err = validateSafepoint(Record, DT))
+    if (Error Err = validateSafepoint(Record))
       return Err;
   for (SafepointRecord &Record : llvm::reverse(Records))
-    if (Error Err = rewriteCall(Record, DT))
+    if (Error Err = rewriteCall(Record))
       return Err;
+  repairRelocationSSA(F, DT, Records);
   return Error::success();
 }
 
