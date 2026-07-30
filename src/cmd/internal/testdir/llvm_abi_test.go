@@ -65,6 +65,13 @@ type llvmABICase struct {
 	goallcArgsMaps  [][]int
 	nativeStackMaps []int32
 	goallcStackMaps []int32
+	checkFullMaps   bool
+	nativeLocals    uint32
+	goallcLocals    uint32
+	nativeLocalMaps [][]int
+	goallcLocalMaps [][]int
+	nativeQueries   []int32
+	goallcQueries   []int32
 }
 
 func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
@@ -141,14 +148,46 @@ func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
 			t.Fatalf("aggregate survived in gc-live: %s", line)
 		}
 	}
+	for _, pattern := range []string{
+		`(?s)define goabiinternal \{ ptr, i64 \} @main\.liveScalarStackArgument.*?"gc-live"\(ptr %pointer\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerSequenceStackArguments.*?"gc-live"\(ptr %second, ptr %first\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerAggregateStackArgument.*?"gc-live"\(ptr %value\.leaf\.2, ptr %value\.leaf\.0\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, ptr, ptr \} @main\.pointerAggregateBothOverflow.*?"gc-live"\(ptr %value\.leaf\.2, ptr %value\.leaf\.0\).*?gc\.relocate`,
+	} {
+		if !regexp.MustCompile(pattern).Match(rewrittenIR) {
+			t.Fatalf("rewritten GoALLC ABI IR does not match %q", pattern)
+		}
+	}
 	checkLLVMABIStatepointTupleAttrs(t, rewrittenIR,
-		"overflowResults", "stackAggregateResult", "bothOverflow")
+		"liveScalarStackArgument", "livePointerSequenceStackArguments",
+		"livePointerAggregateStackArgument", "overflowResults",
+		"stackAggregateResult", "bothOverflow", "pointerAggregateBothOverflow")
 	runLLVMABICommand(t, rewrittenIR, opt,
 		"-load-pass-plugin="+plugin, "-passes=verify", "-disable-output", "-")
 
+	machineIR := runLLVMABICommand(t, nil, llc,
+		"-load-pass-plugin="+plugin, "-stop-after=finalize-isel",
+		"-o", "-", llvmIR)
+	for _, pattern := range []string{
+		`(?s)name:\s+main\.liveScalarStackArgument.*?fixedStack:.*?offset:\s+8.*?isImmutable:\s+false.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0`,
+		`(?s)name:\s+main\.livePointerSequenceStackArguments.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.2[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[02].*?LDRXui\s+%fixed-stack\.[02]`,
+		`(?s)name:\s+main\.livePointerAggregateStackArgument.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.2[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[02].*?LDRXui\s+%fixed-stack\.[02]`,
+		`(?s)name:\s+main\.pointerAggregateBothOverflow.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.4[^\n]*%fixed-stack\.2.*?LDRXui\s+%fixed-stack\.[24].*?LDRXui\s+%fixed-stack\.[24].*?STRXui[^\n]*%fixed-stack\.0.*?STRXui[^\n]*%fixed-stack\.1`,
+	} {
+		if !regexp.MustCompile(pattern).Match(machineIR) {
+			t.Fatalf("GoALLC ABI MIR does not match %q", pattern)
+		}
+	}
+
 	goallcAssembly := runLLVMABICommand(t, nil, llc,
 		"-load-pass-plugin="+plugin, "-filetype=asm", llvmIR, "-o", "-")
-	for _, name := range []string{"main.mixedABI", "main.growPointer", "main.bothOverflow"} {
+	for _, name := range []string{
+		"main.mixedABI", "main.liveScalarStackArgument",
+		"main.livePointerSequenceStackArguments",
+		"main.livePointerAggregateStackArgument",
+		"main.growPointer", "main.bothOverflow",
+		"main.pointerAggregateBothOverflow",
+	} {
 		if !bytes.Contains(goallcAssembly, []byte(name)) {
 			t.Fatalf("GoALLC assembly does not contain %s", name)
 		}
@@ -174,6 +213,48 @@ func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
 			goallcArgsMaps:  [][]int{{2, 4, 18}, {2}},
 			nativeStackMaps: []int32{-1, 0, -1},
 			goallcStackMaps: []int32{-1, 1, 0},
+		},
+		{
+			name: "liveScalarStackArgument", args: 136, pointerBits: []int{0},
+			nativeArgsMaps:  [][]int{{0}, nil},
+			goallcArgsMaps:  [][]int{{0}},
+			nativeStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 0},
+			checkFullMaps:   true,
+			nativeLocals:    8,
+			goallcLocals:    152,
+			nativeLocalMaps: [][]int{nil, nil},
+			goallcLocalMaps: [][]int{nil},
+			nativeQueries:   []int32{0, -1},
+			goallcQueries:   []int32{0, 0},
+		},
+		{
+			name: "livePointerSequenceStackArguments", args: 152, pointerBits: []int{0, 2},
+			nativeArgsMaps:  [][]int{{0, 2}, nil},
+			goallcArgsMaps:  [][]int{{0, 2}},
+			nativeStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 0},
+			checkFullMaps:   true,
+			nativeLocals:    8,
+			goallcLocals:    40,
+			nativeLocalMaps: [][]int{nil, nil},
+			goallcLocalMaps: [][]int{nil},
+			nativeQueries:   []int32{0, -1},
+			goallcQueries:   []int32{0, 0},
+		},
+		{
+			name: "livePointerAggregateStackArgument", args: 136, pointerBits: []int{0, 2},
+			nativeArgsMaps:  [][]int{{0, 2}, nil},
+			goallcArgsMaps:  [][]int{{0, 2}},
+			nativeStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 0},
+			checkFullMaps:   true,
+			nativeLocals:    8,
+			goallcLocals:    40,
+			nativeLocalMaps: [][]int{nil, nil},
+			goallcLocalMaps: [][]int{nil},
+			nativeQueries:   []int32{0, -1},
+			goallcQueries:   []int32{0, 0},
 		},
 		{
 			name: "growPointer", args: 16, pointerBits: []int{0},
@@ -211,6 +292,20 @@ func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
 			goallcStackMaps: []int32{-1, 1, 0, 2},
 		},
 		{
+			name: "pointerAggregateBothOverflow", args: 152, pointerBits: []int{0, 2},
+			nativeArgsMaps:  [][]int{{0, 2}, nil},
+			goallcArgsMaps:  [][]int{{0, 2}},
+			nativeStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 0},
+			checkFullMaps:   true,
+			nativeLocals:    8,
+			goallcLocals:    136,
+			nativeLocalMaps: [][]int{nil, nil},
+			goallcLocalMaps: [][]int{nil},
+			nativeQueries:   []int32{0, -1},
+			goallcQueries:   []int32{0, 0},
+		},
+		{
 			name: "requireAggregate", args: 40, pointerBits: []int{4},
 			nativeArgsMaps:  [][]int{{4}, nil},
 			goallcArgsMaps:  [][]int{{4}, nil, nil},
@@ -235,10 +330,19 @@ func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
 				t.Fatalf("entry ArgsPointerMaps differ: native=%v GoALLC=%v",
 					nativeBits, goallcBits)
 			}
-			checkLLVMABIStackMaps(t, "native", nativeSymbol,
-				tc.nativeArgsMaps, tc.nativeStackMaps)
-			checkLLVMABIStackMaps(t, "GoALLC", goallcSymbol,
-				tc.goallcArgsMaps, tc.goallcStackMaps)
+			if tc.checkFullMaps {
+				checkLLVMABISourceStackMaps(t, "native", nativeSymbol,
+					tc.nativeLocals, tc.nativeArgsMaps, tc.nativeLocalMaps,
+					tc.nativeStackMaps, tc.nativeQueries)
+				checkLLVMABISourceStackMaps(t, "GoALLC", goallcSymbol,
+					tc.goallcLocals, tc.goallcArgsMaps, tc.goallcLocalMaps,
+					tc.goallcStackMaps, tc.goallcQueries)
+			} else {
+				checkLLVMABIStackMaps(t, "native", nativeSymbol,
+					tc.nativeArgsMaps, tc.nativeStackMaps)
+				checkLLVMABIStackMaps(t, "GoALLC", goallcSymbol,
+					tc.goallcArgsMaps, tc.goallcStackMaps)
+			}
 		})
 	}
 
@@ -437,9 +541,17 @@ func checkLLVMABIAssembly(t *testing.T, native, goallc []byte) {
 	// overflow layouts.
 	for _, pattern := range []string{
 		`TEXT\s+main\.mixedABI\(SB\), ABIInternal, \$[0-9]+-152`,
+		`TEXT\s+main\.liveScalarStackArgument\(SB\), ABIInternal, \$[0-9]+-136`,
+		`TEXT\s+main\.livePointerSequenceStackArguments\(SB\), ABIInternal, \$[0-9]+-152`,
+		`TEXT\s+main\.livePointerAggregateStackArgument\(SB\), ABIInternal, \$[0-9]+-136`,
 		`TEXT\s+main\.overflowResults\(SB\), ABIInternal, \$[0-9]+-48`,
 		`TEXT\s+main\.stackAggregateResult\(SB\), ABIInternal, \$[0-9]+-40`,
 		`TEXT\s+main\.bothOverflow\(SB\), ABIInternal, \$[0-9]+-168`,
+		`TEXT\s+main\.pointerAggregateBothOverflow\(SB\), ABIInternal, \$[0-9]+-152`,
+		`(?s)TEXT\s+main\.liveScalarStackArgument.*?CALL\s+runtime\.GC\(SB\).*?MOVD\s+main\.pointer\(FP\),\s+R0`,
+		`(?s)TEXT\s+main\.livePointerSequenceStackArguments.*?CALL\s+runtime\.GC\(SB\).*?MOVD\s+main\.first\(FP\),\s+R0.*?MOVD\s+main\.second\+16\(FP\),\s+R1`,
+		`(?s)TEXT\s+main\.livePointerAggregateStackArgument.*?CALL\s+runtime\.GC\(SB\).*?MOVD\s+main\.value\(FP\),\s+R0.*?MOVD\s+main\.value\+16\(FP\),\s+R1`,
+		`(?s)TEXT\s+main\.pointerAggregateBothOverflow.*?CALL\s+runtime\.GC\(SB\).*?MOVD\s+main\.value\(FP\),\s+R0.*?MOVD\s+R0,\s+main\.~r16\+24\(FP\).*?MOVD\s+main\.value\+16\(FP\),\s+R0.*?MOVD\s+R0,\s+main\.~r17\+32\(FP\)`,
 		`(?s)CALL\s+main\.overflowResults\(SB\).*?MOVD\s+R15,.*?LDP\s+8\(RSP\)`,
 		`(?s)CALL\s+main\.stackAggregateResult\(SB\).*?LDP\s+8\(RSP\).*?MOVD\s+R15,`,
 		`(?s)CALL\s+main\.bothOverflow\(SB\).*?MOVD\s+R15,.*?LDP\s+32\(RSP\)`,
@@ -454,9 +566,13 @@ func checkLLVMABIAssembly(t *testing.T, native, goallc []byte) {
 	// agree with the native listing.
 	for _, pattern := range []string{
 		`(?m)^main\.mixedABI:`,
+		`(?m)^main\.liveScalarStackArgument:`,
+		`(?m)^main\.livePointerSequenceStackArguments:`,
+		`(?m)^main\.livePointerAggregateStackArgument:`,
 		`(?m)^main\.overflowResults:`,
 		`(?m)^main\.stackAggregateResult:`,
 		`(?m)^main\.bothOverflow:`,
+		`(?m)^main\.pointerAggregateBothOverflow:`,
 		`(?s)\bbl\s+main\.overflowResults.*?\bldp\s+x[0-9]+, x[0-9]+, \[sp, #8\]`,
 		`(?s)\bbl\s+main\.overflowResults.*?\b(?:mov|stp)\s+[^\n]*x15`,
 		`(?s)\bbl\s+main\.stackAggregateResult.*?\bldp\s+x[0-9]+, x[0-9]+, \[sp, #8\].*?\bmov\s+x[0-9]+, x15`,

@@ -300,6 +300,14 @@ SelectionDAG statepoint operand，不引入 `byval`/`sret`，也不后移 GoALLC
 LLVM IR 的时机。当前 GoObj/运行时精确资格边界仍是 darwin/arm64；相同 fixed
 home 选择路径另有 AArch64 与 X86 MIR lit 覆盖。
 
+同源可执行回归 `test/abi/llvm_args_results.go` 还覆盖四种组合：第一个栈槽中的
+单个 pointer、由一个 non-pointer word 分隔的两个 pointer、含两个 pointer
+leaf 的三字 aggregate，以及该 aggregate 栈入参与两个 caller-owned pointer
+结果槽同时溢出。每个 callee 在读取这些 pointer 前执行 `runtime.GC`，caller
+随后再次执行 GC 并核对 pointer 身份、指向值和 scalar payload。差异测试同时
+固定 native/GoALLC 的 ArgsPointerMaps、LocalsPointerMaps、PCDATA 查询结果和
+最终 MIR，因此运行成功不能替代元数据证据。
+
 AArch64 GoObj 的 prologue 采用 Go arm64 栈链约定，而不是平台 ABI 的
 in-frame `(FP, LR)` record。若最终物理 frame 大小为 `StackSize`，则
 `LR` 位于 `SP+0`，当前函数为未来 callee 写入的 FP link 位于 `SP-8`，

@@ -258,6 +258,13 @@ ArgsPointerMaps entries, then checks their exact objview bitmaps and
 three-word pointer aggregate onto the incoming stack. It checks native
 assembly stack loads, scalar-only rewritten `gc-live`/`gc.relocate`, fixed-home
 MIR with no local statepoint spill, and exact Args/Locals/PCDATA objview data.
+The executable identical-source fixture `test/abi/llvm_args_results.go` repeats
+those checks with `runtime.GC` for a scalar stack pointer, two pointer stack
+arguments separated by a scalar, a pointer-containing stack aggregate, and the
+same aggregate combined with overflowing pointer results. The caller checks
+pointer identity, pointee values, and scalar payloads after another GC; the ABI
+differential still asserts the exact native and GoALLC metadata and MIR for
+these functions.
 
 The installed file is `lib/GoALLCStatepoints.dylib` on Darwin or
 `lib/GoALLCStatepoints.so` on Linux. Do not build the plugin against a different
