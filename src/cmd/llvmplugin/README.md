@@ -45,14 +45,18 @@ The current SSA value and CFG rewrite support matrix is:
 
 | Value or control-flow shape | Status | Current contract |
 | --- | --- | --- |
-| Pointer arguments | Supported | Tracked independently at every safepoint. |
+| Pointer arguments | Supported on AArch64 | Values live after a call use caller statepoints; call-only arguments are described by the callee's type-derived entry map. |
 | `alloca` and alloca-derived pointers | Supported | The pointer value is live; pointer fields stored in the allocation are not described. |
 | `select`, GEP, and pointer casts | Supported | Each resulting pointer SSA value is tracked conservatively. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
 | Loops and irreducible CFG | Supported | Relocation definitions are propagated through backedge and multi-entry PHIs without a shape-specific algorithm. |
-| Pointer-containing aggregates | Unsupported | Fails closed before rewriting. |
+| Fixed struct/array SSA aggregates | Supported | Pointer leaves are scalarized before liveness and reconstructed from the current relocated SSA leaves. |
+| Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
+| Aggregate load results and store operands | Supported | Only the first-class SSA value is normalized; the underlying memory object's pointer slots are not described. |
+| Pointer-containing `alloca` storage | Unsupported | Requires locals pointer maps or `FUNCDATA_StackObjects`; fails closed. |
+| Fixed and scalable vectors | Unsupported | Vector lane and scalable-count semantics require a separate design; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
 | `invoke`, `callbr`, operand bundles, non-`nest` parameter attributes, and `musttail` | Unsupported | Fails closed rather than widening the call contract. |
 
@@ -65,33 +69,73 @@ results have IR and verifier coverage, but are not yet runtime-qualified:
 focused execution trials currently expose invalid post-call values or
 traceback/stack-map failures in those shapes.
 
+The statepoint pass first computes aggregate-only liveness to find each
+supported pointer-containing aggregate that is live after a safepoint. Every
+explicit leaf is extracted next to the aggregate definition, and each
+aggregate use is rebuilt next to that use from `poison` with every required
+leaf inserted. Rebuilding from the original aggregate would keep that
+aggregate live across the safepoint and is forbidden. Exact `extractvalue`
+uses consume the corresponding leaf directly.
+
+After normalization, a second liveness computation tracks scalar pointers
+only. Both computations inspect instructions strictly after the current call:
+the caller statepoint describes values live across that call, while values used
+only as call arguments belong to the callee's `FUNCDATA_ArgsPointerMaps`.
+No rebuilt aggregate or side table participates in final liveness.
+
+This normalization has four invariants:
+
+1. `gc-live` contains only scalar pointers, never an aggregate.
+2. The original aggregate is used only by definition-local extracts and cannot
+   cross a safepoint.
+3. A use-local rebuilt aggregate cannot cross a safepoint. A call-only
+   aggregate argument stays as the real ABI operand and is neither scalarized
+   nor recorded in caller `gc-live`.
+4. Post-safepoint reconstruction uses the current SSA definition produced by
+   `gc.relocate` and the whole-function relocation PHIs.
+
+Nested fixed structs and arrays are enumerated by leaf index path. Extracting
+after an aggregate `freeze` preserves its correlated choice; rebuilding all
+explicit leaves preserves `undef` and `poison` field semantics. LLVM struct
+padding is not a first-class leaf. LLVM 23 permits an aggregate `gc.result`, so
+an aggregate call result is projected first and its pointer leaves become roots
+at later safepoints.
+
+An aggregate loaded from memory can be normalized as an SSA value and an
+aggregate store can consume a rebuilt value, but this does not describe
+pointers that remain in the memory object. Pointer-containing `alloca` storage
+therefore fails closed. Tracking the alloca's scalar address is not a substitute
+for locals pointer maps or `FUNCDATA_StackObjects`. Constants are not roots in
+the current conservative model; null or constant pointer leaves extracted from
+a non-constant aggregate may be reported conservatively.
+
 LLVM's generic `RewriteStatepointsForGC` pass is the design reference for
 liveness and relocation SSA formation. GoALLC does not run it directly:
 that pass also owns base-pointer inference, EH/invoke rewriting, deopt bundles,
 and module-wide attribute cleanup. Those policies exceed the deliberately
 narrow Go ABI contract above.
 
-The staged reuse plan is:
+The final combined order is:
 
-1. **Global relocation SSA (current).** Keep GoALLC's call eligibility,
-   stable IDs, per-safepoint live sets, and base-equals-derived convention.
-   Adapt the structure of LLVM's
-   `relocationViaAlloca`: model the original definition and every relocate as
-   stores to temporary promotable allocas, rewrite old uses through loads, and
-   call the public `PromoteMemToReg` utility. This handles loop/backedge PHIs,
-   multiple relocation definitions in one block, and irreducible CFG without
-   importing the generic pass's broader call policy. GoALLC validation remains
-   in front of the transform.
-2. **Base/derived pointers.** Adapt the scalar GEP/cast path of LLVM's
-   `findBasePointer` first, then add `select` and PHI conflict handling. Inserted
-   base PHIs become explicit definitions, and liveness must be recomputed before
-   finalizing each statepoint live set. Ambiguous relationships continue to
-   fail closed.
-3. **Aggregates and rematerialization.** Add pointer aggregate decomposition
-   and only then consider LLVM's GEP/cast rematerialization optimization.
-   `ArgsPointerMaps`, `StackObjects`, and write barriers remain separate Go
-   runtime metadata projects.
-4. **Additional call shapes only when required by Go.** Do not import generic
+1. **Aggregate normalization.** Use aggregate-only liveness to find and
+   decompose supported live first-class struct/array values, then rebuild
+   aggregates immediately before their uses.
+2. **Scalar statepoint insertion.** Compute liveness, build scalar-only
+   `gc-live` bundles, and emit `gc.result` and `gc.relocate`.
+3. **Whole-function relocation SSA.** Model the original scalar definition and
+   every relocate as stores to temporary promotable allocas, rewrite old uses
+   through loads, and call the public `PromoteMemToReg` utility. This constructs
+   conditional, loop/backedge, and irreducible-CFG PHIs and removes all
+   temporary memory traffic.
+
+Future stages remain:
+
+1. **Base/derived pointers.** Adapt the scalar GEP/cast path of LLVM's
+   `findBasePointer`, then add `select` and PHI conflict handling. Ambiguous
+   relationships continue to fail closed.
+2. **Rematerialization.** Consider LLVM's GEP/cast rematerialization only after
+   base/derived correctness.
+3. **Additional call shapes only when required by Go.** Do not import generic
    deopt, transition-bundle, invoke/EH edge normalization, or module-wide
    attribute stripping merely because the LLVM pass supports them.
 
@@ -143,24 +187,25 @@ pre-indexed store; frames above `0xf0` compute NewSP and save `(FP, LR)` before
 moving SP so asynchronous traceback cannot observe a half-built frame.
 
 The first ArgsPointerMaps phase supports scalar LLVM pointer inputs and
-receivers in ABIInternal register homes, ABIInternal stack-input slots, and
-ABI0 stack-input slots on AArch64. Pair 0 is always
+receivers, plus pointer leaves in supported fixed struct/array formal layouts,
+in ABIInternal register homes, ABIInternal stack-input slots, and ABI0
+stack-input slots on AArch64. Pair 0 is always
 `(EntryArgs, empty locals)`. Ordinary
 statepoints classify their post-prologue indirect stack roots as locals and
 jointly deduplicate the complete `(Args, locals)` pair; the Args and Locals
 tables therefore always have the same count. A direct stack address is not a
 bitmap root.
 
-This phase fails closed for unsupported pointer-containing aggregate layouts
-and aggregates live at an ordinary statepoint; dynamic or realigned frames;
-raw register roots; pointer vectors or ABI layouts whose pointer words do not
-map to fixed homes; and an ordinary statepoint path that would recover a
-pointer from an unadjusted original argument home. `FUNCDATA_StackObjects` and
-`PCDATA_ArgLiveIndex` are not implemented. Tracking an alloca address across a
-statepoint does not describe pointer fields stored inside that object, and
-ArgLive is not a replacement for the entry argument bitmap. Precise handling
-of pointer-containing address-taken stack storage belongs to the separate
-StackObjects work rather than this ArgsPointerMaps change.
+This phase fails closed for unsupported formal aggregate layouts; dynamic or
+realigned frames; raw register roots; pointer vectors or ABI layouts whose
+pointer words do not map to fixed homes; and an ordinary statepoint path that
+would recover a pointer from an unadjusted original argument home.
+`FUNCDATA_StackObjects` and `PCDATA_ArgLiveIndex` are not implemented. Tracking
+an alloca address across a statepoint does not describe pointer fields stored
+inside that object, and ArgLive is not a replacement for the entry argument
+bitmap. Precise handling of pointer-containing address-taken stack storage
+belongs to the separate StackObjects work rather than this ArgsPointerMaps
+change.
 
 TODO: LLVM opaque pointer types currently make the first itab/type word of a
 Go interface and pointers to `NotInHeap` types look like ordinary GC pointers.
