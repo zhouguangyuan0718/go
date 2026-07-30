@@ -84,8 +84,9 @@ bool GoALLCStackMapPrinter::emitStackMaps(StackMaps &SM, AsmPrinter &AP) {
         report_fatal_error("malformed GoALLC statepoint deopt operands");
       size_t FirstGCLocation = 3 + static_cast<size_t>(NumDeopts);
 
-      MCContext::GoObjStackMapEntry Entry{
-          CSI.CSOffsetExpr, CSI.ID, Info.StackSize, PointerSize, {}};
+      MCContext::GoObjStackMapEntry Entry{CSI.CSOffsetExpr,   CSI.ID,
+                                          CSI.IsIndirectCall, Info.StackSize,
+                                          PointerSize,        {}};
       Entry.Locations.reserve(CSI.Locations.size() - FirstGCLocation);
       for (const StackMaps::Location &Location :
            ArrayRef(CSI.Locations).drop_front(FirstGCLocation)) {
