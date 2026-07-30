@@ -40,3 +40,31 @@ func partiallyInitializedAggregateResult(first, second *int) (
 	safepoint()
 	return
 }
+
+// liveScalarStackArgument fills all sixteen arm64 integer argument registers.
+// pointer is therefore loaded from a fixed incoming stack slot and remains live
+// across safepoint.
+//
+//go:noinline
+func liveScalarStackArgument(
+	a0, a1, a2, a3, a4, a5, a6, a7 uintptr,
+	a8, a9, a10, a11, a12, a13, a14, a15 uintptr,
+	pointer *int,
+) *int {
+	safepoint()
+	return pointer
+}
+
+// liveAggregateStackArgument leaves only two integer argument registers. The
+// three-word aggregate cannot be split, so both of its pointer fields have
+// exact fixed incoming stack homes at the safepoint.
+//
+//go:noinline
+func liveAggregateStackArgument(
+	a0, a1, a2, a3, a4, a5, a6 uintptr,
+	a7, a8, a9, a10, a11, a12, a13 uintptr,
+	value pointerAggregate,
+) (*int, *int) {
+	safepoint()
+	return value.first, value.second
+}

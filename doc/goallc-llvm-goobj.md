@@ -288,6 +288,18 @@ bitmap；`Indirect [SP+offset]` 才表示该槽保存指针值。最终 frame �
 设置 ArgsPointerMaps。这允许 IR 层保守追踪所有 alloca，同时避免把 alloca
 对象内容误当成指针。
 
+普通栈入参不需要额外的旁路格式。SelectionDAG formal lowering 只在 Go ABI
+pointer part 是从 immutable fixed object 发出的 direct、non-extending load，
+且 IR aggregate offset、ABI `PartOffset`、load size 与 object size 完全一致时，
+记录这个精确 value home。若后续 `gc-live` 是该参数或其精确
+`extractvalue` pointer leaf，statepoint lowering 直接把同一个 fixed frame
+index 作为 indirect memory operand，允许 GC 更新该槽，并让 `gc.relocate`
+从同一位置重新加载；调用前不再复制到 locals spill。merge、派生值或任一尺寸/
+offset 无法证明一致时，继续走 LLVM 原有的 local statepoint spill。这仍是标准
+SelectionDAG statepoint operand，不引入 `byval`/`sret`，也不后移 GoALLC 生成
+LLVM IR 的时机。当前 GoObj/运行时精确资格边界仍是 darwin/arm64；相同 fixed
+home 选择路径另有 AArch64 与 X86 MIR lit 覆盖。
+
 AArch64 GoObj 的 prologue 采用 Go arm64 栈链约定，而不是平台 ABI 的
 in-frame `(FP, LR)` record。若最终物理 frame 大小为 `StackSize`，则
 `LR` 位于 `SP+0`，当前函数为未来 callee 写入的 FP link 位于 `SP-8`，
@@ -301,7 +313,8 @@ pointer bitmap 只描述 `[SP+8, SP+StackSize-8)`。这里不从 IR lowering
 
 当前 ArgsPointerMaps 的第 0 项描述 ABIInternal/ABI0 的入口 pointer 参数
 home；普通 statepoint 则按最终机器位置把 caller-owned 参数/结果区中的间接
-pointer 槽写入对应 ArgsPointerMaps 项。Args 和 Locals 表按完整 pair 一起去重，
+pointer 槽写入对应 ArgsPointerMaps 项，其中可证明的栈入参直接使用原 fixed
+home，而不是另建 locals spill。Args 和 Locals 表按完整 pair 一起去重，
 并由同一个 `PCDATA_StackMapIndex` 选择。writer 不按声明类型预先标记所有结果槽：
 只有 statepoint 真实报告其中存有 live pointer 的栈结果槽才置位，尚未物化或尚未
 初始化的结果槽保持为空。StackObjects 仍未生成；追踪 alloca 地址也不能描述

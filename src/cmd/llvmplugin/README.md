@@ -45,7 +45,7 @@ The current SSA value and CFG rewrite support matrix is:
 
 | Value or control-flow shape | Status | Current contract |
 | --- | --- | --- |
-| Pointer arguments | Supported on AArch64 | Values live after a call use caller statepoints; call-only arguments are described by the callee's type-derived entry map. |
+| Pointer arguments | AArch64 GoObj qualified; SelectionDAG home reuse also tested on X86 | Values live after a call use caller statepoints; exact stack inputs stay in their fixed ABI homes, while register inputs and transformed values use normal statepoint spills. Call-only arguments are described by the callee's type-derived entry map. |
 | `alloca` and alloca-derived pointers | Supported | The pointer value is live; pointer fields stored in the allocation are not described. |
 | `select`, GEP, and pointer casts | Supported | Each resulting pointer SSA value is tracked conservatively. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
@@ -177,6 +177,19 @@ to neither bitmap because the address itself, rather than the slot contents,
 is the pointer. This permits conservative IR tracking without confusing an
 alloca's address with pointer data stored in the alloca.
 
+Ordinary stack inputs use the same statepoint path. SelectionDAG formal
+lowering records a value home only when a Go ABI pointer part is a direct,
+non-extending load from an immutable fixed object and its IR aggregate offset,
+ABI part offset, load size, and object size all agree. If `gc-live` later
+contains that argument or an exact `extractvalue` leaf, statepoint lowering
+uses the existing fixed frame index as its indirect memory location, makes the
+slot mutable for GC relocation, and reloads `gc.relocate` from that same frame
+index. No pre-call copy to a local spill is emitted. A merged, derived,
+size-mismatched, or otherwise unproven value falls back to LLVM's normal local
+statepoint spill. This is a SelectionDAG contract; it does not introduce
+`byval`/`sret`, change GoALLC's LLVM IR emission point, or bypass the standard
+statepoint operand format.
+
 For AArch64 GoObj, target frame lowering uses Go's frame-chain layout instead
 of the platform ABI frame record: LR is at `SP+0`, this function writes its FP
 link at `SP-8` for a future callee, and the caller's existing FP-link word is at
@@ -193,7 +206,7 @@ plus pointer leaves in supported fixed struct/array formal layouts, in
 ABIInternal register homes, ABIInternal stack-input slots, and ABI0 stack-input
 slots on AArch64. Pair 0 is always `(EntryArgs, empty locals)`. Ordinary
 statepoints use their actual final machine locations: indirect pointer slots in
-the current frame become locals bits, while indirect input homes and stack
+the current frame become locals bits, while exact fixed input homes and stack
 result slots above the final frame become args bits. The writer jointly
 deduplicates each complete `(Args, locals)` pair, so the two tables always have
 the same count. It does not eagerly mark declared result slots; a result slot
@@ -240,7 +253,11 @@ The Go test fixture
 `src/cmd/internal/testdir/testdata/llvm_args_pointer_maps.mir` additionally
 forces an entry input home and an ordinary stack-result root into different
 ArgsPointerMaps entries, then checks their exact objview bitmaps and
-`PCDATA_StackMapIndex` sequence.
+`PCDATA_StackMapIndex` sequence. The identical-source Go fixture
+`test/abi/llvm_args_pointer_maps.go` separately forces a scalar pointer and a
+three-word pointer aggregate onto the incoming stack. It checks native
+assembly stack loads, scalar-only rewritten `gc-live`/`gc.relocate`, fixed-home
+MIR with no local statepoint spill, and exact Args/Locals/PCDATA objview data.
 
 The installed file is `lib/GoALLCStatepoints.dylib` on Darwin or
 `lib/GoALLCStatepoints.so` on Linux. Do not build the plugin against a different
