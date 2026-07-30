@@ -53,12 +53,12 @@ The current SSA value and CFG rewrite support matrix is:
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
 | Loops and irreducible CFG | Supported | Relocation definitions are propagated through backedge and multi-entry PHIs without a shape-specific algorithm. |
 | Fixed struct/array SSA aggregates | Supported | Pointer leaves are scalarized before liveness and reconstructed from the current relocated SSA leaves. |
-| Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
+| Aggregate arguments and call results | Supported for IR rewriting | Direct register aggregates keep their value type. Complete stack aggregates use typed `byval`; only leaves live after the call enter caller `gc-live`, and supported fixed formal layouts contribute pointer words to AArch64 and X86-64 entry maps. |
 | Aggregate load results and store operands | Supported | Only the first-class SSA value is normalized; the underlying memory object's pointer slots are not described. |
 | Pointer-containing `alloca` storage | Unsupported | Requires locals pointer maps or `FUNCDATA_StackObjects`; fails closed. |
 | Fixed and scalable vectors | Unsupported | Vector lane and scalable-count semantics require a separate design; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
-| `invoke`, `callbr`, operand bundles, non-`nest` parameter attributes, and `musttail` | Unsupported | Fails closed rather than widening the call contract. |
+| `invoke`, `callbr`, operand bundles, parameter attributes other than `nest`, typed `byval`, and `align`, and `musttail` | Unsupported | Fails closed rather than widening the call contract. |
 
 This matrix describes verified IR rewriting, not full runtime qualification.
 The Darwin/arm64 Go execution whitelist additionally covers one unconditional
@@ -155,17 +155,20 @@ start, matching Go's `PCDATA_StackMapIndex` convention without a command-line
 mode. The frontend's stack-growth attribute
 asks LLVM to express the late-generated `runtime.morestack` call as a physical
 MIR `STATEPOINT` with empty deopt and GC-alloca sections. Before frame
-allocation, AArch64 formal lowering maps every type-derived input pointer word
-onto the existing fixed home reserved for that ABI input. Frame lowering encodes
-those homes in the morestack statepoint's GC pointer section as indirect
-`SP+offset` locations with base-equals-derived pairs; it never asks the
-statepoint machinery to allocate another spill. The GoObj writer recognizes
-the stack-growth ID, interprets those offsets in the entry-SP geometry, and
-selects pair 0: non-empty `EntryArgs` when present and empty locals. Ordinary
-and stack-growth calls use the same Machine StackMaps pipeline without relying
-on a return-PC convention. GoObj functions that already contain a Machine
-`STATEPOINT` but lack the frontend stack-growth attribute fail closed; there is
-no slow-path reset-label fallback for a raw morestack call.
+allocation, AArch64 and X86 formal lowering map every type-derived input
+pointer word onto the existing fixed home reserved for that ABI input. Frame
+lowering encodes those homes in the morestack statepoint's GC pointer section
+as indirect `SP+offset` locations with base-equals-derived pairs; it never asks
+the statepoint machinery to allocate another spill. X86 adds the CALL-pushed
+return-address word only when encoding a physical entry-SP address, while its
+fixed objects and Go argument words retain logical Go offsets. The GoObj writer
+recognizes the stack-growth ID, interprets those offsets in the target's
+entry-SP geometry, and selects pair 0: non-empty `EntryArgs` when present and
+empty locals. Ordinary and stack-growth calls use the same Machine StackMaps
+pipeline without relying on a return-PC convention. GoObj functions that
+already contain a Machine `STATEPOINT` but lack the frontend stack-growth
+attribute fail closed; there is no slow-path reset-label fallback for a raw
+morestack call.
 GoObj emits the currently constant safe `PCDATA_UnsafePoint` table first and
 the statepoint-derived `PCDATA_StackMapIndex` table second, as required by
 their Go ABI indexes 0 and 1.
@@ -177,17 +180,26 @@ to neither bitmap because the address itself, rather than the slot contents,
 is the pointer. This permits conservative IR tracking without confusing an
 alloca's address with pointer data stored in the alloca.
 
-Ordinary stack inputs use the same statepoint path. SelectionDAG formal
-lowering records a value home only when a Go ABI pointer part is a direct,
-non-extending load from an immutable fixed object and its IR aggregate offset,
-ABI part offset, load size, and object size all agree. If `gc-live` later
-contains that argument or an exact `extractvalue` leaf, statepoint lowering
-uses the existing fixed frame index as its indirect memory location, makes the
-slot mutable for GC relocation, and reloads `gc.relocate` from that same frame
-index. No pre-call copy to a local spill is emitted. A merged, derived,
-size-mismatched, or otherwise unproven value falls back to LLVM's normal local
-statepoint spill. This is a SelectionDAG contract; it does not introduce
-`byval`/`sret`, change GoALLC's LLVM IR emission point, or bypass the standard
+Ordinary stack inputs use the same statepoint path. Like Clang's ABI
+classification layer, GoALLC treats the compiler's existing
+`ABIParamAssignment` as authoritative: register-assigned parameters remain
+direct LLVM values, while only non-empty parameters assigned wholly to memory
+become typed `byval` pointers. The call site materializes the source value in a
+fixed temporary and attaches the same `byval(T), align N` attributes; the
+callee loads the logical Go value from the parameter pointer. A
+pointer-containing temporary is accepted only when no possible safepoint
+occurs between its initializing store and its sole byval call.
+
+Target formal lowering assigns the complete `byval` object to the exact Go
+incoming stack range and registers it through LLVM's standard
+`ByValArgFrameIndexMap`. If `gc-live` later contains a pointer loaded from that
+parameter, or an exact `extractvalue` leaf of the loaded aggregate, statepoint
+lowering derives the byte offset from the typed byval object and uses an
+overlapping pointer-sized fixed object as the indirect relocation location.
+No Go-only generic argument-value-home map or pre-call local statepoint spill
+is required. A merged, derived, size-mismatched, or otherwise unproven value
+falls back to LLVM's normal local statepoint spill. This does not introduce
+`sret`, change GoALLC's LLVM IR emission point, or bypass the standard
 statepoint operand format.
 
 For AArch64 GoObj, target frame lowering uses Go's frame-chain layout instead
@@ -204,7 +216,7 @@ moving SP so asynchronous traceback cannot observe a half-built frame.
 The ArgsPointerMaps phase supports scalar LLVM pointer inputs and receivers,
 plus pointer leaves in supported fixed struct/array formal layouts, in
 ABIInternal register homes, ABIInternal stack-input slots, and ABI0 stack-input
-slots on AArch64. Pair 0 is always `(EntryArgs, empty locals)`. Ordinary
+slots on AArch64 and X86-64. Pair 0 is always `(EntryArgs, empty locals)`. Ordinary
 statepoints use their actual final machine locations: indirect pointer slots in
 the current frame become locals bits, while exact fixed input homes and stack
 result slots above the final frame become args bits. The writer jointly

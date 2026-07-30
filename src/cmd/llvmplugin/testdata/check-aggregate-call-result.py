@@ -54,12 +54,12 @@ def main():
         "PCDATA_StackMapIndex tables",
     )
     ranges = stack_index["ranges"]
-    if [item["value"] for item in ranges] != [-1, 0, 1, 0]:
+    if [item["value"] for item in ranges] != [-1, 1, 2, 0]:
         fail(f"unexpected stack-map ranges: {ranges}")
 
     queries = metadata["stack_map_queries"]
     indexes = [item["stack_map_index"] for item in queries]
-    if indexes != [0, 1, 1, 0]:
+    if indexes != [1, 2, 2, 0]:
         fail(f"unexpected call stack-map indexes: {indexes}")
     if ranges[1]["start"] != queries[0]["call_offset"] - 1:
         fail("empty entry map does not begin at the first statepoint CALL")
@@ -73,27 +73,38 @@ def main():
         lambda item: item["kind"] == "args_pointer_maps",
         "FUNCDATA_ArgsPointerMaps tables",
     )["stack_map"]
-    if args_maps["count"] != 2 or args_maps["num_bits"] != 2:
+    if args_maps["count"] != 3 or args_maps["num_bits"] != 2:
         fail(f"unexpected argument-map dimensions: {args_maps}")
-    if any(item["set_bits"] for item in args_maps["bitmaps"]):
-        fail(f"x86 aggregate test unexpectedly has argument roots: {args_maps}")
+    entry_args = set(args_maps["bitmaps"][0]["set_bits"] or [])
+    ordinary_args = [
+        set(item["set_bits"] or []) for item in args_maps["bitmaps"][1:]
+    ]
+    if entry_args != {0} or any(ordinary_args):
+        fail(
+            f"unexpected argument roots: entry={sorted(entry_args)}, "
+            f"ordinary={ordinary_args}"
+        )
 
     locals_maps = only(
         metadata["funcdata"],
         lambda item: item["kind"] == "locals_pointer_maps",
         "FUNCDATA_LocalsPointerMaps tables",
     )["stack_map"]
-    if locals_maps["count"] != 2:
-        fail(f"locals stack-map count is {locals_maps['count']}, want 2")
+    if locals_maps["count"] != 3:
+        fail(f"locals stack-map count is {locals_maps['count']}, want 3")
     morestack_bits = set(locals_maps["bitmaps"][0]["set_bits"] or [])
-    live_bits = set(locals_maps["bitmaps"][1]["set_bits"] or [])
+    first_call_bits = set(locals_maps["bitmaps"][1]["set_bits"] or [])
+    live_bits = set(locals_maps["bitmaps"][2]["set_bits"] or [])
     if len(live_bits) != 1:
         fail(f"aggregate result has unexpected live pointer bits: {live_bits}")
-    if morestack_bits:
-        fail(f"morestack statepoint has GC live pointers: {morestack_bits}")
+    if morestack_bits or first_call_bits:
+        fail(
+            f"unexpected empty locals maps: morestack={morestack_bits}, "
+            f"first-call={first_call_bits}"
+        )
 
     print(
-        f"{FUNCTION}: call maps {indexes}, "
+        f"{FUNCTION}: call maps {indexes}, entry args {sorted(entry_args)}, "
         f"locals bits {sorted(live_bits)} -> {sorted(morestack_bits)}"
     )
 

@@ -9,6 +9,7 @@ import (
 	"cmd/internal/obj"
 	"cmd/internal/src"
 	"internal/buildcfg"
+	"strconv"
 
 	"github.com/goallc/go-llvm"
 )
@@ -25,6 +26,7 @@ type LLVMFuncContext struct {
 	b                llvm.Builder
 	ReturnType       llvm.Type
 	ResultCount      int
+	Params           []llvmParamSignature
 }
 
 // SSA may clone an ir.Name while retaining the same logical source
@@ -63,8 +65,30 @@ type llvmFuncSignature struct {
 	Type                llvm.Type
 	ReturnType          llvm.Type
 	ResultCount         int
+	Params              []llvmParamSignature
 	HasClosureContext   bool
 	ClosureContextIndex int
+}
+
+type llvmABIArgKind uint8
+
+const (
+	llvmABIArgDirect llvmABIArgKind = iota
+	llvmABIArgIndirectByVal
+)
+
+// llvmParamSignature is the GoALLC equivalent of Clang's ABIArgInfo. Go's ABI
+// assignment is authoritative: register-assigned values stay direct, while a
+// non-empty value assigned wholly to memory is represented by a typed byval
+// pointer.
+type llvmParamSignature struct {
+	Kind      llvmABIArgKind
+	ValueType llvm.Type
+	Alignment int
+}
+
+func (p llvmParamSignature) isIndirectByVal() bool {
+	return p.Kind == llvmABIArgIndirectByVal
 }
 
 func llvmCallConv(which obj.ABI) llvm.CallConv {
@@ -85,8 +109,25 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 	}
 
 	params := make([]llvm.Type, 0, aux.NArgs())
+	paramSignatures := make([]llvmParamSignature, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
-		params = append(params, getLLVMType(aux.TypeOfArg(i)))
+		goType := aux.TypeOfArg(i)
+		llvmType := getLLVMType(goType)
+		param := llvmParamSignature{
+			Kind:      llvmABIArgDirect,
+			ValueType: llvmType,
+		}
+		assignment := aux.ABIInfo().InParam(int(i))
+		if len(assignment.Registers) == 0 && goType.Size() != 0 {
+			if goType.Alignment() <= 0 {
+				base.Fatalf("invalid alignment %d for stack argument %d of type %v", goType.Alignment(), i, goType)
+			}
+			param.Kind = llvmABIArgIndirectByVal
+			param.Alignment = int(goType.Alignment())
+			llvmType = GlobalCtxt.PointerType(0)
+		}
+		params = append(params, llvmType)
+		paramSignatures = append(paramSignatures, param)
 	}
 
 	results := make([]llvm.Type, 0, aux.NResults())
@@ -107,6 +148,7 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 		Type:                llvm.FunctionType(ret, params, false),
 		ReturnType:          ret,
 		ResultCount:         len(results),
+		Params:              paramSignatures,
 		ClosureContextIndex: -1,
 	}
 }
@@ -128,6 +170,14 @@ func llvmNestAttribute() llvm.Attribute {
 	return GlobalCtxt.CreateEnumAttribute(kind, 0)
 }
 
+func llvmByValAttribute(t llvm.Type) llvm.Attribute {
+	kind := llvm.AttributeKindID("byval")
+	if kind == 0 {
+		base.Fatalf("LLVM does not provide the byval parameter attribute")
+	}
+	return GlobalCtxt.CreateTypeAttribute(kind, t)
+}
+
 func llvmNullPointerIsValidAttribute() llvm.Attribute {
 	kind := llvm.AttributeKindID("null_pointer_is_valid")
 	if kind == 0 {
@@ -141,11 +191,28 @@ func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallCon
 	if sig.ResultCount > 1 {
 		fn.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goResultsTupleAttr, ""))
 	}
+	for i, param := range sig.Params {
+		if !param.isIndirectByVal() {
+			continue
+		}
+		fn.AddAttributeAtIndex(i+1, llvmByValAttribute(param.ValueType))
+		fn.Param(i).SetParamAlignment(param.Alignment)
+	}
 	if sig.HasClosureContext {
 		// LLVM parameter attribute indexes are one-based. The closure context
 		// is deliberately excluded from the Go ABI argument layout by the
 		// target and carried in REGCTXT (RDX on amd64, X26 on arm64).
 		fn.AddAttributeAtIndex(sig.ClosureContextIndex+1, llvmNestAttribute())
+	}
+}
+
+func configureLLVMCall(call llvm.Value, sig llvmFuncSignature) {
+	for i, param := range sig.Params {
+		if !param.isIndirectByVal() {
+			continue
+		}
+		call.AddCallSiteAttribute(i+1, llvmByValAttribute(param.ValueType))
+		call.SetInstrParamAlignment(i+1, param.Alignment)
 	}
 }
 
@@ -495,15 +562,41 @@ func (lfc *LLVMFuncContext) FinishPhi() {
 	}
 }
 
-func (lfc *LLVMFuncContext) paramForArg(v *Value) llvm.Value {
+func (lfc *LLVMFuncContext) paramIndexForArg(v *Value) int {
 	assignment := ParamAssignmentForArgName(lfc.F, v.Aux.(*ir.Name))
 	for i, param := range lfc.F.OwnAux.ABIInfo().InParams() {
 		if param.Name == assignment.Name {
-			return lfc.LF.Param(i)
+			return i
 		}
 	}
 	v.Fatalf("could not find LLVM parameter for %v", assignment.Name)
-	return llvm.Value{}
+	return -1
+}
+
+func (lfc *LLVMFuncContext) materializeLLVMByValArgument(v *Value, index int, arg llvm.Value, param llvmParamSignature) llvm.Value {
+	if !param.isIndirectByVal() {
+		return arg
+	}
+	if arg.Type() != param.ValueType {
+		v.Fatalf("byval argument %d has incompatible LLVM value type", index)
+	}
+
+	// A byval operand must name memory containing the logical Go argument.
+	// Keep the backing object in the entry block so it is a fixed frame object
+	// even when the call itself occurs in a loop or conditional block.
+	entryBuilder := GlobalCtxt.NewBuilder()
+	defer entryBuilder.Dispose()
+	entry := lfc.LF.EntryBasicBlock()
+	if first := entry.FirstInstruction(); first.IsNil() {
+		entryBuilder.SetInsertPointAtEnd(entry)
+	} else {
+		entryBuilder.SetInsertPointBefore(first)
+	}
+	slot := entryBuilder.CreateAlloca(param.ValueType, v.String()+".arg"+strconv.Itoa(index)+".byval")
+	slot.SetAlignment(param.Alignment)
+	store := lfc.b.CreateStore(arg, slot)
+	store.SetAlignment(param.Alignment)
+	return slot
 }
 
 func (lfc *LLVMFuncContext) aggregate(v *Value, args []*Value) llvm.Value {
@@ -530,6 +623,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	args := make([]llvm.Value, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
 		arg := lfc.GenLV(v.Args[i])
+		arg = lfc.materializeLLVMByValArgument(v, int(i), arg, sig.Params[i])
 		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
 			v.Fatalf("argument %d to %s has incompatible LLVM type", i, aux.Fn.Name)
 		}
@@ -541,6 +635,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	}
 	call := lfc.b.CreateCall(sig.Type, fn, args, name)
 	call.SetInstructionCallConv(cc)
+	configureLLVMCall(call, sig)
 	return call
 }
 
@@ -574,6 +669,7 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	args := make([]llvm.Value, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
 		arg := lfc.GenLV(v.Args[argStart+int(i)])
+		arg = lfc.materializeLLVMByValArgument(v, int(i), arg, sig.Params[i])
 		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
 			v.Fatalf("argument %d to indirect call has incompatible LLVM type", i)
 		}
@@ -592,6 +688,7 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	}
 	call := lfc.b.CreateCall(sig.Type, code, args, name)
 	call.SetInstructionCallConv(cc)
+	configureLLVMCall(call, sig)
 	if closureContext {
 		call.AddCallSiteAttribute(sig.ClosureContextIndex+1, llvmNestAttribute())
 	}
@@ -716,7 +813,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 		lVal = llvmGoDataRef(sym)
 	case OpArg:
-		lVal = lfc.paramForArg(v)
+		index := lfc.paramIndexForArg(v)
+		lVal = lfc.LF.Param(index)
+		if param := lfc.Params[index]; param.isIndirectByVal() {
+			lVal = lfc.b.CreateLoad(param.ValueType, lVal, v.String()+".byval")
+			lVal.SetAlignment(param.Alignment)
+		}
 		lVal.SetName(v.Aux.(*ir.Name).Sym().Name)
 	case OpConst8, OpConst16, OpConst32, OpConst64:
 		// AuxInt already carries the two's-complement bit pattern. Asking LLVM
@@ -1068,6 +1170,7 @@ func LLVMCompile(f *Func) {
 		b:                GlobalCtxt.NewBuilder(),
 		ReturnType:       sig.ReturnType,
 		ResultCount:      sig.ResultCount,
+		Params:           sig.Params,
 	}
 	defer FCtxt.b.Dispose()
 

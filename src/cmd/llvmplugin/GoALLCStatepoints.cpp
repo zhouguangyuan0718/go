@@ -383,6 +383,43 @@ Error scalarizeLivePointerAggregates(Function &F) {
   return Error::success();
 }
 
+bool isTransientByValSource(const AllocaInst &Alloca) {
+  const StoreInst *Store = nullptr;
+  const CallBase *Call = nullptr;
+
+  for (const Use &U : Alloca.uses()) {
+    if (const auto *CandidateStore = dyn_cast<StoreInst>(U.getUser())) {
+      if (CandidateStore->getPointerOperand() != &Alloca || Store)
+        return false;
+      Store = CandidateStore;
+      continue;
+    }
+
+    const auto *CandidateCall = dyn_cast<CallBase>(U.getUser());
+    if (!CandidateCall || !CandidateCall->isArgOperand(&U) || Call)
+      return false;
+    unsigned Arg = CandidateCall->getArgOperandNo(&U);
+    if (!CandidateCall->paramHasAttr(Arg, Attribute::ByVal) ||
+        CandidateCall->getParamByValType(Arg) != Alloca.getAllocatedType())
+      return false;
+    Call = CandidateCall;
+  }
+
+  if (!Store || !Call ||
+      Store->getValueOperand()->getType() != Alloca.getAllocatedType() ||
+      Store->getParent() != Call->getParent() || !Store->comesBefore(Call))
+    return false;
+
+  // The pointer-containing copy is deliberately not a caller root. Require
+  // that no possible safepoint can observe it between initialization and the
+  // byval call that copies it into the outgoing Go argument area.
+  for (const Instruction *I = Store->getNextNode(); I != Call;
+       I = I->getNextNode())
+    if (!I || isa<CallBase>(I))
+      return false;
+  return true;
+}
+
 Error validateMemoryObjects(Function &F) {
   bool HasSafepoint = llvm::any_of(instructions(F), [](Instruction &I) {
     auto *Call = dyn_cast<CallBase>(&I);
@@ -392,7 +429,8 @@ Error validateMemoryObjects(Function &F) {
     return Error::success();
   for (Instruction &I : instructions(F)) {
     auto *Alloca = dyn_cast<AllocaInst>(&I);
-    if (Alloca && containsPointer(Alloca->getAllocatedType()))
+    if (Alloca && containsPointer(Alloca->getAllocatedType()) &&
+        !isTransientByValSource(*Alloca))
       return createStringError(
           std::errc::not_supported,
           "GoALLC statepoints do not support pointer-containing memory "
@@ -417,11 +455,13 @@ Error validateSafepoint(const SafepointRecord &Record) {
         "GoALLC statepoints do not yet support call operand bundles");
   for (unsigned I = 0; I != Call.arg_size(); ++I) {
     for (Attribute Attr : Call.getAttributes().getParamAttrs(I)) {
-      if (!Attr.hasAttribute(Attribute::Nest))
+      if (!Attr.hasAttribute(Attribute::Nest) &&
+          !Attr.hasAttribute(Attribute::ByVal) &&
+          !Attr.hasAttribute(Attribute::Alignment))
         return createStringError(
             std::errc::not_supported,
-            "GoALLC statepoints only support the nest call parameter "
-            "attribute");
+            "GoALLC statepoints only support nest, byval, and align call "
+            "parameter attributes");
     }
   }
   for (Value *V : Record.Live) {

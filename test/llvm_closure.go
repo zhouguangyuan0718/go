@@ -6,6 +6,8 @@
 
 package main
 
+import "runtime"
+
 //go:noinline
 func makePair(base int) func(int) (int, int) {
 	return func(x int) (int, int) {
@@ -42,6 +44,34 @@ func makeDeepPair(base int) func(int) (int, int) {
 	return f
 }
 
+type closureStackValue struct {
+	first  *int
+	scalar int
+	second *int
+}
+
+type stackValueClosure func(
+	a0, a1, a2, a3, a4, a5, a6, a7 int,
+	a8, a9, a10, a11, a12, a13, a14, a15 int,
+	value closureStackValue,
+) (*int, *int, int)
+
+// makeStackValueClosure exercises the indirect-call ABI path. The sixteen
+// integer arguments exhaust the arm64 integer register budget, so the
+// pointer-containing aggregate is passed as a typed byval stack argument.
+//
+//go:noinline
+func makeStackValueClosure(bias int) stackValueClosure {
+	return func(
+		a0, a1, a2, a3, a4, a5, a6, a7 int,
+		a8, a9, a10, a11, a12, a13, a14, a15 int,
+		value closureStackValue,
+	) (*int, *int, int) {
+		runtime.GC()
+		return value.first, value.second, bias + a0 + a15 + value.scalar
+	}
+}
+
 func main() {
 	f := makePair(40)
 	a, b := applyPair(f, 2)
@@ -58,5 +88,19 @@ func main() {
 	a, b = applyPair(f, 10000)
 	if a != 20040 || b != 40 {
 		panic("closure context lost across stack growth")
+	}
+
+	first, second := 11, 37
+	stackCall := makeStackValueClosure(3)
+	gotFirst, gotSecond, checksum := stackCall(
+		1, 2, 3, 4, 5, 6, 7, 8,
+		9, 10, 11, 12, 13, 14, 15, 16,
+		closureStackValue{first: &first, scalar: 23, second: &second},
+	)
+	runtime.GC()
+	if gotFirst != &first || *gotFirst != 11 ||
+		gotSecond != &second || *gotSecond != 37 ||
+		checksum != 43 {
+		panic("byval closure stack argument lost across GC")
 	}
 }

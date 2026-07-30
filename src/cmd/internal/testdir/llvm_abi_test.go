@@ -112,6 +112,19 @@ func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
 			t.Fatalf("GoALLC IR does not contain %q", needle)
 		}
 	}
+	for _, pattern := range []string{
+		`(?m)^define goabiinternal void @main\.checkpoint\(ptr %pointer\)`,
+		`(?m)^define goabiinternal \{ ptr, i64 \} @main\.liveScalarStackArgument\([^\n]*ptr byval\(ptr\) align 8`,
+		`(?m)^define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerAggregateStackArgument\([^\n]*ptr byval\(%main\.pointerStackAggregate\) align 8`,
+		`(?m)call goabiinternal \{ ptr, i64 \} @main\.liveScalarStackArgument\([^\n]*ptr byval\(ptr\) align 8`,
+	} {
+		if !regexp.MustCompile(pattern).Match(ir) {
+			t.Fatalf("GoALLC ABI classification IR does not match %q", pattern)
+		}
+	}
+	if regexp.MustCompile(`@main\.checkpoint\(ptr byval`).Match(ir) {
+		t.Fatal("register-assigned checkpoint parameter was incorrectly classified as byval")
+	}
 
 	opt := llvmToolPath(t, "opt", "GOALLC_OPT")
 	runLLVMABICommand(t, ir, opt, "-passes=verify", "-disable-output")
@@ -171,8 +184,8 @@ func runLLVMABIDifferentialTest(t *testing.T, gorootTestDir string) {
 	for _, pattern := range []string{
 		`(?s)name:\s+main\.liveScalarStackArgument.*?fixedStack:.*?offset:\s+8.*?isImmutable:\s+false.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0`,
 		`(?s)name:\s+main\.livePointerSequenceStackArguments.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.2[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[02].*?LDRXui\s+%fixed-stack\.[02]`,
-		`(?s)name:\s+main\.livePointerAggregateStackArgument.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.2[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[02].*?LDRXui\s+%fixed-stack\.[02]`,
-		`(?s)name:\s+main\.pointerAggregateBothOverflow.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.4[^\n]*%fixed-stack\.2.*?LDRXui\s+%fixed-stack\.[24].*?LDRXui\s+%fixed-stack\.[24].*?STRXui[^\n]*%fixed-stack\.0.*?STRXui[^\n]*%fixed-stack\.1`,
+		`(?s)name:\s+main\.livePointerAggregateStackArgument.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.1[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[01].*?LDRXui\s+%fixed-stack\.[01]`,
+		`(?s)name:\s+main\.pointerAggregateBothOverflow.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.3[^\n]*%fixed-stack\.2.*?LDRXui\s+%fixed-stack\.[23].*?LDRXui\s+%fixed-stack\.[23].*?STRXui[^\n]*%fixed-stack\.0.*?STRXui[^\n]*%fixed-stack\.1`,
 	} {
 		if !regexp.MustCompile(pattern).Match(machineIR) {
 			t.Fatalf("GoALLC ABI MIR does not match %q", pattern)
@@ -397,7 +410,7 @@ func runLLVMABIArgsPointerMapSourceTest(t *testing.T, gorootTestDir, llc, opt, p
 		"-o", "-", goallcIR)
 	for _, pattern := range []string{
 		`(?s)name:\s+p\.liveScalarStackArgument.*?fixedStack:.*?isImmutable:\s+false.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0`,
-		`(?s)name:\s+p\.liveAggregateStackArgument.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.2[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[02].*?LDRXui\s+%fixed-stack\.[02]`,
+		`(?s)name:\s+p\.liveAggregateStackArgument.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.1[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[01].*?LDRXui\s+%fixed-stack\.[01]`,
 	} {
 		if !regexp.MustCompile(pattern).Match(machineIR) {
 			t.Fatalf("source MIR does not match %q", pattern)
@@ -521,7 +534,7 @@ func checkLLVMABIStatepointTupleAttrs(t *testing.T, ir []byte, callees ...string
 	t.Helper()
 	for _, callee := range callees {
 		call := regexp.MustCompile(`(?m)^.*@llvm\.experimental\.gc\.statepoint.*@main\.` +
-			regexp.QuoteMeta(callee) + `.*#([0-9]+)$`).FindSubmatch(ir)
+			regexp.QuoteMeta(callee) + `.*#([0-9]+)(?:\s|$)`).FindSubmatch(ir)
 		if len(call) != 2 {
 			t.Fatalf("rewritten IR has no attributed statepoint call to main.%s", callee)
 		}

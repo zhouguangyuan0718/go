@@ -128,6 +128,34 @@ if(BUILD_TESTING)
   )
 
   add_test(
+    NAME GoALLCStatepoints.ByValParamAttrRewrite
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/byval-param-attr.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.ByValParamAttrRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "ptr byval\\(%pair\\) align 8 %value.byval"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.NonTransientByValMemoryFails
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
+      --llc "${GOALLC_LLC_EXECUTABLE}"
+      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
+      --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/byval-memory-object-unsupported.ll"
+      --contains
+      "SSA aggregate scalarization cannot describe their internal pointer slots"
+  )
+
+  add_test(
     NAME GoALLCStatepoints.CallOnlyPointersNotLive
     COMMAND
       "${Python3_EXECUTABLE}"
@@ -183,6 +211,17 @@ if(BUILD_TESTING)
       -filetype=obj
       -o "${CMAKE_CURRENT_BINARY_DIR}/aarch64-frame.goobj"
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aarch64-frame.ll"
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.X86ByValEntryArgsGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/x86-byval-entry-args.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/x86-byval-entry-args.ll"
   )
 
   add_test(
@@ -250,6 +289,18 @@ if(BUILD_TESTING)
     )
     set_tests_properties(GoALLCStatepoints.AArch64FrameObjView PROPERTIES
       DEPENDS GoALLCStatepoints.AArch64FrameGoObj
+    )
+
+    add_test(
+      NAME GoALLCStatepoints.X86ByValEntryArgsObjView
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-x86-byval-entry-args.py"
+        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
+        --object "${CMAKE_CURRENT_BINARY_DIR}/x86-byval-entry-args.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.X86ByValEntryArgsObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.X86ByValEntryArgsGoObj
     )
 
     add_test(
