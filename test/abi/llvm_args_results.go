@@ -15,6 +15,12 @@ type stackAggregate struct {
 	left, right int
 }
 
+type pointerStackAggregate struct {
+	first  *int
+	scalar int
+	second *int
+}
+
 var values = [8]int{11, 13, 17, 19, 23, 29, 31, 37}
 
 //go:noinline
@@ -39,6 +45,47 @@ func mixedABI(
 	return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 +
 		a8 + a9 + a10 + a11 + a12 + a13 +
 		*p0 + aggregate.left + aggregate.right + *tail + *overflow
+}
+
+// liveScalarStackArgument fills all sixteen arm64 integer argument registers,
+// leaving pointer in the first incoming stack slot while runtime.GC executes.
+//
+//go:noinline
+func liveScalarStackArgument(
+	a0, a1, a2, a3, a4, a5, a6, a7 int,
+	a8, a9, a10, a11, a12, a13, a14, a15 int,
+	pointer *int,
+) (*int, int) {
+	runtime.GC()
+	return pointer, a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 +
+		a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15
+}
+
+// livePointerSequenceStackArguments places two pointer stack arguments around
+// a non-pointer word and keeps both pointers live across runtime.GC.
+//
+//go:noinline
+func livePointerSequenceStackArguments(
+	a0, a1, a2, a3, a4, a5, a6, a7 int,
+	a8, a9, a10, a11, a12, a13, a14, a15 int,
+	first *int, scalar int, second *int,
+) (*int, *int, int) {
+	runtime.GC()
+	return first, second, a0 + a15 + scalar
+}
+
+// livePointerAggregateStackArgument leaves only two arm64 integer argument
+// registers. The three-word aggregate cannot be split and therefore has two
+// independently tracked pointer leaves in fixed incoming stack slots.
+//
+//go:noinline
+func livePointerAggregateStackArgument(
+	a0, a1, a2, a3, a4, a5, a6 int,
+	a7, a8, a9, a10, a11, a12, a13 int,
+	value pointerStackAggregate,
+) (*int, *int, int) {
+	runtime.GC()
+	return value.first, value.second, a0 + a13 + value.scalar
 }
 
 // growPointer keeps an entry pointer live through both recursive stack growth
@@ -69,6 +116,25 @@ func overflowResults(p0, p15, p16, p17 *int) (
 		1, 2, 3, 4, 5, 6, 7,
 		8, 9, 10, 11, 12, 13, 14,
 		p15, p16, p17
+}
+
+// initializedStackResult uses all sixteen arm64 integer result registers before
+// a caller-owned pointer result slot. Its source assignment precedes the
+// safepoint, but either backend may defer the physical result-slot store. The
+// differential test therefore checks the emitted maps rather than assuming
+// that this slot is already a root.
+//
+//go:noinline
+func initializedStackResult(pointer *int) (
+	r0, r1, r2, r3, r4, r5, r6, r7 int,
+	r8, r9, r10, r11, r12, r13, r14, r15 int,
+	result *int,
+) {
+	r0, r1, r2, r3, r4, r5, r6, r7 = 0, 1, 2, 3, 4, 5, 6, 7
+	r8, r9, r10, r11, r12, r13, r14, r15 = 8, 9, 10, 11, 12, 13, 14, 15
+	result = pointer
+	runtime.GC()
+	return
 }
 
 // stackAggregateResult places fifteen scalar results first, so the following
@@ -110,6 +176,27 @@ func bothOverflow(
 		&values[1+aggregate.left-13], tail, overflow
 }
 
+// pointerAggregateBothOverflow combines a pointer-containing aggregate that is
+// entirely stack-assigned with two pointer results after all sixteen integer
+// result registers. The input pointer leaves are live across runtime.GC and the
+// returned pointers occupy caller-owned result slots.
+//
+//go:noinline
+func pointerAggregateBothOverflow(
+	a0, a1, a2, a3, a4, a5, a6 int,
+	a7, a8, a9, a10, a11, a12, a13 int,
+	value pointerStackAggregate,
+) (
+	int, int, int, int, int, int, int, int,
+	int, int, int, int, int, int, int, int,
+	*int, *int,
+) {
+	runtime.GC()
+	return a0, a1, a2, a3, a4, a5, a6, a7,
+		a8, a9, a10, a11, a12, a13, value.scalar, a0 + a13,
+		value.first, value.second
+}
+
 func requirePointer(got, want *int) {
 	if got != want || *got != *want {
 		panic("ABI pointer result mismatch")
@@ -137,6 +224,41 @@ func main() {
 		panic("mixed register and stack arguments mismatch")
 	}
 
+	scalarPointer, scalarChecksum := liveScalarStackArgument(
+		1, 2, 3, 4, 5, 6, 7, 8,
+		9, 10, 11, 12, 13, 14, 15, 16,
+		&values[2],
+	)
+	runtime.GC()
+	requirePointer(scalarPointer, &values[2])
+	if scalarChecksum != 136 {
+		panic("scalar stack argument checksum mismatch")
+	}
+
+	sequenceFirst, sequenceSecond, sequenceChecksum := livePointerSequenceStackArguments(
+		1, 2, 3, 4, 5, 6, 7, 8,
+		9, 10, 11, 12, 13, 14, 15, 16,
+		&values[1], 41, &values[6],
+	)
+	runtime.GC()
+	requirePointer(sequenceFirst, &values[1])
+	requirePointer(sequenceSecond, &values[6])
+	if sequenceChecksum != 58 {
+		panic("pointer sequence stack argument checksum mismatch")
+	}
+
+	aggregateFirst, aggregateSecond, aggregateChecksum := livePointerAggregateStackArgument(
+		1, 2, 3, 4, 5, 6, 7,
+		8, 9, 10, 11, 12, 13, 14,
+		pointerStackAggregate{first: &values[2], scalar: 43, second: &values[7]},
+	)
+	runtime.GC()
+	requirePointer(aggregateFirst, &values[2])
+	requirePointer(aggregateSecond, &values[7])
+	if aggregateChecksum != 58 {
+		panic("pointer aggregate stack argument checksum mismatch")
+	}
+
 	const depth = 2000
 	if got, want := growPointer(&values[0], depth), values[0]*(depth+1); got != want {
 		panic("pointer lost across stack growth or GC")
@@ -151,6 +273,12 @@ func main() {
 	requirePointer(r15, &values[5])
 	requirePointer(r16, &values[6])
 	requirePointer(r17, &values[7])
+
+	_, _, _, _, _, _, _, _,
+		_, _, _, _, _, _, _, _,
+		initialized := initializedStackResult(&values[2])
+	runtime.GC()
+	requirePointer(initialized, &values[2])
 
 	_, _, _, _, _, _, _, _,
 		_, _, _, _, _, _, _,
@@ -171,4 +299,15 @@ func main() {
 	requirePointer(b15, &values[1])
 	requirePointer(b16, &values[4])
 	requirePointer(b17, &values[3])
+
+	_, _, _, _, _, _, _, _,
+		_, _, _, _, _, _, _, _,
+		bothAggregateFirst, bothAggregateSecond := pointerAggregateBothOverflow(
+		1, 2, 3, 4, 5, 6, 7,
+		8, 9, 10, 11, 12, 13, 14,
+		pointerStackAggregate{first: &values[3], scalar: 47, second: &values[5]},
+	)
+	runtime.GC()
+	requirePointer(bothAggregateFirst, &values[3])
+	requirePointer(bothAggregateSecond, &values[5])
 }
