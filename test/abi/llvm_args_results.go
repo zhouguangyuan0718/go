@@ -71,6 +71,25 @@ func overflowResults(p0, p15, p16, p17 *int) (
 		p15, p16, p17
 }
 
+// initializedStackResult uses all sixteen arm64 integer result registers before
+// a caller-owned pointer result slot. Its source assignment precedes the
+// safepoint, but either backend may defer the physical result-slot store. The
+// differential test therefore checks the emitted maps rather than assuming
+// that this slot is already a root.
+//
+//go:noinline
+func initializedStackResult(pointer *int) (
+	r0, r1, r2, r3, r4, r5, r6, r7 int,
+	r8, r9, r10, r11, r12, r13, r14, r15 int,
+	result *int,
+) {
+	r0, r1, r2, r3, r4, r5, r6, r7 = 0, 1, 2, 3, 4, 5, 6, 7
+	r8, r9, r10, r11, r12, r13, r14, r15 = 8, 9, 10, 11, 12, 13, 14, 15
+	result = pointer
+	runtime.GC()
+	return
+}
+
 // stackAggregateResult places fifteen scalar results first, so the following
 // two-word aggregate cannot fit in the one remaining result register. The
 // final pointer still uses that remaining register.
@@ -151,6 +170,12 @@ func main() {
 	requirePointer(r15, &values[5])
 	requirePointer(r16, &values[6])
 	requirePointer(r17, &values[7])
+
+	_, _, _, _, _, _, _, _,
+		_, _, _, _, _, _, _, _,
+		initialized := initializedStackResult(&values[2])
+	runtime.GC()
+	requirePointer(initialized, &values[2])
 
 	_, _, _, _, _, _, _, _,
 		_, _, _, _, _, _, _,

@@ -273,18 +273,20 @@ AsmPrinter 模块收尾阶段
 校验、`Direct`/`Indirect` 解释、LocalsPointerMaps 和 PCDATA_StackMapIndex
 编码。GoALLC 要求 StackMaps 记录 CALL 起点；map 从 CALL 开始。前端添加的
 `go-stack-growth-statepoint` 属性使 LLVM 在 PEI 阶段把
-`runtime.morestack` 调用生成为不含 deopt、GC pointer、GC alloca 和
-base/derived map 的物理 MIR `STATEPOINT`。它从 morestack CALL 起点选择空 locals
-bitmap，因此普通调用与栈增长调用走同一 Machine StackMaps 链路，且不依赖
-return PC 反推调用范围。已有 Machine `STATEPOINT` 但缺少该前端属性时，
+`runtime.morestack` 调用生成为物理 MIR `STATEPOINT`。其 deopt 和 GC alloca
+区为空，GC pointer 区则记录类型推导出的入口参数 home。它从 morestack CALL
+起点选择入口 ArgsPointerMaps 和空 locals bitmap，因此普通调用与栈增长调用
+走同一 Machine StackMaps 链路，且不依赖 return PC 反推调用范围。已有
+Machine `STATEPOINT` 但缺少该前端属性时，
 LLVM target lowering 会 fail closed；不再使用 slow-path reset label 兼容普通
 morestack CALL。GoObj 先写索引 0 的
 `PCDATA_UnsafePoint`（当前恒为 safe 的 `-1`），再写索引 1 的
 `PCDATA_StackMapIndex`；不能只写后一张表，否则 linker 会把它误认成索引 0。
-`Direct SP+offset` 是栈地址本身，不表示该
-slot 存有 pointer，因此
-不会设置 locals bitmap；`Indirect [SP+offset]` 才表示该槽保存指针值并置位。
-这允许 IR 层保守追踪所有 alloca，同时避免把 alloca 对象内容误当成指针。
+`Direct SP+offset` 是栈地址本身，不表示该 slot 存有 pointer，因此不会设置
+bitmap；`Indirect [SP+offset]` 才表示该槽保存指针值。最终 frame 内的间接槽
+设置 LocalsPointerMaps，最终 frame 之上的 caller-owned 参数 home 或栈结果槽
+设置 ArgsPointerMaps。这允许 IR 层保守追踪所有 alloca，同时避免把 alloca
+对象内容误当成指针。
 
 AArch64 GoObj 的 prologue 采用 Go arm64 栈链约定，而不是平台 ABI 的
 in-frame `(FP, LR)` record。若最终物理 frame 大小为 `StackSize`，则
@@ -297,10 +299,13 @@ pointer bitmap 只描述 `[SP+8, SP+StackSize-8)`。这里不从 IR lowering
 `STR LR` 原子地保存 LR 并移动 SP；超过 `0xf0` 的大 frame 则先计算 NewSP，
 在移动 SP 前保存 `(FP, LR)`，避免异步 traceback 看到半构造的 frame。
 
-当前 ArgsPointerMaps 只是与 locals map 数量对齐的 `nbit=0` 空表，并未实现
-Go ABI 参数 home/stack slot 分类；StackObjects 也尚未生成。这两个缺口仍是
-后续 P0。追踪 alloca 地址并不能描述 alloca 对象内部保存的指针字段；首批验证
-仍仅覆盖没有 heap pointer store 的活指针跨调用、GC 和栈增长。
+当前 ArgsPointerMaps 的第 0 项描述 ABIInternal/ABI0 的入口 pointer 参数
+home；普通 statepoint 则按最终机器位置把 caller-owned 参数/结果区中的间接
+pointer 槽写入对应 ArgsPointerMaps 项。Args 和 Locals 表按完整 pair 一起去重，
+并由同一个 `PCDATA_StackMapIndex` 选择。writer 不按声明类型预先标记所有结果槽：
+只有 statepoint 真实报告其中存有 live pointer 的栈结果槽才置位，尚未物化或尚未
+初始化的结果槽保持为空。StackObjects 仍未生成；追踪 alloca 地址也不能描述
+alloca 对象内部保存的指针字段。
 
 在构建 Go toolchain 前，使用同一个 LLVM payload 的 CMake config 构建、
 测试并安装插件：
