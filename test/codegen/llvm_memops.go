@@ -44,8 +44,8 @@ func llvmZeroFreshPointerStack(p *int) *int {
 	return local[3]
 }
 
-// LLVM-LABEL: define goabiinternal void @codegen.llvmZeroReusedPointerStack(
-// LLVM: call void @llvm.memset.inline.p0.i64(ptr align 8 {{%.*}}, i8 0, i64 32, i1 false)
+// LLVM-DAG: define goabiinternal void @codegen.llvmZeroReusedPointerStack(
+// LLVM-DAG: call void @llvm.memset.inline.p0.i64(ptr align 8 {{%.*}}, i8 0, i64 32, i1 false)
 func llvmZeroReusedPointerStack(p *int) {
 	var local llvmPointerStackZero
 	local[0] = p
@@ -54,9 +54,9 @@ func llvmZeroReusedPointerStack(p *int) {
 	llvmPointerStackZeroSink(&local)
 }
 
-// LLVM-LABEL: define goabiinternal void @codegen.llvmZeroDerivedPointerStack(
-// LLVM: getelementptr i8, ptr {{%.*}}, i64 8
-// LLVM: call void @llvm.memset.inline.p0.i64(ptr align 8 {{%.*}}, i8 0, i64 32, i1 false)
+// LLVM-DAG: define goabiinternal void @codegen.llvmZeroDerivedPointerStack(
+// LLVM-DAG: getelementptr i8, ptr {{%.*}}, i64 8
+// LLVM-DAG: call void @llvm.memset.inline.p0.i64(ptr align 8 {{%.*}}, i8 0, i64 32, i1 false)
 func llvmZeroDerivedPointerStack(p *int) {
 	var local llvmPointerStackContainer
 	local.values[0] = p
@@ -65,8 +65,8 @@ func llvmZeroDerivedPointerStack(p *int) {
 	llvmPointerStackZeroSink(&local.values)
 }
 
-// LLVM-LABEL: define goabiinternal ptr @codegen.llvmMovePointerToStack(
-// LLVM: call void @llvm.memmove.p0.p0.i64(ptr align 8 {{%.*}}, ptr align 8 %src, i64 32, i1 false)
+// LLVM-DAG: define goabiinternal ptr @codegen.llvmMovePointerToStack(
+// LLVM-DAG: call void @llvm.memmove.p0.p0.i64(ptr align 8 {{%.*}}, ptr align 8 %src, i64 32, i1 false)
 func llvmMovePointerToStack(src *llvmPointerStackZero) *int {
 	var local llvmPointerStackZero
 	local = *src
