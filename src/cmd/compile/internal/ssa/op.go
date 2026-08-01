@@ -119,9 +119,10 @@ func (a *AuxNameOffset) FrameOffset() int64 {
 }
 
 type AuxCall struct {
-	Fn      *obj.LSym
-	reg     *regInfo // regInfo for this call
-	abiInfo *abi.ABIParamResultInfo
+	Fn          *obj.LSym
+	reg         *regInfo // regInfo for this call
+	abiInfo     *abi.ABIParamResultInfo
+	semanticSig *types.Type
 }
 
 // Reg returns the regInfo for a given call, combining the derived in/out register masks
@@ -171,6 +172,75 @@ func (a *AuxCall) ABI() *abi.ABIConfig {
 }
 func (a *AuxCall) ABIInfo() *abi.ABIParamResultInfo {
 	return a.abiInfo
+}
+
+// SemanticSignature returns the compiler-level function signature associated
+// with this call, if one is available. The signature describes pointer and
+// aggregate semantics; ABIInfo remains authoritative for physical register and
+// stack assignment.
+func (a *AuxCall) SemanticSignature() *types.Type {
+	return a.semanticSig
+}
+
+// ValidateSemanticSignature checks that the compiler-level signature can use
+// the physical ABI assignment already recorded in this AuxCall. Semantic types
+// may intentionally differ (for example, pointer versus uintptr), but their
+// size, alignment, register class, register number, and stack layout must not.
+func (a *AuxCall) ValidateSemanticSignature() error {
+	if a.semanticSig == nil {
+		return nil
+	}
+	if a.abiInfo == nil {
+		return fmt.Errorf("missing ABI information")
+	}
+	if a.semanticSig.Kind() != types.TFUNC {
+		return fmt.Errorf("semantic type %v is not a function", a.semanticSig)
+	}
+
+	semanticABI := a.ABI().ABIAnalyzeFuncType(a.semanticSig)
+	if err := compareABIParamAssignments("parameter", a.abiInfo.InParams(), semanticABI.InParams()); err != nil {
+		return err
+	}
+	if err := compareABIParamAssignments("result", a.abiInfo.OutParams(), semanticABI.OutParams()); err != nil {
+		return err
+	}
+	if got, want := semanticABI.SpillAreaOffset(), a.abiInfo.SpillAreaOffset(); got != want {
+		return fmt.Errorf("semantic spill area offset %d does not match physical offset %d", got, want)
+	}
+	if got, want := semanticABI.SpillAreaSize(), a.abiInfo.SpillAreaSize(); got != want {
+		return fmt.Errorf("semantic spill area size %d does not match physical size %d", got, want)
+	}
+	if got, want := semanticABI.ArgWidth(), a.abiInfo.ArgWidth(); got != want {
+		return fmt.Errorf("semantic argument width %d does not match physical width %d", got, want)
+	}
+	return nil
+}
+
+func compareABIParamAssignments(kind string, physical, semantic []abi.ABIParamAssignment) error {
+	if len(semantic) != len(physical) {
+		return fmt.Errorf("semantic %s count %d does not match physical count %d", kind, len(semantic), len(physical))
+	}
+	for i := range physical {
+		p, s := &physical[i], &semantic[i]
+		if got, want := s.Type.Size(), p.Type.Size(); got != want {
+			return fmt.Errorf("semantic %s %d size %d does not match physical size %d", kind, i, got, want)
+		}
+		if got, want := s.Type.Alignment(), p.Type.Alignment(); got != want {
+			return fmt.Errorf("semantic %s %d alignment %d does not match physical alignment %d", kind, i, got, want)
+		}
+		if len(s.Registers) != len(p.Registers) {
+			return fmt.Errorf("semantic %s %d uses %d registers, physical assignment uses %d", kind, i, len(s.Registers), len(p.Registers))
+		}
+		for j := range p.Registers {
+			if s.Registers[j] != p.Registers[j] {
+				return fmt.Errorf("semantic %s %d register %d is %d, physical assignment uses %d", kind, i, j, s.Registers[j], p.Registers[j])
+			}
+		}
+		if len(p.Registers) == 0 && s.Offset() != p.Offset() {
+			return fmt.Errorf("semantic %s %d stack offset %d does not match physical offset %d", kind, i, s.Offset(), p.Offset())
+		}
+	}
+	return nil
 }
 func (a *AuxCall) ResultReg(c *Config) *regInfo {
 	if a.abiInfo.OutRegistersUsed() == 0 {
@@ -319,6 +389,16 @@ func StaticAuxCall(sym *obj.LSym, paramResultInfo *abi.ABIParamResultInfo) *AuxC
 		reg = &regInfo{}
 	}
 	return &AuxCall{Fn: sym, abiInfo: paramResultInfo, reg: reg}
+}
+
+// StaticAuxCallWithSignature is like StaticAuxCall, but also records the
+// compiler-level function signature. This is useful for raw runtime calls
+// whose ABI analysis deliberately uses layout-compatible uintptr values while
+// LLVM still needs the pointer semantics from the runtime declaration.
+func StaticAuxCallWithSignature(sym *obj.LSym, paramResultInfo *abi.ABIParamResultInfo, sig *types.Type) *AuxCall {
+	a := StaticAuxCall(sym, paramResultInfo)
+	a.semanticSig = sig
+	return a
 }
 
 // InterfaceAuxCall returns an AuxCall for an interface call.

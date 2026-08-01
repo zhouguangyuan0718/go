@@ -92,6 +92,19 @@ func LookupRuntimeFunc(name string) *obj.LSym {
 	return LookupRuntimeABI(name, obj.ABIInternal)
 }
 
+// LookupRuntimeFuncType returns the compiler's semantic signature for a
+// runtime function declared in _builtin/runtime.go. Unlike LookupRuntimeFunc,
+// this preserves pointer and aggregate types rather than only identifying the
+// ABI symbol.
+func LookupRuntimeFuncType(name string) *types.Type {
+	typ := LookupRuntime(name).Type()
+	if typ.Kind() != types.TFUNC {
+		base.Fatalf("LookupRuntimeFuncType: runtime.%s is not a function", name)
+	}
+	types.CalcSize(typ)
+	return typ
+}
+
 // LookupRuntimeVar looks up a variable (or assembly function) name in package
 // runtime. If this is a function, it may have a special calling
 // convention.

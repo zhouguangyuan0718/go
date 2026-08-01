@@ -40,6 +40,12 @@ import (
 
 var ssaConfig *ssa.Config
 var ssaCaches []ssa.Cache
+var rawRuntimeCallTypes struct {
+	newproc        *types.Type
+	deferproc      *types.Type
+	deferprocat    *types.Type
+	deferprocStack *types.Type
+}
 
 var ssaDump string     // early copy of $GOSSAFUNC; the func name to dump output for
 var ssaDir string      // optional destination for ssa dump file
@@ -98,6 +104,13 @@ func InitConfig() {
 	_ = types.NewPtr(types.ErrorType)                                       // *error
 	_ = types.NewPtr(reflectdata.MapType())                                 // *internal/runtime/maps.Map
 	_ = types.NewPtr(deferstruct())                                         // *runtime._defer
+	// Raw runtime calls retain a compiler-level semantic signature for LLVM.
+	// Calculate these types before backend compilation disables concurrent size
+	// calculation.
+	rawRuntimeCallTypes.newproc = typecheck.LookupRuntimeFuncType("newproc")
+	rawRuntimeCallTypes.deferproc = typecheck.LookupRuntimeFuncType("deferproc")
+	rawRuntimeCallTypes.deferprocat = typecheck.LookupRuntimeFuncType("deferprocat")
+	rawRuntimeCallTypes.deferprocStack = typecheck.LookupRuntimeFuncType("deferprocStack")
 	types.NewPtrCacheEnabled = false
 	ssaConfig = ssa.NewConfig(base.Ctxt.Arch.Name, *types_, base.Ctxt, base.Flag.N == 0, Arch.SoftFloat)
 	ssaConfig.Race = base.Flag.Race
@@ -5059,7 +5072,7 @@ func (s *state) call(n *ir.CallExpr, k callKind, returnResultAddr bool, deferExt
 
 		// Call runtime.deferprocStack with pointer to _defer record.
 		ACArgs = append(ACArgs, types.Types[types.TUINTPTR])
-		aux := ssa.StaticAuxCall(ir.Syms.DeferprocStack, s.f.ABIDefault.ABIAnalyzeTypes(ACArgs, ACResults))
+		aux := ssa.StaticAuxCallWithSignature(ir.Syms.DeferprocStack, s.f.ABIDefault.ABIAnalyzeTypes(ACArgs, ACResults), rawRuntimeCallTypes.deferprocStack)
 		callArgs = append(callArgs, addr, s.mem())
 		call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
 		call.AddArgs(callArgs...)
@@ -5118,14 +5131,16 @@ func (s *state) call(n *ir.CallExpr, k callKind, returnResultAddr bool, deferExt
 		switch {
 		case k == callDefer:
 			sym := ir.Syms.Deferproc
+			model := rawRuntimeCallTypes.deferproc
 			if dextra != nil {
 				sym = ir.Syms.Deferprocat
+				model = rawRuntimeCallTypes.deferprocat
 			}
-			aux := ssa.StaticAuxCall(sym, s.f.ABIDefault.ABIAnalyzeTypes(ACArgs, ACResults)) // TODO paramResultInfo for Deferproc(at)
+			aux := ssa.StaticAuxCallWithSignature(sym, s.f.ABIDefault.ABIAnalyzeTypes(ACArgs, ACResults), model)
 			call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
 		case k == callGo:
-			aux := ssa.StaticAuxCall(ir.Syms.Newproc, s.f.ABIDefault.ABIAnalyzeTypes(ACArgs, ACResults))
-			call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux) // TODO paramResultInfo for Newproc
+			aux := ssa.StaticAuxCallWithSignature(ir.Syms.Newproc, s.f.ABIDefault.ABIAnalyzeTypes(ACArgs, ACResults), rawRuntimeCallTypes.newproc)
+			call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
 		case closure != nil:
 			// rawLoad because loading the code pointer from a
 			// closure is always safe, but IsSanitizerSafeAddr
@@ -5145,6 +5160,9 @@ func (s *state) call(n *ir.CallExpr, k callKind, returnResultAddr bool, deferExt
 			}
 		case calleeLSym != nil:
 			aux := ssa.StaticAuxCall(calleeLSym, params)
+			if n.Fun.Sym().Pkg == ir.Pkgs.Runtime && callABI.Which() == obj.ABIInternal {
+				aux = ssa.StaticAuxCallWithSignature(calleeLSym, params, n.Fun.Type())
+			}
 			call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
 			if k == callTail {
 				call.Op = ssa.OpTailLECall

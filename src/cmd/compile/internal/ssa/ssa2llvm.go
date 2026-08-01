@@ -85,14 +85,34 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 		base.Fatalf("missing ABI information in LLVM lowering")
 	}
 
-	params := make([]llvm.Type, 0, aux.NArgs())
-	for i := int64(0); i < aux.NArgs(); i++ {
-		params = append(params, getLLVMType(aux.TypeOfArg(i)))
+	var paramTypes, resultTypes []*types.Type
+	if semantic := aux.SemanticSignature(); semantic != nil {
+		if err := aux.ValidateSemanticSignature(); err != nil {
+			base.Fatalf("LLVM semantic signature for %s is incompatible with its Go ABI assignment: %v", aux.Fn, err)
+		}
+		for _, field := range semantic.RecvParams() {
+			paramTypes = append(paramTypes, field.Type)
+		}
+		for _, field := range semantic.Results() {
+			resultTypes = append(resultTypes, field.Type)
+		}
+	} else {
+		for i := int64(0); i < aux.NArgs(); i++ {
+			paramTypes = append(paramTypes, aux.TypeOfArg(i))
+		}
+		for i := int64(0); i < aux.NResults(); i++ {
+			resultTypes = append(resultTypes, aux.TypeOfResult(i))
+		}
 	}
 
-	results := make([]llvm.Type, 0, aux.NResults())
-	for i := int64(0); i < aux.NResults(); i++ {
-		results = append(results, getLLVMType(aux.TypeOfResult(i)))
+	params := make([]llvm.Type, 0, len(paramTypes))
+	for _, typ := range paramTypes {
+		params = append(params, getLLVMType(typ))
+	}
+
+	results := make([]llvm.Type, 0, len(resultTypes))
+	for _, typ := range resultTypes {
+		results = append(results, getLLVMType(typ))
 	}
 
 	var ret llvm.Type
@@ -166,6 +186,9 @@ func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallCon
 		if fn.BasicBlocksCount() != 0 {
 			base.Fatalf("conflicting LLVM function type for definition %s", name)
 		}
+		if !provisionalLLVMFunctions[name] {
+			base.Fatalf("conflicting LLVM function type for declaration %s", name)
+		}
 		// Compiler data can refer to an ABI function before AuxCall exposes
 		// its exact signature. Replace that provisional declaration now.
 		replacement := llvm.AddFunction(CurrentModule, name+".goallc.final", sig.Type)
@@ -174,6 +197,7 @@ func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallCon
 		replacement.SetName(name)
 		fn = replacement
 	}
+	delete(provisionalLLVMFunctions, name)
 	configureLLVMFunction(fn, sig, cc)
 	return fn
 }
@@ -1284,6 +1308,7 @@ var goObjConfigWritten bool
 var currentLLVMDataLowerer *llvmDataLowerer
 var goObjCompilerUsed []llvm.Value
 var goObjCompilerUsedNames map[string]bool
+var provisionalLLVMFunctions map[string]bool
 
 var GlobalCtxt = llvm.GlobalContext()
 
@@ -1415,6 +1440,7 @@ func InitModule(pkg *types.Pkg) {
 	currentLLVMDataLowerer = newLLVMDataLowerer(make(map[*obj.LSym]bool))
 	goObjCompilerUsed = nil
 	goObjCompilerUsedNames = make(map[string]bool)
+	provisionalLLVMFunctions = make(map[string]bool)
 }
 
 // goObjTargetTriple identifies the GoObj target that llc should use when it

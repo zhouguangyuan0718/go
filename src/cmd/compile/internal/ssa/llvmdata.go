@@ -272,6 +272,7 @@ func llvmExternalDataRef(s *obj.LSym, data map[*obj.LSym]bool) llvm.Value {
 		}
 		f := llvm.AddFunction(CurrentModule, s.Name, llvm.FunctionType(GlobalCtxt.VoidType(), nil, false))
 		f.SetFunctionCallConv(llvmCallConv(s.ABI()))
+		provisionalLLVMFunctions[s.Name] = true
 		return f
 	}
 	if g := CurrentModule.NamedGlobal(s.Name); !g.IsNil() {

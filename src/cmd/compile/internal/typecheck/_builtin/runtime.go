@@ -311,3 +311,12 @@ func asanregisterglobals(unsafe.Pointer, uintptr)
 
 // used by testing.B.Loop
 func KeepAlive(interface{})
+
+// These entry points are called from raw SSA construction rather than from a
+// source-level CallExpr. Keep their semantic signatures here so alternative
+// backends do not have to recover pointer information from ABI-lowered types.
+// *byte stands for the runtime-internal *funcval and *_defer types.
+func newproc(fn *byte)
+func deferproc(fn func())
+func deferprocat(fn func(), frame interface{})
+func deferprocStack(d *byte)
