@@ -121,6 +121,16 @@ func (sig llvmFuncSignature) withClosureContext() llvmFuncSignature {
 	return sig
 }
 
+func (sig llvmFuncSignature) withParamType(index int, typ llvm.Type) llvmFuncSignature {
+	params := append([]llvm.Type(nil), sig.Type.ParamTypes()...)
+	if index < 0 || index >= len(params) {
+		base.Fatalf("LLVM parameter index %d is outside signature with %d parameters", index, len(params))
+	}
+	params[index] = typ
+	sig.Type = llvm.FunctionType(sig.ReturnType, params, false)
+	return sig
+}
+
 func llvmNestAttribute() llvm.Attribute {
 	kind := llvm.AttributeKindID("nest")
 	if kind == 0 {
@@ -550,6 +560,32 @@ func (lfc *LLVMFuncContext) aggregate(v *Value, args []*Value) llvm.Value {
 	return result
 }
 
+// llvmNewprocSignature restores the pointer nature of newproc's funcval
+// argument. ssagen deliberately describes this raw runtime call as taking a
+// uintptr so ABI analysis allocates one integer register, while the SSA value
+// remains a pointer-shaped func value or optimized closure-object pointer.
+// Pointer and uintptr have the same Go ABI layout, but keeping the LLVM operand
+// pointer-typed is required for statepoint liveness and pointer maps.
+func llvmNewprocSignature(v *Value, aux *AuxCall, sig llvmFuncSignature) llvmFuncSignature {
+	if aux == nil || aux.Fn != ir.Syms.Newproc {
+		return sig
+	}
+	if aux.ABI().Which() != obj.ABIInternal {
+		v.Fatalf("runtime.newproc uses unsupported ABI %v", aux.ABI().Which())
+	}
+	if aux.NArgs() != 1 || aux.NResults() != 0 || !aux.TypeOfArg(0).IsUintptr() {
+		v.Fatalf("runtime.newproc has unexpected raw call signature")
+	}
+	if len(v.Args) != 2 || v.Args[0].Type == nil || !v.Args[0].Type.IsPtrShaped() {
+		v.Fatalf("runtime.newproc argument is not pointer-shaped")
+	}
+	argType := getLLVMType(v.Args[0].Type)
+	if argType.TypeKind() != llvm.PointerTypeKind {
+		v.Fatalf("runtime.newproc func value is not an LLVM pointer")
+	}
+	return sig.withParamType(0, argType)
+}
+
 func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	aux := auxToCall(v.Aux)
 	if aux == nil || aux.Fn == nil {
@@ -559,7 +595,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 		v.Fatalf("static call to %s has %d LLVM arguments, want %d", aux.Fn.Name, got, want)
 	}
 
-	sig := llvmSignature(aux)
+	sig := llvmNewprocSignature(v, aux, llvmSignature(aux))
 	cc := llvmCallConv(aux.ABI().Which())
 	fn := getOrInsertLLVMFunction(aux.Fn.Name, sig, cc)
 	args := make([]llvm.Value, 0, aux.NArgs())
