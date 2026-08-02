@@ -23,20 +23,20 @@ func llvmDirectRegisterArgument(x int) int {
 // memory-backed parameter a complete local home instead of reconstructing its
 // individual ABI register pieces from the aggregate formal parameter.
 //
-// LLVM-LABEL: define goabiinternal i64 @codegen.llvmRegisterArgumentMemoryHome(%codegen.llvmArgumentStrings3 %0)
+// LLVM-LABEL: define goabiinternal i64 @codegen.llvmRegisterArgumentMemoryHome(%codegen.llvmArgumentStrings3 %x)
 // LLVM: [[HOME:%.*]] = alloca %codegen.llvmArgumentStrings3, align 8
-// LLVM: store %codegen.llvmArgumentStrings3 %0, ptr [[HOME]], align 8
+// LLVM: store %codegen.llvmArgumentStrings3 %x, ptr [[HOME]], align 8
 // LLVM: load ptr, ptr [[HOME]], align 8
 // LLVM-NOT: .arg
 // LLVM: ret i64
 //
-// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmRegisterArgumentMemoryHome(%codegen.llvmArgumentStrings3 %0)
+// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmRegisterArgumentMemoryHome(%codegen.llvmArgumentStrings3 %x)
 // LLVM-OPT-NOT: alloca
 // LLVM-OPT-NOT: load
 // LLVM-OPT-NOT: store
-// LLVM-OPT: extractvalue %codegen.llvmArgumentStrings3 %0, 0, 1
-// LLVM-OPT: extractvalue %codegen.llvmArgumentStrings3 %0, 1, 1
-// LLVM-OPT: extractvalue %codegen.llvmArgumentStrings3 %0, 2, 1
+// LLVM-OPT: extractvalue %codegen.llvmArgumentStrings3 %x, 0, 1
+// LLVM-OPT: extractvalue %codegen.llvmArgumentStrings3 %x, 1, 1
+// LLVM-OPT: extractvalue %codegen.llvmArgumentStrings3 %x, 2, 1
 // LLVM-OPT: ret i64
 func llvmRegisterArgumentMemoryHome(x llvmArgumentStrings3) int {
 	return len(x.a) + len(x.b) + len(x.c)
@@ -46,15 +46,15 @@ func llvmRegisterArgumentMemoryHome(x llvmArgumentStrings3) int {
 // LocalAddr uses the same local-home initialization instead of reading an
 // uninitialized alloca.
 //
-// LLVM-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome([2 x { ptr, i64 }] %0)
+// LLVM-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome([2 x { ptr, i64 }] %x)
 // LLVM: [[STACK_HOME:%.*]] = alloca [2 x { ptr, i64 }], align 8
-// LLVM: store [2 x { ptr, i64 }] %0, ptr [[STACK_HOME]], align 8
+// LLVM: store [2 x { ptr, i64 }] %x, ptr [[STACK_HOME]], align 8
 // LLVM: ret i64
 //
-// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome([2 x { ptr, i64 }] %0)
+// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome([2 x { ptr, i64 }] %x)
 // LLVM-OPT-NOT: alloca
-// LLVM-OPT: extractvalue [2 x { ptr, i64 }] %0, 0
-// LLVM-OPT: extractvalue [2 x { ptr, i64 }] %0, 1
+// LLVM-OPT: extractvalue [2 x { ptr, i64 }] %x, 0
+// LLVM-OPT: extractvalue [2 x { ptr, i64 }] %x, 1
 // LLVM-OPT: ret i64
 //
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmDirectRegisterArgument(i64 %x)

@@ -23,6 +23,16 @@ package codegen
 // LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %
 // LLVM-SAME: (ptr
+// LLVM-DAG: define goabiinternal { ptr, ptr } @codegen.makeLLVMDirectIfaceStruct(
+// LLVM-DAG: extractvalue %codegen.llvmDirectIfaceStruct %{{.*}}, 0
+// LLVM-DAG: insertvalue { ptr, ptr } { ptr @"type:codegen.llvmDirectIfaceStruct", ptr undef }, ptr %{{.*}}, 1
+// LLVM-DAG: define goabiinternal { ptr, ptr } @codegen.makeLLVMDirectIfaceArray(
+// LLVM-DAG: extractvalue [1 x ptr] %{{.*}}, 0
+// LLVM-DAG: insertvalue { ptr, ptr } { ptr @"type:codegen.llvmDirectIfaceArray", ptr undef }, ptr %{{.*}}, 1
+// LLVM-DAG: define goabiinternal ptr @codegen.unboxLLVMDirectIfaceStruct(
+// LLVM-DAG: extractvalue { ptr, ptr } %{{.*}}, 1
+// LLVM-DAG: define goabiinternal ptr @codegen.unboxLLVMDirectIfaceArray(
+// LLVM-DAG: extractvalue { ptr, ptr } %{{.*}}, 1
 // LLVM: !goobj.marker_relocs = !{
 // LLVM-DAG: !{ptr @codegen.useLLVMInterface, ptr @"type:codegen.llvmInterfaceValue", i32 23, i64 0}
 // LLVM-DAG: !{ptr @codegen.llvmInterface.Value, ptr @"type:codegen.llvmInterface", i32 24, i64 {{[0-9]+}}}
@@ -52,4 +62,26 @@ func (v llvmInterfaceValue) Double() int {
 func useLLVMInterface(v llvmInterfaceValue) int {
 	var i llvmInterface = v
 	return i.Value(2) + i.Double()
+}
+
+type llvmDirectIfaceStruct struct {
+	p *int
+}
+
+type llvmDirectIfaceArray [1]*int
+
+func makeLLVMDirectIfaceArray(v llvmDirectIfaceArray) any {
+	return v
+}
+
+func makeLLVMDirectIfaceStruct(v llvmDirectIfaceStruct) any {
+	return v
+}
+
+func unboxLLVMDirectIfaceArray(v any) *int {
+	return v.(llvmDirectIfaceArray)[0]
+}
+
+func unboxLLVMDirectIfaceStruct(v any) *int {
+	return v.(llvmDirectIfaceStruct).p
 }

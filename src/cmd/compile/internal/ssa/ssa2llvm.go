@@ -490,6 +490,12 @@ func (lfc *LLVMFuncContext) FinishPhi() {
 				if !ok {
 					v.Fatalf("phi input %s was not emitted in its defining block", incoming)
 				}
+				if incomingLVal.IsNil() {
+					v.Fatalf("phi input %s produced no LLVM value", incoming.LongString())
+				}
+				if got, want := incomingLVal.Type(), lfc.Vs[v.ID].Type(); got != want {
+					v.Fatalf("phi input %s has LLVM kind %s, want %s", incoming.LongString(), got.TypeKind(), want.TypeKind())
+				}
 				incomingLVals = append(incomingLVals, incomingLVal)
 			}
 			var predecessors []llvm.BasicBlock
@@ -542,8 +548,30 @@ func (lfc *LLVMFuncContext) registerArgument(v *Value) llvm.Value {
 
 func (lfc *LLVMFuncContext) aggregate(v *Value, args []*Value) llvm.Value {
 	result := llvm.Undef(getLLVMType(v.Type))
+	var elementTypes []llvm.Type
+	switch result.Type().TypeKind() {
+	case llvm.StructTypeKind:
+		elementTypes = result.Type().StructElementTypes()
+	case llvm.ArrayTypeKind:
+		elementTypes = make([]llvm.Type, len(args))
+		for i := range elementTypes {
+			elementTypes[i] = result.Type().ElementType()
+		}
+	default:
+		v.Fatalf("%s has non-aggregate LLVM kind %s", v.Op, result.Type().TypeKind())
+	}
+	if len(elementTypes) != len(args) {
+		v.Fatalf("%s has %d LLVM aggregate elements for %d SSA arguments", v.Op, len(elementTypes), len(args))
+	}
 	for i, arg := range args {
-		result = lfc.b.CreateInsertValue(result, lfc.GenLV(arg), i, "")
+		value := lfc.GenLV(arg)
+		if value.IsNil() {
+			v.Fatalf("aggregate field %d from %s produced no LLVM value", i, arg.LongString())
+		}
+		if got, want := value.Type(), elementTypes[i]; got != want {
+			v.Fatalf("aggregate field %d from %s has LLVM kind %s for Go type %v, want %s in Go aggregate %v", i, arg.LongString(), got.TypeKind(), arg.Type, want.TypeKind(), v.Type)
+		}
+		result = lfc.b.CreateInsertValue(result, value, i, "")
 	}
 	result.SetName(v.String())
 	return result
@@ -1230,6 +1258,15 @@ func LLVMCompile(f *Func) {
 		f.fe.Fatalf(f.Entry.Pos, "duplicate LLVM definition for %s", f.OwnAux.Fn.Name)
 	}
 	FCtxt.LF.SetGC(goGCStrategy)
+	inParams := f.OwnAux.ABIInfo().InParams()
+	if got, want := len(inParams), int(f.OwnAux.NArgs()); got != want {
+		f.fe.Fatalf(f.Entry.Pos, "LLVM parameter metadata count %d does not match signature count %d for %s", got, want, f.Name)
+	}
+	for i, param := range inParams {
+		if param.Name != nil {
+			FCtxt.LF.Param(i).SetName(param.Name.Sym().Name)
+		}
+	}
 	FCtxt.LF.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goAsyncUnsafeAttr, ""))
 	// TODO(goallc): Once LLVM lowering propagates the compiler's precise
 	// morestack policy, attach this only to functions whose prologue can grow

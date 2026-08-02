@@ -79,6 +79,10 @@ func runLLVMTests(t *testing.T, common testCommon) {
 
 		t.Run("writebarrier-helpers", runLLVMWriteBarrierHelperTest)
 
+		t.Run("compile-only-regressions", func(t *testing.T) {
+			runLLVMCompileOnlyRegression(t, common.gorootTestDir, "cmp.go")
+		})
+
 		t.Run("runtime", func(t *testing.T) {
 			names := sortedLLVMWhitelist(policy.Runtime.Whitelist)
 			for _, name := range names {
@@ -100,6 +104,24 @@ func runLLVMTests(t *testing.T, common testCommon) {
 
 		t.Run("writebarrier-ir", runLLVMWriteBarrierIRTests)
 	})
+}
+
+func runLLVMCompileOnlyRegression(t *testing.T, gorootTestDir, name string) {
+	t.Helper()
+	toolexec := llvmToolexec(t)
+	exe := filepath.Join(t.TempDir(), "test.exe")
+	cmd := exec.Command(goTool, "build",
+		"-gcflags=all="+os.Getenv("GO_GCFLAGS"),
+		"-gcflags=-enablellvm",
+		"-ldflags=-w",
+		"-toolexec="+toolexec,
+		"-o", exe,
+		filepath.Join(gorootTestDir, filepath.FromSlash(name)),
+	)
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("LLVM compile-only regression %s failed: %v\n%s", name, err, out)
+	}
 }
 
 func readLLVMTestPolicy(t *testing.T, gorootTestDir string) llvmTestPolicy {
