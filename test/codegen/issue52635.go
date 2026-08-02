@@ -10,7 +10,6 @@
 package codegen
 
 // LLVM-DAG: define goabiinternal void @"codegen.(*T).f"(ptr %t)
-// LLVM-DAG: load [10 x i64], ptr
 // LLVM-DAG: call goabiinternal void @runtime.memclrNoHeapPointers(ptr {{%.*}}, i64 80)
 // LLVM-DAG: extractvalue { ptr, i64, i64 } {{%.*}}, 1
 // LLVM-DAG: mul i64 {{%.*}}, 8

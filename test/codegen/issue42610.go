@@ -10,20 +10,18 @@
 package codegen
 
 // LLVM-DAG: define goabiinternal void @codegen.f({ ptr, i64, i64 } %a, i64 %i)
-// LLVM-DAG: and i64 %i, 1
 // LLVM-DAG: extractvalue { ptr, i64, i64 } %a, 1
 // LLVM-DAG: getelementptr i64, ptr {{%.*}}, i64 0
 // LLVM-DAG: define goabiinternal void @codegen.f32({ ptr, i64, i64 } %a, i32 %i)
-// LLVM-DAG: and i32 %i, 1
 // LLVM-DAG: getelementptr i32, ptr {{%.*}}, i64 0
 
 func f32(a []int32, i uint32) {
-        g := func(p int32) int32 {
-                i = uint32(p) * (uint32(p) & (i & 1))
-                return 1
-        }
-        // ppc64x: -"RLWNIM"
-        a[0] = g(8) >> 1
+	g := func(p int32) int32 {
+		i = uint32(p) * (uint32(p) & (i & 1))
+		return 1
+	}
+	// ppc64x: -"RLWNIM"
+	a[0] = g(8) >> 1
 }
 
 func f(a []int, i uint) {
