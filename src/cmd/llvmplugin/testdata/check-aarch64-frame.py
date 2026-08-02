@@ -249,6 +249,70 @@ def main():
     # argp+0; the first sixteen scalar register homes follow it and stay clear.
     check_entry_only("aarch64_stack_pointer_arg", 136, 17, {0})
 
+    text_result = subprocess.run(
+        [args.objview, "-format=text", args.object],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout
+    required_disassembly = [
+        "TEXT aarch64_subword_homes(SB)",
+        "MOVB R0, 8(RSP)",
+        "MOVH R1, 10(RSP)",
+        "MOVBU 8(RSP), R0",
+        "MOVHU 10(RSP), R1",
+        "TEXT aarch64_large_arg_home(SB)",
+        "ADD $16, RSP, R27",
+        "MOVD R0, 32760(R27)",
+        "MOVD 32760(R27), R0",
+    ]
+    missing_disassembly = [
+        line for line in required_disassembly if line not in text_result
+    ]
+    if missing_disassembly:
+        fail(
+            "AArch64 argument-home disassembly is missing: "
+            f"{missing_disassembly}"
+        )
+
+    for name, arg_size, num_bits in [
+        ("aarch64_subword_homes", 8, 1),
+        ("aarch64_large_arg_home", 32776, 4097),
+    ]:
+        symbol = only(
+            obj["symbols"],
+            lambda item, name=name: item["name"] == name,
+            f"{name} symbols",
+        )
+        function_metadata = symbol.get("function")
+        if function_metadata is None:
+            fail(f"{name} has no function metadata")
+        if function_metadata["info"]["args"] != arg_size:
+            fail(
+                f"{name} args={function_metadata['info']['args']}, "
+                f"want {arg_size}"
+            )
+        args_map = only(
+            function_metadata["funcdata"],
+            lambda item: item["kind"] == "args_pointer_maps",
+            f"{name} FUNCDATA_ArgsPointerMaps tables",
+        )["stack_map"]
+        if args_map["num_bits"] != num_bits or any(
+            bitmap["set_bits"] for bitmap in args_map["bitmaps"]
+        ):
+            fail(f"{name} has unexpected args pointer maps: {args_map}")
+        morestack_query = only(
+            function_metadata["stack_map_queries"],
+            lambda item: (
+                item["relocation_type"] == "R_CALLARM64"
+                and reference_name(obj, item["target"])
+                == "runtime.morestack_noctxt"
+            ),
+            f"{name} morestack queries",
+        )
+        if morestack_query["stack_map_index"] != 0:
+            fail(f"{name} morestack does not select entry map: {morestack_query}")
+
     print(
         f"{FUNCTION}: frame={frame_size} locals={locals_size} "
         f"entry-args={sorted(entry_args)} ordinary-roots={sorted(ordinary_bits)}"
