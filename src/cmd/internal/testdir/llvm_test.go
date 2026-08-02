@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"cmd/internal/quoted"
 	"encoding/json"
+	"fmt"
 	"go/build/constraint"
 	"internal/testenv"
 	"os"
@@ -21,8 +22,9 @@ import (
 )
 
 type llvmTestSet struct {
-	Whitelist map[string]string `json:"whitelist"`
-	Blacklist map[string]string `json:"blacklist"`
+	Whitelist         map[string]string            `json:"whitelist"`
+	Blacklist         map[string]string            `json:"blacklist"`
+	PlatformBlacklist map[string]map[string]string `json:"platform_blacklist,omitempty"`
 }
 
 type llvmTestPolicy struct {
@@ -43,6 +45,13 @@ func runLLVMTests(t *testing.T, common testCommon) {
 		}
 
 		policy := readLLVMTestPolicy(t, common.gorootTestDir)
+		platform := runtime.GOOS + "/" + runtime.GOARCH
+		if err := applyLLVMPlatformBlacklist("codegen", platform, &policy.Codegen); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLLVMPlatformBlacklist("runtime", platform, &policy.Runtime); err != nil {
+			t.Fatal(err)
+		}
 		codegenCandidates := llvmTestCandidates(t, common.gorootTestDir, []string{"codegen"}, "asmcheck")
 		runtimeCandidates := llvmTestCandidates(t, common.gorootTestDir, dirs, "run")
 		validateLLVMTestSet(t, common.gorootTestDir, "codegen", codegenCandidates, policy.Codegen, true)
@@ -106,6 +115,91 @@ func readLLVMTestPolicy(t *testing.T, gorootTestDir string) llvmTestPolicy {
 		t.Fatalf("parse llvm_tests.json: %v", err)
 	}
 	return policy
+}
+
+func applyLLVMPlatformBlacklist(name, platform string, set *llvmTestSet) error {
+	for target, entries := range set.PlatformBlacklist {
+		if strings.TrimSpace(target) == "" {
+			return fmt.Errorf("LLVM %s platform blacklist has an empty platform", name)
+		}
+		for filename, reason := range entries {
+			if strings.TrimSpace(reason) == "" {
+				return fmt.Errorf("LLVM %s platform blacklist entry %q for %s has no reason", name, filename, target)
+			}
+			if _, ok := set.Whitelist[filename]; !ok {
+				return fmt.Errorf("LLVM %s platform blacklist entry %q for %s is not in the common whitelist", name, filename, target)
+			}
+		}
+	}
+
+	for filename := range set.PlatformBlacklist[platform] {
+		delete(set.Whitelist, filename)
+	}
+	return nil
+}
+
+func TestApplyLLVMPlatformBlacklist(t *testing.T) {
+	set := llvmTestSet{
+		Whitelist: map[string]string{
+			"common.go": "common",
+			"linux.go":  "linux",
+			"darwin.go": "darwin",
+		},
+		PlatformBlacklist: map[string]map[string]string{
+			"linux/amd64":  {"linux.go": "linux limitation"},
+			"darwin/arm64": {"darwin.go": "darwin limitation"},
+		},
+	}
+	if err := applyLLVMPlatformBlacklist("runtime", "linux/amd64", &set); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := set.Whitelist["linux.go"]; ok {
+		t.Fatal("current-platform exclusion remained in the effective whitelist")
+	}
+	for _, filename := range []string{"common.go", "darwin.go"} {
+		if _, ok := set.Whitelist[filename]; !ok {
+			t.Errorf("applyLLVMPlatformBlacklist removed %q for another platform", filename)
+		}
+	}
+
+	tests := []struct {
+		name string
+		set  llvmTestSet
+		want string
+	}{
+		{
+			name: "empty platform",
+			set: llvmTestSet{
+				Whitelist:         map[string]string{"test.go": "test"},
+				PlatformBlacklist: map[string]map[string]string{"": {"test.go": "reason"}},
+			},
+			want: "empty platform",
+		},
+		{
+			name: "empty reason",
+			set: llvmTestSet{
+				Whitelist:         map[string]string{"test.go": "test"},
+				PlatformBlacklist: map[string]map[string]string{"linux/amd64": {"test.go": " "}},
+			},
+			want: "has no reason",
+		},
+		{
+			name: "not in common whitelist",
+			set: llvmTestSet{
+				Whitelist:         map[string]string{"test.go": "test"},
+				PlatformBlacklist: map[string]map[string]string{"linux/amd64": {"missing.go": "reason"}},
+			},
+			want: "is not in the common whitelist",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyLLVMPlatformBlacklist("runtime", "linux/amd64", &tc.set)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("applyLLVMPlatformBlacklist error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
 }
 
 func llvmTestCandidates(t *testing.T, gorootTestDir string, scanDirs []string, wantAction string) map[string]bool {
@@ -386,7 +480,10 @@ func (t test) runLLVMCase(tempDir string, flags, args []string, runcmd runCmd) e
 	}
 	toolexec := llvmToolexec(t.T)
 	exe := filepath.Join(tempDir, "test.exe")
-	cmd := []string{goTool, "build", t.goGcflags(), "-gcflags=-enablellvm", "-toolexec=" + toolexec, "-o", exe}
+	// GoObj DWARF emission is not implemented by the LLVM backend yet. Disable
+	// debug data explicitly so runtime qualification measures compile, link, and
+	// execution support instead of failing in the linker's DWARF writer.
+	cmd := []string{goTool, "build", t.goGcflags(), "-gcflags=-enablellvm", "-ldflags=-w", "-toolexec=" + toolexec, "-o", exe}
 	cmd = append(cmd, flags...)
 	cmd = append(cmd, t.goFileName())
 	if _, err := runcmd(cmd...); err != nil {
