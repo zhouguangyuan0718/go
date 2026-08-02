@@ -478,9 +478,10 @@ var passes = [...]pass{
 	// LLVM expands Go write barriers while calls and logical aggregate values
 	// still retain their frontend ABI shape, then consumes that generic SSA.
 	{name: "llvm writebarrier", fn: llvmWritebarrierPass, required: true},
-	{name: "llvm", fn: llvmCompilePass, required: true},
+	{name: "llvm direct iface", fn: llvmDirectIfacePass, required: true},
 	{name: "early phielim and copyelim", fn: copyelim},
 	{name: "early deadcode", fn: deadcode}, // remove generated dead code to avoid doing pointless work during opt
+	{name: "llvm", fn: llvmCompilePass, required: true},
 	{name: "short circuit", fn: shortcircuit},
 	{name: "decompose user", fn: decomposeUser, required: true},
 	{name: "pre-opt deadcode", fn: deadcode},
