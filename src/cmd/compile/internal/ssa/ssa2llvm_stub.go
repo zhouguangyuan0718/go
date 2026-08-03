@@ -12,6 +12,9 @@ func InitModule(pkg *types.Pkg) {
 func LowerGoObjData() {
 }
 
+func FinalizeGoObjContentHashes() {
+}
+
 func Output(fileName string) error {
 	return nil
 }
