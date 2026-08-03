@@ -469,6 +469,24 @@ func contentHash64(s *LSym) goobj.Hash64Type {
 	return b
 }
 
+// ContentHash returns the native GoObj identity hash for a content-addressable
+// symbol after ctxt.NumberSyms has assigned symbol classes and indexes. LLVM
+// GoObj producers carry this exact hash rather than independently reproducing
+// the compiler's package-index-sensitive hashing rules.
+func ContentHash(ctxt *Link, s *LSym) []byte {
+	switch s.PkgIdx {
+	case goobj.PkgIdxHashed64:
+		h := contentHash64(s)
+		return append([]byte(nil), h[:]...)
+	case goobj.PkgIdxHashed:
+		w := writer{ctxt: ctxt, pkgpath: objabi.PathToPrefix(ctxt.Pkgpath)}
+		h := w.contentHash(s)
+		return append([]byte(nil), h[:]...)
+	default:
+		panic("ContentHash of non-content-addressable symbol " + s.Name)
+	}
+}
+
 // Compute the content hash for a content-addressable symbol.
 // We build a content hash based on its content and relocations.
 // Depending on the category of the referenced symbol, we choose
