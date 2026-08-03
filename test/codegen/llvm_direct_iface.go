@@ -1,0 +1,37 @@
+// asmcheck
+
+// Copyright 2026 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package codegen
+
+type llvmDirectIfaceLeaf struct {
+	ptr *int
+}
+
+type llvmDirectIfaceNested struct {
+	_     struct{}
+	_     [2][0]uint64
+	value [1]llvmDirectIfaceLeaf
+}
+
+//go:noinline
+func llvmDirectIfaceSink(llvmDirectIfaceNested) {}
+
+// A direct-interface aggregate is physically one pointer in the interface
+// data word. Rebuild the logical nested aggregate before passing it through
+// the ordinary ABI call path.
+//
+// LLVM-LABEL: define goabiinternal void @codegen.llvmDirectIfaceCall(
+// LLVM: [[DATA:%.*]] = extractvalue { ptr, ptr } %x, 1
+// LLVM: [[LEAF:%.*]] = insertvalue %codegen.llvmDirectIfaceLeaf undef, ptr [[DATA]], 0
+// LLVM: [[ARRAY:%.*]] = insertvalue [1 x %codegen.llvmDirectIfaceLeaf] undef, %codegen.llvmDirectIfaceLeaf [[LEAF]], 0
+// LLVM: [[NESTED:%.*]] = insertvalue %codegen.llvmDirectIfaceNested {{.*}}, [1 x %codegen.llvmDirectIfaceLeaf] [[ARRAY]], 2
+// LLVM: call goabiinternal void @codegen.llvmDirectIfaceSink(%codegen.llvmDirectIfaceNested [[NESTED]])
+func llvmDirectIfaceCall(x any) {
+	switch x := x.(type) {
+	case llvmDirectIfaceNested:
+		llvmDirectIfaceSink(x)
+	}
+}
