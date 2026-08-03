@@ -1245,7 +1245,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateGEP(GlobalCtxt.Int8Type(), arg0(), []llvm.Value{neg}, v.String())
 	case OpPtrIndex:
 		lVal = lfc.b.CreateGEP(getLLVMType(v.Type.Elem()), arg0(), []llvm.Value{arg1()}, v.String())
-	case OpStaticCall, OpStaticLECall:
+	case OpStaticCall, OpStaticLECall, OpTailLECall:
 		lVal = lfc.staticCall(v)
 	case OpWB:
 		lVal = lfc.llvmWriteBarrier(v)
@@ -1254,7 +1254,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		// funcval itself. The latter is a hidden REGCTXT input, not an
 		// ordinary Go ABI argument.
 		lVal = lfc.indirectCall(v, 2, true)
-	case OpInterCall, OpInterLECall:
+	case OpInterCall, OpInterLECall, OpTailLECallInter:
 		// arg0 is the code pointer loaded from the itab. Interface method
 		// ABIs receive the interface data word as their first real argument.
 		lVal = lfc.indirectCall(v, 1, false)
@@ -1286,7 +1286,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		sel := int(auxIntToInt64(v.AuxInt))
 		src := v.Args[0]
 		switch src.Op {
-		case OpStaticCall, OpStaticLECall, OpClosureCall, OpClosureLECall, OpInterCall, OpInterLECall:
+		case OpStaticCall, OpStaticLECall, OpClosureCall, OpClosureLECall, OpInterCall, OpInterLECall, OpTailLECall, OpTailLECallInter:
 			aux := auxToCall(src.Aux)
 			call := lfc.GenLV(src)
 			switch {
@@ -1442,6 +1442,8 @@ func (lfc *LLVMFuncContext) CompileBlock(BB *Block, values []*Value) {
 		} else {
 			lfc.b.CreateRet(lfc.GenLV(BB.Controls[0]))
 		}
+	case BlockRetJmp:
+		lfc.emitTailCallReturn(BB)
 	case BlockIf:
 		cond := lfc.llvmCondition(lfc.GenLV(BB.Controls[0]), BB.String()+".cond")
 		lfc.b.CreateCondBr(cond, lfc.BBs[BB.Succs[0].Block().ID], lfc.BBs[BB.Succs[1].Block().ID])
@@ -1457,6 +1459,51 @@ func (lfc *LLVMFuncContext) CompileBlock(BB *Block, values []*Value) {
 		}
 	default:
 		BB.Func.fe.Fatalf(BB.Pos, "unsupported SSA block kind in LLVM lowering: %s", BB.Kind)
+	}
+}
+
+// emitTailCallReturn lowers the compiler's RetJmp terminator to an ordinary
+// call followed immediately by a return. LLVM's Go calling conventions and
+// statepoint rewriting do not yet provide the musttail guarantee needed to
+// remove the current frame safely. Keeping an ordinary call is semantically
+// equivalent for the compiler-generated method and ABI wrappers that produce
+// OTAILCALL, and lets RewriteStatepointsForGC treat the call like every other
+// Go safepoint.
+//
+// TODO(goallc): Emit a genuine tail call once Go ABI frame reuse and
+// RewriteStatepointsForGC support are both guaranteed for musttail calls.
+func (lfc *LLVMFuncContext) emitTailCallReturn(b *Block) {
+	mem := b.Controls[0]
+	if mem == nil || mem.Op != OpSelectN || len(mem.Args) != 1 || !mem.Type.IsMemory() {
+		b.Func.fe.Fatalf(b.Pos, "LLVM RetJmp control is not a tail-call memory selector")
+	}
+	call := mem.Args[0]
+	if call.Op != OpTailLECall && call.Op != OpTailLECallInter {
+		b.Func.fe.Fatalf(b.Pos, "LLVM RetJmp control selects non-tail call %s", call.Op)
+	}
+	aux := auxToCall(call.Aux)
+	if aux == nil || int(aux.NResults()) != lfc.ResultCount {
+		b.Func.fe.Fatalf(b.Pos, "LLVM tail-call result count does not match caller")
+	}
+
+	result := lfc.GenLV(call)
+	switch lfc.ResultCount {
+	case 0:
+		lfc.b.CreateRetVoid()
+	case 1:
+		result = lfc.reshapeLLVMValue(call, result, aux.TypeOfResult(0), lfc.F.OwnAux.TypeOfResult(0), call.String()+".return")
+		if result.Type() != lfc.ReturnType {
+			call.Fatalf("tail-call result has incompatible LLVM return type")
+		}
+		lfc.b.CreateRet(result)
+	default:
+		ret := llvm.Undef(lfc.ReturnType)
+		for i := 0; i < lfc.ResultCount; i++ {
+			field := lfc.b.CreateExtractValue(result, i, fmt.Sprintf("%s.return%d.extract", call, i))
+			field = lfc.reshapeLLVMValue(call, field, aux.TypeOfResult(int64(i)), lfc.F.OwnAux.TypeOfResult(int64(i)), fmt.Sprintf("%s.return%d", call, i))
+			ret = lfc.b.CreateInsertValue(ret, field, i, fmt.Sprintf("%s.return%d.insert", call, i))
+		}
+		lfc.b.CreateRet(ret)
 	}
 }
 
@@ -1535,7 +1582,7 @@ func LLVMCompile(f *Func) {
 	}
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
-			if (v.Op == OpInterCall || v.Op == OpInterLECall) && len(v.Args) != 0 {
+			if (v.Op == OpInterCall || v.Op == OpInterLECall || v.Op == OpTailLECallInter) && len(v.Args) != 0 {
 				code := v.Args[0]
 				if code.Op == OpLoad && code.Type.IsUintptr() && code.Uses == 1 {
 					FCtxt.ItabMethods[code.ID] = true
