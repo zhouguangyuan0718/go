@@ -18,6 +18,8 @@ type LLVMFuncContext struct {
 	BBs              map[ID]llvm.BasicBlock
 	Vs               map[ID]llvm.Value
 	Locals           map[llvmLocalKey]llvmStackSlot
+	AddressedResults map[ID][]llvmAddressedResult
+	ResultSlots      map[ID]llvm.Value
 	ItabMethods      map[ID]bool
 	ClosureCodeLoads map[ID]bool
 	F                *Func
@@ -40,6 +42,12 @@ type llvmLocalKey struct {
 type llvmStackSlot struct {
 	Value llvm.Value
 	Type  *types.Type
+}
+
+type llvmAddressedResult struct {
+	Index int64
+	Slot  llvmStackSlot
+	Owner *Value
 }
 
 // LLVM's GoABIInternal calling convention has numeric ID 22. Keep the
@@ -792,6 +800,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	}
 	call := lfc.b.CreateCall(sig.Type, fn, args, name)
 	call.SetInstructionCallConv(cc)
+	lfc.materializeAddressedResults(v, call, aux)
 	if llvmGCLeaf {
 		markLLVMGCLeaf(fn, call)
 	}
@@ -849,10 +858,33 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	}
 	call := lfc.b.CreateCall(sig.Type, code, args, name)
 	call.SetInstructionCallConv(cc)
+	lfc.materializeAddressedResults(v, call, aux)
 	if closureContext {
 		call.AddCallSiteAttribute(sig.ClosureContextIndex+1, llvmNestAttribute())
 	}
 	return call
+}
+
+// materializeAddressedResults gives SelectNAddr a stable caller-owned memory
+// home. Native expandCalls can address the physical outgoing result slot, but
+// LLVM emission deliberately runs before that pass and models even stack ABI
+// results as first-class return values. Store only the address-selected results
+// immediately after the call, preserving the call result's Go type and
+// alignment while allowing ordinary LLVM promotion to remove unnecessary
+// homes.
+func (lfc *LLVMFuncContext) materializeAddressedResults(v *Value, call llvm.Value, aux *AuxCall) {
+	for _, result := range lfc.AddressedResults[v.ID] {
+		value := call
+		if aux.NResults() > 1 {
+			value = lfc.b.CreateExtractValue(call, int(result.Index), result.Owner.String()+".value")
+		}
+		value = lfc.reshapeLLVMValue(result.Owner, value, aux.TypeOfResult(result.Index), result.Slot.Type, result.Owner.String()+".reshape")
+		if got, want := value.Type(), getLLVMType(result.Slot.Type); got != want {
+			result.Owner.Fatalf("addressed call result has incompatible LLVM type")
+		}
+		store := lfc.b.CreateStore(value, result.Slot.Value)
+		store.SetAlignment(int(result.Slot.Type.Alignment()))
+	}
 }
 
 func llvmFunctionUsesClosureContext(f *Func) bool {
@@ -1277,6 +1309,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		default:
 			lVal = lfc.b.CreateExtractValue(lfc.GenLV(src), sel, v.String())
 		}
+	case OpSelectNAddr:
+		var ok bool
+		lVal, ok = lfc.ResultSlots[v.ID]
+		if !ok {
+			v.Fatalf("addressed call result has no LLVM memory home")
+		}
 	case OpMakeResult:
 		switch lfc.ResultCount {
 		case 0:
@@ -1446,6 +1484,8 @@ func LLVMCompile(f *Func) {
 		BBs:              map[ID]llvm.BasicBlock{},
 		Vs:               map[ID]llvm.Value{},
 		Locals:           map[llvmLocalKey]llvmStackSlot{},
+		AddressedResults: map[ID][]llvmAddressedResult{},
+		ResultSlots:      map[ID]llvm.Value{},
 		ItabMethods:      map[ID]bool{},
 		ClosureCodeLoads: map[ID]bool{},
 		F:                f,
@@ -1567,6 +1607,52 @@ func LLVMCompile(f *Func) {
 			if name.Class == ir.PPARAM {
 				parameterHomes = append(parameterHomes, v)
 			}
+		}
+	}
+	// SelectNAddr denotes an address into a call's outgoing result area. LLVM's
+	// Go calling convention reconstructs stack-assigned results as first-class
+	// return values, so reserve equivalent fixed entry-block homes before any
+	// call or phi emission. Multiple selectors of one call result share a slot,
+	// matching the aliasing of the native ABI result area.
+	type addressedResultKey struct {
+		Call  ID
+		Index int64
+	}
+	addressedResultSlots := make(map[addressedResultKey]llvmStackSlot)
+	for _, BB := range f.Blocks {
+		for _, v := range BB.Values {
+			if v.Op != OpSelectNAddr || v.Uses == 0 {
+				continue
+			}
+			if len(v.Args) != 1 || v.Type == nil || !v.Type.IsPtr() {
+				v.Fatalf("SelectNAddr has invalid arguments or type")
+			}
+			call := v.Args[0]
+			aux := auxToCall(call.Aux)
+			index := auxIntToInt64(v.AuxInt)
+			if aux == nil || index < 0 || index >= aux.NResults() {
+				v.Fatalf("SelectNAddr has invalid call result index %d", index)
+			}
+			resultType := v.Type.Elem()
+			if resultType.Alignment() <= 0 || !types.Identical(resultType, aux.TypeOfResult(index)) {
+				v.Fatalf("SelectNAddr result type %v does not match call result %v", resultType, aux.TypeOfResult(index))
+			}
+			key := addressedResultKey{Call: call.ID, Index: index}
+			slot, ok := addressedResultSlots[key]
+			if !ok {
+				slot = llvmStackSlot{
+					Value: FCtxt.b.CreateAlloca(getLLVMType(resultType), v.String()+".home"),
+					Type:  resultType,
+				}
+				slot.Value.SetAlignment(int(resultType.Alignment()))
+				addressedResultSlots[key] = slot
+				FCtxt.AddressedResults[call.ID] = append(FCtxt.AddressedResults[call.ID], llvmAddressedResult{
+					Index: index,
+					Slot:  slot,
+					Owner: v,
+				})
+			}
+			FCtxt.ResultSlots[v.ID] = slot.Value
 		}
 	}
 	// LLVM requires all phi nodes to precede non-phi instructions in a
