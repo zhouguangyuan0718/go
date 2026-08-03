@@ -1360,7 +1360,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		src := v.Args[0]
 		switch src.Op {
 		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
-			OpAtomicAdd32, OpAtomicAdd32Variant,
+			OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
+			OpAtomicExchange32, OpAtomicExchange32Variant,
+			OpAtomicOr64value, OpAtomicOr64valueVariant,
 			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
 			load := lfc.GenLV(src)
 			if sel == 0 {
@@ -1394,7 +1396,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 				lVal = lfc.llvmValueFromABI(v, lVal, aux.TypeOfResult(int64(sel)), v.Type, v.String()+".reshape")
 			}
 		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
-			OpAtomicAdd32, OpAtomicAdd32Variant,
+			OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
+			OpAtomicExchange32, OpAtomicExchange32Variant,
+			OpAtomicOr64value, OpAtomicOr64valueVariant,
 			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
 			load := lfc.GenLV(src)
 			if sel == 0 {
@@ -1466,13 +1470,27 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateStore(arg1(), arg0())
 		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
 		lVal.SetAlignment(4)
-	case OpAtomicAdd32, OpAtomicAdd32Variant:
+	case OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant:
 		old := lfc.b.CreateAtomicRMW(
 			llvm.AtomicRMWBinOpAdd, arg0(), arg1(),
 			llvm.AtomicOrderingSequentiallyConsistent,
 			false,
 		)
 		lVal = lfc.b.CreateAdd(old, arg1(), v.String())
+	case OpAtomicExchange32, OpAtomicExchange32Variant:
+		lVal = lfc.b.CreateAtomicRMW(
+			llvm.AtomicRMWBinOpXchg, arg0(), arg1(),
+			llvm.AtomicOrderingSequentiallyConsistent,
+			false,
+		)
+		lVal.SetName(v.String())
+	case OpAtomicOr64value, OpAtomicOr64valueVariant:
+		lVal = lfc.b.CreateAtomicRMW(
+			llvm.AtomicRMWBinOpOr, arg0(), arg1(),
+			llvm.AtomicOrderingSequentiallyConsistent,
+			false,
+		)
+		lVal.SetName(v.String())
 	case OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
 		pair := lfc.b.CreateAtomicCmpXchg(
 			arg0(), arg1(), lfc.GenLV(v.Args[2]),

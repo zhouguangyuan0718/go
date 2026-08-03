@@ -1017,7 +1017,10 @@
       "typeswitch1.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "uintptrescapes3.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "utf.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
-      "winbatch.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution"
+      "winbatch.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue16985.go": "32-bit atomic exchange preserves sequentially consistent LLVM execution",
+      "fixedbugs/issue19182.go": "64-bit atomic addition preserves sequentially consistent cross-goroutine visibility",
+      "fixedbugs/issue71857.go": "64-bit atomic OR returns the previous value through LLVM atomicrmw"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"
