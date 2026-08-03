@@ -15,6 +15,9 @@ import "sync/atomic"
 // LLVM-DAG: extractvalue { i32, i1 }
 // LLVM-DAG: zext i1
 // LLVM-DAG: atomicrmw add ptr %p, i32 %delta seq_cst
+// LLVM-DAG: atomicrmw add ptr %p, i64 %delta seq_cst
+// LLVM-DAG: atomicrmw xchg ptr %p, i32 %value seq_cst
+// LLVM-DAG: atomicrmw or ptr %p, i64 %mask seq_cst
 //
 //go:noinline
 func llvmAtomicLoad32(p *uint32) uint32 {
@@ -39,4 +42,19 @@ func llvmAtomicCompareAndSwap32(p *uint32, old, new uint32) bool {
 //go:noinline
 func llvmAtomicAdd32(p *uint32, delta uint32) uint32 {
 	return atomic.AddUint32(p, delta)
+}
+
+//go:noinline
+func llvmAtomicAdd64(p *uint64, delta uint64) uint64 {
+	return atomic.AddUint64(p, delta)
+}
+
+//go:noinline
+func llvmAtomicExchange32(p *uint32, value uint32) uint32 {
+	return atomic.SwapUint32(p, value)
+}
+
+//go:noinline
+func llvmAtomicOr64(p *uint64, mask uint64) uint64 {
+	return atomic.OrUint64(p, mask)
 }
