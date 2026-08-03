@@ -91,6 +91,52 @@ func llvmCallConv(which obj.ABI) llvm.CallConv {
 	}
 }
 
+var llvmABIPadType llvm.Type
+
+// getLLVMABIPadType is a one-byte storage carrier that GoCallingConv treats as
+// padding rather than a register value. Its distinct identified type keeps the
+// ABI exception in the LLVM type graph instead of encoding field paths in an
+// attribute.
+func getLLVMABIPadType() llvm.Type {
+	if llvmABIPadType.IsNil() {
+		llvmABIPadType = GlobalCtxt.StructCreateNamed("go.abi.pad")
+		llvmABIPadType.StructSetBody([]llvm.Type{GlobalCtxt.Int8Type()}, false)
+	}
+	return llvmABIPadType
+}
+
+func llvmStructHasTailPad(typ *types.Type) bool {
+	return typ.Kind() == types.TSTRUCT && typ.Size() != 0 && typ.NumFields() != 0 && typ.FieldType(typ.NumFields()-1).Size() == 0
+}
+
+func llvmTypeContainsABIPad(typ llvm.Type) bool {
+	if typ == getLLVMABIPadType() {
+		return true
+	}
+	switch typ.TypeKind() {
+	case llvm.StructTypeKind:
+		for _, field := range typ.StructElementTypes() {
+			if llvmTypeContainsABIPad(field) {
+				return true
+			}
+		}
+	case llvm.ArrayTypeKind:
+		return typ.ArrayLength() != 0 && llvmTypeContainsABIPad(typ.ElementType())
+	}
+	return false
+}
+
+// getLLVMABIType makes a non-empty carrier only at a top-level zero-sized ABI
+// boundary. The original zero-sized type remains in the wrapper, so DataLayout
+// supplies its Go alignment without storing that alignment in an attribute.
+func getLLVMABIType(typ *types.Type) llvm.Type {
+	storage := getLLVMType(typ)
+	if typ.Size() == 0 {
+		return llvm.StructType([]llvm.Type{storage, getLLVMABIPadType()}, false)
+	}
+	return storage
+}
+
 func llvmSignature(aux *AuxCall) llvmFuncSignature {
 	if aux == nil || aux.ABIInfo() == nil {
 		base.Fatalf("missing ABI information in LLVM lowering")
@@ -98,12 +144,14 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 
 	params := make([]llvm.Type, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
-		params = append(params, getLLVMType(aux.TypeOfArg(i)))
+		param := getLLVMABIType(aux.TypeOfArg(i))
+		params = append(params, param)
 	}
 
 	results := make([]llvm.Type, 0, aux.NResults())
 	for i := int64(0); i < aux.NResults(); i++ {
-		results = append(results, getLLVMType(aux.TypeOfResult(i)))
+		result := getLLVMABIType(aux.TypeOfResult(i))
+		results = append(results, result)
 	}
 
 	var ret llvm.Type
@@ -158,6 +206,12 @@ func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallCon
 		// is deliberately excluded from the Go ABI argument layout by the
 		// target and carried in REGCTXT (RDX on amd64, X26 on arm64).
 		fn.AddAttributeAtIndex(sig.ClosureContextIndex+1, llvmNestAttribute())
+	}
+}
+
+func configureLLVMCall(call llvm.Value, sig llvmFuncSignature) {
+	if sig.ResultCount > 1 {
+		call.AddCallSiteAttribute(llvmAttributeFunctionIndex, GlobalCtxt.CreateStringAttribute(goResultsTupleAttr, ""))
 	}
 }
 
@@ -584,7 +638,7 @@ func (lfc *LLVMFuncContext) FinishPhi() {
 
 func (lfc *LLVMFuncContext) paramForArg(v *Value) llvm.Value {
 	param, typ := lfc.paramForArgNameAndType(v, v.Aux.(*ir.Name))
-	return lfc.reshapeLLVMValue(v, param, typ, v.Type, v.String()+".arg")
+	return lfc.llvmValueFromABI(v, param, typ, v.Type, v.String()+".arg")
 }
 
 func (lfc *LLVMFuncContext) paramForArgNameAndType(v *Value, name *ir.Name) (llvm.Value, *types.Type) {
@@ -636,7 +690,11 @@ func (lfc *LLVMFuncContext) aggregate(v *Value, args []*Value) llvm.Value {
 	default:
 		v.Fatalf("%s has non-aggregate LLVM kind %s", v.Op, result.Type().TypeKind())
 	}
-	if len(elementTypes) != len(args) {
+	wantElements := len(args)
+	if llvmStructHasTailPad(v.Type) {
+		wantElements++
+	}
+	if len(elementTypes) != wantElements {
 		v.Fatalf("%s has %d LLVM aggregate elements for %d SSA arguments", v.Op, len(elementTypes), len(args))
 	}
 	for i, arg := range args {
@@ -689,7 +747,15 @@ func (lfc *LLVMFuncContext) reshapeLLVMValue(v *Value, value llvm.Value, from, t
 		}
 		fromElements := value.Type().StructElementTypes()
 		toElements := want.StructElementTypes()
-		if from.NumFields() != to.NumFields() || len(fromElements) != from.NumFields() || len(toElements) != to.NumFields() {
+		fromElementCount := from.NumFields()
+		if llvmStructHasTailPad(from) {
+			fromElementCount++
+		}
+		toElementCount := to.NumFields()
+		if llvmStructHasTailPad(to) {
+			toElementCount++
+		}
+		if from.NumFields() != to.NumFields() || len(fromElements) != fromElementCount || len(toElements) != toElementCount {
 			v.Fatalf("shape-identical structs have incompatible field counts")
 		}
 		result := llvm.Undef(want)
@@ -721,6 +787,30 @@ func (lfc *LLVMFuncContext) reshapeLLVMValue(v *Value, value llvm.Value, from, t
 		v.Fatalf("shape-identical Go types %v and %v require unsupported LLVM reshaping", from, to)
 		return llvm.Value{}
 	}
+}
+
+func (lfc *LLVMFuncContext) llvmValueToABI(v *Value, value llvm.Value, from, logical *types.Type, abiType llvm.Type, name string) llvm.Value {
+	if logical.Size() == 0 {
+		if from.Size() != 0 || !llvmTypeContainsABIPad(abiType) {
+			v.Fatalf("zero-sized Go ABI value has incompatible pad carrier")
+		}
+		return llvm.Undef(abiType)
+	}
+	value = lfc.reshapeLLVMValue(v, value, from, logical, name)
+	if value.Type() != abiType {
+		v.Fatalf("Go ABI value has incompatible LLVM carrier")
+	}
+	return value
+}
+
+func (lfc *LLVMFuncContext) llvmValueFromABI(v *Value, value llvm.Value, logical, to *types.Type, name string) llvm.Value {
+	if logical.Size() == 0 {
+		if to.Size() != 0 || !llvmTypeContainsABIPad(value.Type()) {
+			v.Fatalf("zero-sized Go ABI pad carrier has incompatible type")
+		}
+		return llvm.Undef(getLLVMType(to))
+	}
+	return lfc.reshapeLLVMValue(v, value, logical, to, name)
 }
 
 // llvmStaticCallSignature restores semantic pointer types for compiler-built
@@ -787,7 +877,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	for i := int64(0); i < aux.NArgs(); i++ {
 		arg := lfc.GenLV(v.Args[i])
 		if arg.Type() != sig.Type.ParamTypes()[i] {
-			arg = lfc.reshapeLLVMValue(v, arg, v.Args[i].Type, aux.TypeOfArg(i), fmt.Sprintf("%s.arg%d", v, i))
+			arg = lfc.llvmValueToABI(v, arg, v.Args[i].Type, aux.TypeOfArg(i), sig.Type.ParamTypes()[i], fmt.Sprintf("%s.arg%d", v, i))
 		}
 		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
 			v.Fatalf("argument %d to %s has incompatible LLVM type", i, aux.Fn.Name)
@@ -800,6 +890,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	}
 	call := lfc.b.CreateCall(sig.Type, fn, args, name)
 	call.SetInstructionCallConv(cc)
+	configureLLVMCall(call, sig)
 	lfc.materializeAddressedResults(v, call, aux)
 	if llvmGCLeaf {
 		markLLVMGCLeaf(fn, call)
@@ -838,7 +929,7 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	for i := int64(0); i < aux.NArgs(); i++ {
 		arg := lfc.GenLV(v.Args[argStart+int(i)])
 		if arg.Type() != sig.Type.ParamTypes()[i] {
-			arg = lfc.reshapeLLVMValue(v, arg, v.Args[argStart+int(i)].Type, aux.TypeOfArg(i), fmt.Sprintf("%s.arg%d", v, i))
+			arg = lfc.llvmValueToABI(v, arg, v.Args[argStart+int(i)].Type, aux.TypeOfArg(i), sig.Type.ParamTypes()[i], fmt.Sprintf("%s.arg%d", v, i))
 		}
 		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
 			v.Fatalf("argument %d to indirect call has incompatible LLVM type", i)
@@ -858,6 +949,7 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	}
 	call := lfc.b.CreateCall(sig.Type, code, args, name)
 	call.SetInstructionCallConv(cc)
+	configureLLVMCall(call, sig)
 	lfc.materializeAddressedResults(v, call, aux)
 	if closureContext {
 		call.AddCallSiteAttribute(sig.ClosureContextIndex+1, llvmNestAttribute())
@@ -878,7 +970,7 @@ func (lfc *LLVMFuncContext) materializeAddressedResults(v *Value, call llvm.Valu
 		if aux.NResults() > 1 {
 			value = lfc.b.CreateExtractValue(call, int(result.Index), result.Owner.String()+".value")
 		}
-		value = lfc.reshapeLLVMValue(result.Owner, value, aux.TypeOfResult(result.Index), result.Slot.Type, result.Owner.String()+".reshape")
+		value = lfc.llvmValueFromABI(result.Owner, value, aux.TypeOfResult(result.Index), result.Slot.Type, result.Owner.String()+".reshape")
 		if got, want := value.Type(), getLLVMType(result.Slot.Type); got != want {
 			result.Owner.Fatalf("addressed call result has incompatible LLVM type")
 		}
@@ -1299,7 +1391,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 				lVal = lfc.b.CreateExtractValue(call, sel, v.String())
 			}
 			if sel < int(aux.NResults()) {
-				lVal = lfc.reshapeLLVMValue(v, lVal, aux.TypeOfResult(int64(sel)), v.Type, v.String()+".reshape")
+				lVal = lfc.llvmValueFromABI(v, lVal, aux.TypeOfResult(int64(sel)), v.Type, v.String()+".reshape")
 			}
 		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
 			OpAtomicAdd32, OpAtomicAdd32Variant,
@@ -1321,11 +1413,13 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		switch lfc.ResultCount {
 		case 0:
 		case 1:
-			lVal = lfc.reshapeLLVMValue(v, lfc.GenLV(v.Args[0]), v.Args[0].Type, lfc.F.OwnAux.TypeOfResult(0), v.String()+".result0")
+			lVal = lfc.GenLV(v.Args[0])
+			lVal = lfc.llvmValueToABI(v, lVal, v.Args[0].Type, lfc.F.OwnAux.TypeOfResult(0), lfc.ReturnType, v.String()+".result0")
 		default:
 			lVal = llvm.Undef(lfc.ReturnType)
 			for i := 0; i < lfc.ResultCount; i++ {
-				result := lfc.reshapeLLVMValue(v, lfc.GenLV(v.Args[i]), v.Args[i].Type, lfc.F.OwnAux.TypeOfResult(int64(i)), fmt.Sprintf("%s.result%d", v, i))
+				resultType := lfc.ReturnType.StructElementTypes()[i]
+				result := lfc.llvmValueToABI(v, lfc.GenLV(v.Args[i]), v.Args[i].Type, lfc.F.OwnAux.TypeOfResult(int64(i)), resultType, fmt.Sprintf("%s.result%d", v, i))
 				lVal = lfc.b.CreateInsertValue(lVal, result, i, "")
 			}
 			lVal.SetName(v.String())
@@ -1491,7 +1585,8 @@ func (lfc *LLVMFuncContext) emitTailCallReturn(b *Block) {
 	case 0:
 		lfc.b.CreateRetVoid()
 	case 1:
-		result = lfc.reshapeLLVMValue(call, result, aux.TypeOfResult(0), lfc.F.OwnAux.TypeOfResult(0), call.String()+".return")
+		result = lfc.llvmValueFromABI(call, result, aux.TypeOfResult(0), aux.TypeOfResult(0), call.String()+".return.fromabi")
+		result = lfc.llvmValueToABI(call, result, aux.TypeOfResult(0), lfc.F.OwnAux.TypeOfResult(0), lfc.ReturnType, call.String()+".return")
 		if result.Type() != lfc.ReturnType {
 			call.Fatalf("tail-call result has incompatible LLVM return type")
 		}
@@ -1500,7 +1595,8 @@ func (lfc *LLVMFuncContext) emitTailCallReturn(b *Block) {
 		ret := llvm.Undef(lfc.ReturnType)
 		for i := 0; i < lfc.ResultCount; i++ {
 			field := lfc.b.CreateExtractValue(result, i, fmt.Sprintf("%s.return%d.extract", call, i))
-			field = lfc.reshapeLLVMValue(call, field, aux.TypeOfResult(int64(i)), lfc.F.OwnAux.TypeOfResult(int64(i)), fmt.Sprintf("%s.return%d", call, i))
+			field = lfc.llvmValueFromABI(call, field, aux.TypeOfResult(int64(i)), aux.TypeOfResult(int64(i)), fmt.Sprintf("%s.return%d.fromabi", call, i))
+			field = lfc.llvmValueToABI(call, field, aux.TypeOfResult(int64(i)), lfc.F.OwnAux.TypeOfResult(int64(i)), lfc.ReturnType.StructElementTypes()[i], fmt.Sprintf("%s.return%d", call, i))
 			ret = lfc.b.CreateInsertValue(ret, field, i, fmt.Sprintf("%s.return%d.insert", call, i))
 		}
 		lfc.b.CreateRet(ret)
@@ -1733,7 +1829,7 @@ func LLVMCompile(f *Func) {
 		name, key := llvmLocalName(v)
 		slot := FCtxt.Locals[key]
 		param, paramType := FCtxt.paramForArgNameAndType(v, name)
-		param = FCtxt.reshapeLLVMValue(v, param, paramType, slot.Type, v.String()+".home")
+		param = FCtxt.llvmValueFromABI(v, param, paramType, slot.Type, v.String()+".home")
 		if param.Type() != getLLVMType(slot.Type) {
 			v.Fatalf("parameter home changes LLVM representation")
 		}
@@ -1819,15 +1915,21 @@ func getLLVMType(typ *types.Type) llvm.Type {
 			// through named aggregates cannot recurse indefinitely.
 			lType = GlobalCtxt.StructCreateNamed(typ.LinkString())
 			type2lTypes[typ] = lType
-			fieldTypes := make([]llvm.Type, typ.NumFields())
-			for i := range fieldTypes {
+			fieldTypes := make([]llvm.Type, typ.NumFields(), typ.NumFields()+1)
+			for i := 0; i < typ.NumFields(); i++ {
 				fieldTypes[i] = getLLVMType(typ.FieldType(i))
+			}
+			if llvmStructHasTailPad(typ) {
+				fieldTypes = append(fieldTypes, getLLVMABIPadType())
 			}
 			lType.StructSetBody(fieldTypes, false)
 		} else {
-			fieldTypes := make([]llvm.Type, typ.NumFields())
-			for i := range fieldTypes {
+			fieldTypes := make([]llvm.Type, typ.NumFields(), typ.NumFields()+1)
+			for i := 0; i < typ.NumFields(); i++ {
 				fieldTypes[i] = getLLVMType(typ.FieldType(i))
+			}
+			if llvmStructHasTailPad(typ) {
+				fieldTypes = append(fieldTypes, getLLVMABIPadType())
 			}
 			lType = llvm.StructType(fieldTypes, false)
 		}
