@@ -131,6 +131,7 @@ func LowerGoObjData() {
 
 	globals := lowerer.values
 	for _, s := range syms {
+		lowerer.lowered[s] = true
 		t := lowerer.dataType(s)
 		g := globals[s]
 		if g.IsNil() && s.Name != "" {
@@ -171,6 +172,45 @@ func LowerGoObjData() {
 		setGoObjMarkerRelocMetadata(g, s)
 	}
 	emitGoObjCompilerUsed()
+}
+
+// FinalizeGoObjContentHashes carries the native GoObj identity hash for each
+// lowered content-addressable definition after NumberSyms has assigned the
+// package and symbol indexes used by that hash. LowerGoObjData runs first so
+// imported-reference metadata retains the same pre-numbering classification
+// as the established LLVM path.
+func FinalizeGoObjContentHashes() {
+	if currentLLVMDataLowerer == nil {
+		return
+	}
+	syms := make([]*obj.LSym, 0, len(currentLLVMDataLowerer.lowered))
+	for s := range currentLLVMDataLowerer.lowered {
+		if s.ContentAddressable() {
+			syms = append(syms, s)
+		}
+	}
+	sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
+	for _, s := range syms {
+		g := currentLLVMDataLowerer.values[s]
+		if g.IsNil() {
+			base.Fatalf("missing lowered LLVM global for content-addressable symbol %s", s.Name)
+		}
+		setGoObjContentHashMetadata(g, s)
+	}
+}
+
+// GoObj content hashes depend on the compiler's native symbol classes,
+// package indexes, and relocation identities. Carry the already-canonical
+// result into LLVM instead of asking the LLVM object writer to infer it from
+// linkage or symbol names.
+func setGoObjContentHashMetadata(g llvm.Value, s *obj.LSym) {
+	if !s.ContentAddressable() {
+		return
+	}
+	hash := obj.ContentHash(base.Ctxt, s)
+	g.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.content_hash"), GlobalCtxt.MDNode([]llvm.Metadata{
+		GlobalCtxt.MDString(string(hash)),
+	}))
 }
 
 // llvmGoDataRef returns the module-global address for a compiler LSym. Local
