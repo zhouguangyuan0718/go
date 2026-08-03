@@ -386,6 +386,12 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	if base.Flag.LLVMIROnly {
 		dumpdata()
 		ssa.LowerGoObjData()
+		// Assign the same package, content-addressable, and non-package
+		// identities that the native object writer uses. LLVM data lowering
+		// carries content hashes into GoObj so the linker can coalesce type
+		// descriptors and itabs across packages.
+		base.Ctxt.NumberSyms()
+		ssa.FinalizeGoObjContentHashes()
 		dumpobj()
 	} else {
 		dumpdata()
