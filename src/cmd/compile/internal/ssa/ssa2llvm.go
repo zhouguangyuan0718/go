@@ -1074,7 +1074,13 @@ func (lfc *LLVMFuncContext) llvmIData(v *Value) llvm.Value {
 	data := lfc.b.CreateExtractValue(lfc.GenLV(v.Args[0]), 1, v.String()+".data")
 	want := getLLVMType(v.Type)
 	if data.Type() == want {
-		data.SetName(v.String())
+		// CreateExtractValue may constant-fold an IMake and return its global
+		// data operand directly. Renaming that value would rename the referenced
+		// Go symbol (for example runtime.zeroVal) to this SSA value's temporary
+		// name and leave an undefined GoObj relocation.
+		if !data.IsAInstruction().IsNil() {
+			data.SetName(v.String())
+		}
 		return data
 	}
 	if !types.IsDirectIface(v.Type) {

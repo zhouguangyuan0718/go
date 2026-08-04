@@ -1334,8 +1334,10 @@ Error rewriteFunction(Function &F) {
       if (IsActive)
         Record.Live.insert(Alloca.Alloca);
       // StackObjects is function-wide metadata, so carry its layout at every
-      // ordinary statepoint. Presence of the alloca in gc-live separately
-      // tells GoObj whether its contents are roots at this callsite.
+      // ordinary statepoint. The alloca's gc-live presence separately carries
+      // activity/relocation information; the deopt record kind tells GoObj
+      // whether that information expands a LocalsOnly pointer map or belongs
+      // to a StackObject.
       if (IsActive ||
           Alloca.RecordKind == PointerAllocaRecord::Kind::StackObject)
         AllocaRecords.push_back(&Alloca);

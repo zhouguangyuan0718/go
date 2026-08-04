@@ -73,6 +73,7 @@ func main() {
 	objPath := filepath.Join(filepath.Dir(output), "llvm-goobj.o")
 	llcArgs := []string{
 		"-load-pass-plugin=" + pluginPath,
+		"-trap-unreachable",
 		"-filetype=obj",
 		irPath,
 		"-o", objPath,
