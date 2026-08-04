@@ -20,7 +20,8 @@ entry:
   %statepoint = call goabiinternal token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(
           i64 1, i32 0, ptr elementtype(void ()) @callee,
-          i32 0, i32 0, i32 0, i32 0) [ "deopt"(__DEOPT__) ]
+          i32 0, i32 0, i32 0, i32 0) [
+              "deopt"(__DEOPT__), "gc-live"(ptr %slot) ]
   ret void
 }
 

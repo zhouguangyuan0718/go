@@ -3,12 +3,14 @@
 // license that can be found in the LICENSE file.
 
 #include "GoALLCStatepoints.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/StackLifetime.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/IR/CallingConv.h"
@@ -39,6 +41,8 @@ constexpr StringLiteral GoALLCGCName = "goallc";
 constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
 constexpr StringLiteral GoSourceAddressTakenMD = "goallc.source_addrtaken";
+constexpr StringLiteral StackColoringNoMergeMD =
+    "llvm.stackcoloring.no_merge";
 
 // This strategy exists for statepoint verification and lowering. GoALLC owns
 // statepoint insertion, so UseRS4GC deliberately remains false.
@@ -106,6 +110,10 @@ struct PointerAllocaRecord {
   uint64_t Alignment;
   uint64_t BitCount;
   SmallVector<uint64_t, 4> BitmapWords;
+  SmallVector<PointerAllocaLeaf, 8> Leaves;
+  SmallVector<IntrinsicInst *, 4> LifetimeMarkers;
+  SmallVector<CallInst *, 8> ActiveCalls;
+  bool LifetimeUnclear = false;
 };
 
 enum class LivenessKind {
@@ -588,6 +596,7 @@ bool allocaNeedsStackObject(AllocaInst &Alloca) {
         continue;
       if (auto *Intrinsic = dyn_cast<IntrinsicInst>(I)) {
         if (Intrinsic->isLifetimeStartOrEnd() ||
+            Intrinsic->getIntrinsicID() == Intrinsic::fake_use ||
             isa<DbgInfoIntrinsic>(Intrinsic) || isa<MemIntrinsic>(Intrinsic))
           continue;
         return true;
@@ -602,6 +611,124 @@ bool allocaNeedsStackObject(AllocaInst &Alloca) {
   return false;
 }
 
+Error collectPointerAllocaLifetimeMarkers(
+    Function &F, SmallVectorImpl<PointerAllocaRecord> &PointerAllocas) {
+  DenseMap<const AllocaInst *, PointerAllocaRecord *> Records;
+  for (PointerAllocaRecord &Record : PointerAllocas)
+    Records[Record.Alloca] = &Record;
+
+  for (Instruction &I : instructions(F)) {
+    auto *Lifetime = dyn_cast<LifetimeIntrinsic>(&I);
+    if (!Lifetime)
+      continue;
+    Value *Pointer = Lifetime->getArgOperand(0);
+    auto *Alloca = dyn_cast<AllocaInst>(Pointer);
+    if (!Alloca) {
+      if (const AllocaInst *Underlying =
+              findAllocaForValue(Pointer, /*OffsetZero=*/true);
+          Underlying && Records.contains(Underlying))
+        return createStringError(
+            std::errc::not_supported,
+            "GoALLC statepoint lifetimes must reference the whole pointer "
+            "alloca directly");
+      continue;
+    }
+    auto It = Records.find(Alloca);
+    if (It != Records.end())
+      It->second->LifetimeMarkers.push_back(Lifetime);
+  }
+  return Error::success();
+}
+
+Error computePointerAllocaLifetimes(
+    Function &F, SmallVectorImpl<PointerAllocaRecord> &PointerAllocas,
+    ArrayRef<SafepointRecord> Safepoints) {
+  SmallVector<const AllocaInst *, 8> Allocas;
+  Allocas.reserve(PointerAllocas.size());
+  for (const PointerAllocaRecord &Record : PointerAllocas)
+    Allocas.push_back(Record.Alloca);
+
+  // Reuse LLVM's lifetime dataflow instead of maintaining a second model in
+  // the statepoint pass. A callsite can use one pointer map only, so a slot
+  // which is live on only some incoming paths needs a conservative fallback.
+  StackLifetime MayLifetime(F, Allocas, StackLifetime::LivenessType::May);
+  StackLifetime MustLifetime(F, Allocas, StackLifetime::LivenessType::Must);
+  MayLifetime.run();
+  MustLifetime.run();
+
+  for (PointerAllocaRecord &Record : PointerAllocas) {
+    for (const SafepointRecord &Safepoint : Safepoints) {
+      if (!MayLifetime.isReachable(Safepoint.Call)) {
+        Record.ActiveCalls.push_back(Safepoint.Call);
+        continue;
+      }
+      bool MayBeAlive = MayLifetime.isAliveAfter(Record.Alloca, Safepoint.Call);
+      bool MustBeAlive =
+          MustLifetime.isAliveAfter(Record.Alloca, Safepoint.Call);
+      if (MayBeAlive != MustBeAlive) {
+        Record.LifetimeUnclear = true;
+        break;
+      }
+      if (MustBeAlive)
+        Record.ActiveCalls.push_back(Safepoint.Call);
+    }
+    if (Record.LifetimeUnclear) {
+      Record.RecordKind = PointerAllocaRecord::Kind::StackObject;
+      Record.ActiveCalls.clear();
+      for (const SafepointRecord &Safepoint : Safepoints)
+        Record.ActiveCalls.push_back(Safepoint.Call);
+    }
+  }
+  return Error::success();
+}
+
+void protectStackObjectsFromColoring(
+    MutableArrayRef<PointerAllocaRecord> PointerAllocas) {
+  for (PointerAllocaRecord &Record : PointerAllocas) {
+    if (Record.RecordKind != PointerAllocaRecord::Kind::StackObject)
+      continue;
+    // A Go StackObject has function-wide identity and layout metadata.  It
+    // cannot share storage with another lifetime-disjoint alloca because both
+    // object records must remain independently addressable at every
+    // statepoint, including calls outside this object's active lifetime.
+    Record.Alloca->setMetadata(
+        StackColoringNoMergeMD,
+        MDNode::get(Record.Alloca->getContext(), ArrayRef<Metadata *>()));
+  }
+}
+
+bool isPointerAllocaActiveAt(const PointerAllocaRecord &Record,
+                             const CallInst &Call) {
+  return llvm::is_contained(Record.ActiveCalls, &Call);
+}
+
+void initializePointerAllocas(
+    MutableArrayRef<PointerAllocaRecord> PointerAllocas) {
+  for (PointerAllocaRecord &Record : PointerAllocas) {
+    SmallVector<Instruction *, 4> InitAfter;
+    if (Record.LifetimeUnclear || Record.LifetimeMarkers.empty())
+      InitAfter.push_back(Record.Alloca);
+    else
+      for (IntrinsicInst *Marker : Record.LifetimeMarkers)
+        if (Marker->getIntrinsicID() == Intrinsic::lifetime_start)
+          InitAfter.push_back(Marker);
+
+    for (Instruction *Start : InitAfter) {
+      IRBuilder<> Builder(Start->getNextNode());
+      Builder.SetCurrentDebugLocation(Start->getDebugLoc());
+      for (const PointerAllocaLeaf &Leaf : Record.Leaves) {
+        std::string Name = allocaLeafName(*Record.Alloca, Leaf);
+        Value *Address = pointerAllocaLeafAddress(Builder, *Record.Alloca, Leaf,
+                                                  Name + ".init.addr");
+        Align Alignment =
+            commonAlignment(Record.Alloca->getAlign(), Leaf.Offset);
+        Builder.CreateAlignedStore(ConstantPointerNull::get(Leaf.Type), Address,
+                                   Alignment);
+      }
+    }
+  }
+}
+
 Error collectPointerAllocas(
     Function &F, SmallVectorImpl<PointerAllocaRecord> &PointerAllocas) {
   bool HasSafepoint = llvm::any_of(instructions(F), [](Instruction &I) {
@@ -612,8 +739,6 @@ Error collectPointerAllocas(
     return Error::success();
 
   const DataLayout &DL = F.getDataLayout();
-  SmallVector<std::pair<AllocaInst *, SmallVector<PointerAllocaLeaf, 8>>, 8>
-      AllocaLeaves;
   for (Instruction &I : instructions(F)) {
     auto *Alloca = dyn_cast<AllocaInst>(&I);
     if (!Alloca || !containsPointer(Alloca->getAllocatedType()))
@@ -677,25 +802,11 @@ Error collectPointerAllocas(
                                         : PointerAllocaRecord::Kind::LocalsOnly;
     PointerAllocas.push_back({Alloca, Kind, ByteSize,
                               Alloca->getAlign().value(), BitCount,
-                              std::move(BitmapWords)});
-    AllocaLeaves.push_back({Alloca, std::move(Leaves)});
+                              std::move(BitmapWords), std::move(Leaves)});
   }
 
-  // Pointer-containing Go stack slots must start with zero pointer words.
-  // This is object initialization, not statepoint root spilling: there is no
-  // per-call load, relocation, or write-back in the alloca ptrmap model.
-  for (auto &[Alloca, Leaves] : AllocaLeaves) {
-    IRBuilder<> InitBuilder(Alloca->getNextNode());
-    InitBuilder.SetCurrentDebugLocation(Alloca->getDebugLoc());
-    for (const PointerAllocaLeaf &Leaf : Leaves) {
-      std::string Name = allocaLeafName(*Alloca, Leaf);
-      Value *Address = pointerAllocaLeafAddress(InitBuilder, *Alloca, Leaf,
-                                                Name + ".init.addr");
-      Align Alignment = commonAlignment(Alloca->getAlign(), Leaf.Offset);
-      InitBuilder.CreateAlignedStore(ConstantPointerNull::get(Leaf.Type),
-                                     Address, Alignment);
-    }
-  }
+  if (Error Err = collectPointerAllocaLifetimeMarkers(F, PointerAllocas))
+    return Err;
 
   return Error::success();
 }
@@ -744,17 +855,17 @@ Error validateSafepoint(const SafepointRecord &Record) {
   return Error::success();
 }
 
-void appendAllocaPtrMapDeoptOperands(IRBuilder<> &Builder,
-                                     ArrayRef<PointerAllocaRecord> Allocas,
-                                     SmallVectorImpl<Value *> &Deopt) {
+void appendAllocaPtrMapDeoptOperands(
+    IRBuilder<> &Builder, ArrayRef<const PointerAllocaRecord *> Allocas,
+    SmallVectorImpl<Value *> &Deopt) {
   if (Allocas.empty())
     return;
   // ProtocolLength covers BEGIN through END, but not the trailing duplicate
   // length.  The envelope itself therefore contributes BEGIN, length,
   // record-count, and END.
   uint64_t ProtocolLength = 4;
-  for (const PointerAllocaRecord &Alloca : Allocas)
-    ProtocolLength += 10 + Alloca.BitmapWords.size();
+  for (const PointerAllocaRecord *Alloca : Allocas)
+    ProtocolLength += 10 + Alloca->BitmapWords.size();
 
   auto AppendConstant = [&](uint64_t Value) {
     Deopt.push_back(ConstantInt::get(Builder.getInt64Ty(), Value));
@@ -762,20 +873,20 @@ void appendAllocaPtrMapDeoptOperands(IRBuilder<> &Builder,
   AppendConstant(GoObj::AllocaPtrMapBeginMagic);
   AppendConstant(ProtocolLength);
   AppendConstant(Allocas.size());
-  for (const PointerAllocaRecord &Alloca : Allocas) {
-    AppendConstant(Alloca.RecordKind == PointerAllocaRecord::Kind::StackObject
+  for (const PointerAllocaRecord *Alloca : Allocas) {
+    AppendConstant(Alloca->RecordKind == PointerAllocaRecord::Kind::StackObject
                        ? GoObj::AllocaPtrMapStackObjectRecordTag
                        : GoObj::AllocaPtrMapLocalsRecordTag);
-    AppendConstant(10 + Alloca.BitmapWords.size());
-    Deopt.push_back(Alloca.Alloca);
+    AppendConstant(10 + Alloca->BitmapWords.size());
+    Deopt.push_back(Alloca->Alloca);
     AppendConstant(0); // First contract version describes the whole alloca.
-    AppendConstant(Alloca.ByteSize);
-    AppendConstant(Alloca.Alignment);
-    AppendConstant(Alloca.Alloca->getDataLayout().getPointerSize(0));
-    AppendConstant(Alloca.BitCount);
+    AppendConstant(Alloca->ByteSize);
+    AppendConstant(Alloca->Alignment);
+    AppendConstant(Alloca->Alloca->getDataLayout().getPointerSize(0));
+    AppendConstant(Alloca->BitCount);
     AppendConstant(GoObj::AllocaPtrMapBitmapWordBits);
-    AppendConstant(Alloca.BitmapWords.size());
-    for (uint64_t Word : Alloca.BitmapWords)
+    AppendConstant(Alloca->BitmapWords.size());
+    for (uint64_t Word : Alloca->BitmapWords)
       AppendConstant(Word);
   }
   AppendConstant(GoObj::AllocaPtrMapEndMagic);
@@ -783,7 +894,7 @@ void appendAllocaPtrMapDeoptOperands(IRBuilder<> &Builder,
 }
 
 Error rewriteCall(SafepointRecord &Record,
-                  ArrayRef<PointerAllocaRecord> PointerAllocas) {
+                  ArrayRef<const PointerAllocaRecord *> PointerAllocas) {
   CallInst *Call = Record.Call;
 
   SmallVector<Value *, 8> CallArgs(Call->args());
@@ -857,7 +968,9 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
   // instructions.
   ValueSet Live;
   for (const SafepointRecord &Record : Records)
-    Live.insert_range(cast<GCStatepointInst>(Record.Statepoint)->gc_live());
+    for (Value *V : cast<GCStatepointInst>(Record.Statepoint)->gc_live())
+      if (!isa<AllocaInst>(V))
+        Live.insert(V);
   if (Live.empty())
     return;
 
@@ -881,6 +994,12 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
     for (CallInst *RelocateCall : Record.Relocates) {
       auto *Relocate = cast<GCRelocateInst>(RelocateCall);
       Value *Original = Relocate->getDerivedPtr();
+      // Static alloca addresses are direct frame indices. SelectionDAG
+      // rematerializes gc.relocate(alloca) as that same frame index, so keep
+      // every IR use (including lifetime markers and deopt operands) on the
+      // original alloca instead of building relocation SSA for it.
+      if (isa<AllocaInst>(Original))
+        continue;
       auto Slot = Slots.find(Original);
       assert(Slot != Slots.end() && "relocate is missing its gc-live value");
       new StoreInst(RelocateCall, Slot->second,
@@ -978,9 +1097,26 @@ Error rewriteFunction(Function &F) {
   for (const SafepointRecord &Record : Records)
     if (Error Err = validateSafepoint(Record))
       return Err;
-  for (SafepointRecord &Record : llvm::reverse(Records))
-    if (Error Err = rewriteCall(Record, PointerAllocas))
+  if (Error Err = computePointerAllocaLifetimes(F, PointerAllocas, Records))
+    return Err;
+  protectStackObjectsFromColoring(PointerAllocas);
+  initializePointerAllocas(PointerAllocas);
+  for (SafepointRecord &Record : llvm::reverse(Records)) {
+    SmallVector<const PointerAllocaRecord *, 8> AllocaRecords;
+    for (const PointerAllocaRecord &Alloca : PointerAllocas) {
+      bool IsActive = isPointerAllocaActiveAt(Alloca, *Record.Call);
+      if (IsActive)
+        Record.Live.insert(Alloca.Alloca);
+      // StackObjects is function-wide metadata, so carry its layout at every
+      // ordinary statepoint. Presence of the alloca in gc-live separately
+      // tells GoObj whether its contents are roots at this callsite.
+      if (IsActive ||
+          Alloca.RecordKind == PointerAllocaRecord::Kind::StackObject)
+        AllocaRecords.push_back(&Alloca);
+    }
+    if (Error Err = rewriteCall(Record, AllocaRecords))
       return Err;
+  }
   eraseOriginalCalls(Records);
   repairRelocationSSA(F, DT, Records);
   return Error::success();

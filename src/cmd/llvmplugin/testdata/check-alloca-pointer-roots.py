@@ -213,8 +213,8 @@ def check_rewritten_ir(ir):
     if '"gc-live"(ptr %selected' not in selected or "%selected.relocated" not in selected:
         fail("alloca-address select is not represented as an ordinary live pointer")
 
-    if "gc.relocate" in escaped or ".relocated" in escaped:
-        fail("callee-writable alloca received a relocated write-back")
+    if '"gc-live"(ptr %slot)' not in escaped or "%slot.relocated" not in escaped:
+        fail("callee-writable alloca is not an explicit rematerialized root")
     statepoint_end = escaped.index("@llvm.experimental.gc.statepoint")
     if re.search(r"store ptr .*ptr %slot", escaped[statepoint_end:]):
         fail("callee-writable alloca is stored after the call")
@@ -222,8 +222,10 @@ def check_rewritten_ir(ir):
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir
     )
-    if len(relocates) != 2:
-        fail(f"found {len(relocates)} scalar relocates, want 2")
+    # Eighteen alloca roots use gc.relocate as a rematerialized frame address;
+    # the remaining two are ordinary movable scalar roots.
+    if len(relocates) != 20:
+        fail(f"found {len(relocates)} relocates, want 20")
     uninitialized = function_body(ir, "alloca_uninitialized_at_safepoint")
     if '"gc-live"(ptr %pointer' not in uninitialized:
         fail("ordinary scalar SSA pointer is missing from gc-live")

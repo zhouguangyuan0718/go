@@ -37,11 +37,14 @@ the old uses make the required reaching definition explicit, and LLVM's public
 relocation PHIs. This applies the same SSA construction to straight-line code,
 conditional paths, loop backedges, and irreducible control flow.
 Static `alloca` addresses and constant GEP/cast forms derived from them are
-native frame addresses, not Go heap pointers, and are excluded from `gc-live`.
-SelectionDAG rematerializes those addresses from their fixed frame indexes
-after stack growth. A PHI/select of stack addresses cannot be rematerialized as
-one frame index, so the merged pointer is an ordinary `gc-live` value. Pointer
-values loaded from the allocation remain ordinary tracked roots.
+native frame addresses, not Go heap pointers. Pointer-containing allocas are
+explicit `gc-live` values while their storage is active so the adjacent alloca
+ptrmap describes their contents; SelectionDAG rematerializes their
+`gc.relocate` results from the same fixed frame index. Other direct alloca
+addresses need no root. A PHI/select of stack addresses cannot be
+rematerialized as one frame index, so the merged pointer is an ordinary
+`gc-live` value. Pointer values loaded from the allocation remain ordinary
+tracked roots.
 
 The current SSA value and CFG rewrite support matrix is:
 
@@ -57,7 +60,7 @@ The current SSA value and CFG rewrite support matrix is:
 | Fixed struct/array SSA aggregates | Supported | Pointer leaves are scalarized before liveness and reconstructed from the current relocated SSA leaves. |
 | Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
 | Aggregate load results and store operands | Supported | First-class SSA values use aggregate normalization. Pointer leaves in surviving fixed allocas remain memory roots described by the alloca deopt layout protocol. |
-| Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Pointer slots are zero-initialized once. Both direct-only and address-observable allocas use the same deopt layout protocol and conservative `LocalsPointerMaps`; a record-kind tag makes only the latter emit `FUNCDATA_StackObjects`. No synthetic per-call load, relocation, or write-back is introduced. |
+| Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Pointer slots are zero-initialized at each definite lifetime start. An active alloca is an explicit `gc-live` root with a rematerialized `gc.relocate`; its ptrmap contributes callsite `LocalsPointerMaps`. A record-kind tag additionally makes address-observable or lifetime-ambiguous allocas function-wide `FUNCDATA_StackObjects`. No synthetic per-field load or write-back is introduced. |
 | Fixed and scalable vectors | Unsupported | Vector lane and scalable-count semantics require a separate design; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
 | `invoke`, `callbr`, non-deopt operand bundles, unsupported parameter attributes, and `musttail` | Unsupported | One ordinary deopt bundle is preserved before the alloca suffix. `nest`, `captures`, and `readonly` parameter attributes are preserved; other shapes fail closed. |
@@ -112,39 +115,54 @@ constant address derivation, and local PHI/select uses remain compiler
 controlled. The frontend Addrtaken metadata is provenance only and never keeps
 an alloca alive or overrides this final structural classification.
 
-For every surviving fixed object, the plugin enumerates pointer offsets,
-zeroes those pointer slots once, and appends one record per alloca to every
-ordinary statepoint's deopt operands. The record carries a `LocalsOnly` or
-`StackObject` kind tag, the alloca address, whole-object size and alignment,
-pointer size, valid bitmap bit count, and 64-bit bitmap words. The envelope and
-every record carry explicit lengths, and a trailing duplicate envelope length
-makes the suffix recoverable after ordinary deopt operands. There is
-deliberately no contract version in the first grammar.
+For every surviving fixed object, the plugin enumerates pointer offsets and
+uses LLVM's `StackLifetime` may/must analysis over
+`llvm.lifetime.start`/`llvm.lifetime.end`. Pointer slots are zeroed immediately
+after each definite lifetime start, and the alloca enters `gc-live` only at
+statepoints where that lifetime is definitely active. Legacy IR without
+markers retains frame-entry initialization and whole-frame liveness. A
+path-dependent lifetime at one callsite falls back to an entry-initialized,
+whole-frame-live StackObject. The original lifetime markers remain in IR for
+the normal code-generation pipeline. The record
+carries a `LocalsOnly` or `StackObject` kind tag, the alloca address,
+whole-object size and alignment, pointer size, valid bitmap bit count, and
+64-bit bitmap words. The envelope and every record carry explicit lengths, and
+a trailing duplicate envelope length makes the suffix recoverable after
+ordinary deopt operands. There is deliberately no contract version in the
+first grammar.
 
-LowerStatepoint lowers the deopt alloca address through its normal direct
-FrameIndex path and preserves the adjacent constants in Machine StackMaps. It
-does not create a root spill. The Go-owned StackMaps bridge retains the deopt
-prefix and resolves both inline constants and `ConstantIndex` values. The
-GoObj writer strictly parses the suffix and maps every direct frame location
-plus bitmap bit to conservative `LocalsPointerMaps`. `StackObject` records
-additionally emit native-layout `FUNCDATA_StackObjects` plus content-addressed
-GC bitmaps; `LocalsOnly` records do not. It fails closed on malformed lengths,
-non-direct bases, inconsistent layout, nonzero padding, duplicates, overlaps,
-or locations outside the GC locals range. The deopt grammar does not escape
-the object writer.
+LowerStatepoint lowers both the deopt alloca address and explicit `gc-live`
+alloca through their normal direct FrameIndex paths and preserves the adjacent
+constants in Machine StackMaps. For `gc "goallc"`, a static alloca used only
+as a deopt layout carrier is not implicitly promoted to a GC root; explicit
+`gc-live` is the activity signal. The resulting `gc.relocate(alloca)` is
+`NoRelocate` and rematerializes the same frame index, so no root spill is
+created. The Go-owned StackMaps bridge retains the deopt prefix and resolves
+both inline constants and `ConstantIndex` values. The GoObj writer strictly
+parses the suffix and maps every active direct alloca plus bitmap bit to that
+callsite's `LocalsPointerMaps`. `StackObject` records additionally remain
+identical at every ordinary statepoint and emit native-layout
+`FUNCDATA_StackObjects` plus content-addressed GC bitmaps; `LocalsOnly` records
+do not. The writer fails closed on malformed lengths, non-direct bases,
+inconsistent layout, nonzero padding, duplicates, overlaps, or locations
+outside the GC locals range. The deopt grammar does not escape the object
+writer.
+
+Because a StackObject record describes one function-wide frame object, the
+plugin marks that alloca with `llvm.stackcoloring.no_merge`. Stack coloring
+keeps that object's frame identity while remaining enabled for unrelated
+locals.
 
 The alloca memory remains the source of truth while the call executes. A
 callee may clear or replace fields through an address argument, and the caller
 observes those changes because no relocated pre-call SSA value is written back.
 
-This first implementation conservatively records every surviving alloca
-pointer leaf at every safepoint for the lifetime of the frame. StackObjects
-provide native object identity and layout, but do not themselves make an
-object live; retaining the Locals bits avoids missed roots until precise static
-object liveness is available. Constants are not roots in the general SSA
-model. Alloca records describe memory layout even when a slot contains null.
-Dynamic, multiple-element, scalable, or realigned allocas and pointer vectors
-still fail closed.
+StackObjects provide native object identity and layout, but do not themselves
+make an object live. The lifetime-specific Locals bits retain active pointer
+contents, while inactive calls omit them. Constants are not roots in the
+general SSA model. Alloca records describe memory layout even when a slot
+contains null. Dynamic, multiple-element, scalable, or realigned allocas and
+pointer vectors still fail closed.
 
 LLVM's generic `RewriteStatepointsForGC` pass is the design reference for
 liveness and relocation SSA formation. GoALLC does not run it directly:
@@ -154,15 +172,18 @@ narrow Go ABI contract above.
 
 The final combined order is:
 
-1. **Optimized alloca classification.** Enumerate and zero pointer leaves, then
-   classify final IR uses as address-observable stack objects or direct-only
-   locals. Add one kind-tagged deopt record for either form.
+1. **Optimized alloca classification.** Enumerate pointer leaves, classify
+   final IR uses as address-observable stack objects or direct-only locals,
+   and query LLVM `StackLifetime` at each call. Zero pointer leaves at each
+   definite start; ambiguous lifetime falls back to an entry-initialized
+   StackObject.
 2. **Aggregate normalization.** Use aggregate-only liveness to find and
    decompose supported live first-class struct/array values, then rebuild
    aggregates immediately before their uses.
-3. **Scalar statepoint insertion.** Compute liveness, build scalar-only
-   `gc-live` bundles, append the alloca records to deopt, and emit `gc.result`
-   and `gc.relocate` only for ordinary SSA roots.
+3. **Scalar statepoint insertion.** Compute liveness, put each active alloca
+   and ordinary scalar root in `gc-live`, append the alloca ptrmap records to
+   deopt, and emit `gc.result` plus `gc.relocate`. Static alloca relocates are
+   rematerialized and excluded from relocation-SSA repair.
 4. **Whole-function relocation SSA.** Model the original scalar definition and
    every relocate as stores to temporary promotable allocas, rewrite old uses
    through loads, and call the public `PromoteMemToReg` utility. This constructs
@@ -219,7 +240,8 @@ contributes an args pointer bit. A `Direct SP+offset` stack address contributes
 to neither bitmap as an ordinary GC root because the address itself, rather
 than the slot contents, is the pointer. Inside a validated alloca deopt record,
 the same direct location is instead the frame base whose bitmap selects memory
-slots. Static alloca addresses are excluded from `gc-live` before this point.
+slots. Its contents are active only when a matching explicit direct alloca
+also occurs in the statepoint's GC operands.
 
 Ordinary stack inputs use the same statepoint path. SelectionDAG formal
 lowering records a value home only when a Go ABI pointer part is a direct,
@@ -271,10 +293,10 @@ does not resolve to one unique direct frame object at offset zero.
 merged alloca address is an ordinary pointer root rather than object contents.
 ArgLive is not a replacement for the entry argument bitmap.
 
-TODO: add native-style per-PC static-object liveness so pointer leaves of dead
-address-taken objects stop retaining heap objects. This is an optimization of
-the conservative locals-map implementation, not a prerequisite for correct
-scanning or relocation.
+TODO: emit precise lifetime ends from Go liveness so pointer leaves can stop
+retaining heap objects after their last semantic use. The current frontend
+mostly emits lifetime starts; LLVM `StackLifetime` therefore remains
+conservative after a start when no end marker exists.
 
 TODO: LLVM opaque pointer types currently make the first itab/type word of a
 Go interface and pointers to `NotInHeap` types look like ordinary GC pointers.
