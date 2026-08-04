@@ -19,6 +19,12 @@ type llvmDirectIfaceNested struct {
 //go:noinline
 func llvmDirectIfaceSink(llvmDirectIfaceNested) {}
 
+// Extracting the data word from a constant interface may fold directly to the
+// referenced Go global. It must retain that global's symbol name.
+//
+// LLVM-LABEL: define goabiinternal void @codegen.llvmIDataConstant(
+// LLVM: store ptr @runtime.zeroVal
+
 // A direct-interface aggregate is physically one pointer in the interface
 // data word. Rebuild the logical nested aggregate before passing it through
 // the ordinary ABI call path.
@@ -34,4 +40,16 @@ func llvmDirectIfaceCall(x any) {
 	case llvmDirectIfaceNested:
 		llvmDirectIfaceSink(x)
 	}
+}
+
+type llvmIDataZero struct {
+	ok    bool
+	value int
+}
+
+//go:noinline
+func llvmIDataSink(...any) {}
+
+func llvmIDataConstant() {
+	llvmIDataSink(llvmIDataZero{})
 }
