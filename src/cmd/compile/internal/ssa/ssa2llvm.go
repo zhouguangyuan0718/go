@@ -295,6 +295,73 @@ func (lfc *LLVMFuncContext) llvmTernaryIntrinsic(v *Value, name string) llvm.Val
 	return lfc.b.CreateCall(sig, fn, []llvm.Value{x, y, z}, v.String())
 }
 
+func (lfc *LLVMFuncContext) carryBorrow(v *Value, intrinsic string) llvm.Value {
+	x, y, carryIn := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
+	i64 := GlobalCtxt.Int64Type()
+	if x.Type() != i64 || y.Type() != i64 || carryIn.Type() != i64 {
+		v.Fatalf("%s requires three i64 operands", v.Op)
+	}
+
+	i1 := GlobalCtxt.Int1Type()
+	overflowType := llvm.StructType([]llvm.Type{i64, i1}, false)
+	sig := llvm.FunctionType(overflowType, []llvm.Type{i64, i64}, false)
+	fn := getOrInsertLLVMIntrinsic(intrinsic, sig)
+	first := lfc.b.CreateCall(sig, fn, []llvm.Value{x, y}, v.String()+".first")
+	value := lfc.b.CreateExtractValue(first, 0, v.String()+".value1")
+	overflow1 := lfc.b.CreateExtractValue(first, 1, v.String()+".overflow1")
+	second := lfc.b.CreateCall(sig, fn, []llvm.Value{value, carryIn}, v.String()+".second")
+	value = lfc.b.CreateExtractValue(second, 0, v.String()+".value")
+	overflow2 := lfc.b.CreateExtractValue(second, 1, v.String()+".overflow2")
+	overflow := lfc.b.CreateOr(overflow1, overflow2, v.String()+".overflow")
+	carry := lfc.b.CreateZExt(overflow, i64, v.String()+".carry")
+
+	resultType := getLLVMType(v.Type)
+	if resultType.TypeKind() != llvm.StructTypeKind {
+		v.Fatalf("%s has a non-struct LLVM result", v.Op)
+	}
+	fields := resultType.StructElementTypes()
+	if len(fields) != 2 || fields[0] != i64 || fields[1] != i64 {
+		v.Fatalf("%s has an incompatible LLVM result tuple", v.Op)
+	}
+	result := llvm.Undef(resultType)
+	result = lfc.b.CreateInsertValue(result, value, 0, "")
+	result = lfc.b.CreateInsertValue(result, carry, 1, "")
+	result.SetName(v.String())
+	return result
+}
+
+func llvmTupleFieldCount(typ *types.Type) int {
+	switch typ.Kind() {
+	case types.TTUPLE:
+		return 2
+	case types.TRESULTS:
+		return typ.NumFields()
+	default:
+		base.Fatalf("LLVM tuple field count requested for %v", typ)
+		return 0
+	}
+}
+
+func (lfc *LLVMFuncContext) selectPureTuple(v, src *Value, sel int) llvm.Value {
+	if src.Type.Kind() != types.TTUPLE && src.Type.Kind() != types.TRESULTS {
+		v.Fatalf("%s selects unsupported tuple source %s", v.Op, src.Op)
+	}
+	fields := llvmTupleFieldCount(src.Type)
+	for i := 0; i < fields; i++ {
+		if src.Type.FieldType(i).IsMemory() {
+			v.Fatalf("%s selects unsupported memory tuple source %s", v.Op, src.Op)
+		}
+	}
+	if sel < 0 || sel >= fields {
+		v.Fatalf("%s selects tuple field %d from %d fields", v.Op, sel, fields)
+	}
+	tuple := lfc.GenLV(src)
+	if tuple.Type().TypeKind() != llvm.StructTypeKind || len(tuple.Type().StructElementTypes()) != fields {
+		v.Fatalf("%s source %s has an incompatible LLVM tuple", v.Op, src.Op)
+	}
+	return lfc.b.CreateExtractValue(tuple, sel, v.String())
+}
+
 func (lfc *LLVMFuncContext) bitLen(v *Value) llvm.Value {
 	x := lfc.GenLV(v.Args[0])
 	if x.Type().TypeKind() != llvm.IntegerTypeKind {
@@ -822,7 +889,7 @@ func (lfc *LLVMFuncContext) aggregate(v *Value, args []*Value) llvm.Value {
 		v.Fatalf("%s has non-aggregate LLVM kind %s", v.Op, result.Type().TypeKind())
 	}
 	wantElements := len(args)
-	if llvmStructHasTailPad(v.Type) {
+	if v.Type.Kind() == types.TSTRUCT && llvmStructHasTailPad(v.Type) {
 		wantElements++
 	}
 	if len(elementTypes) != wantElements {
@@ -1392,12 +1459,18 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		strVal.SetGlobalConstant(true)
 		strLen := llvm.ConstInt(getLLVMType(types.Types[types.TINT]), uint64(len(str)), false)
 		lVal = llvm.ConstStruct([]llvm.Value{strVal, strLen}, false)
+	case OpMakeTuple:
+		lVal = lfc.aggregate(v, v.Args)
 	case OpAdd64, OpAdd32, OpAdd16, OpAdd8:
 		lVal = lfc.b.CreateAdd(arg0(), arg1(), v.String())
+	case OpAdd64carry:
+		lVal = lfc.carryBorrow(v, "llvm.uadd.with.overflow.i64")
 	case OpAdd32F, OpAdd64F:
 		lVal = lfc.b.CreateFAdd(arg0(), arg1(), v.String())
 	case OpSub64, OpSub32, OpSub16, OpSub8:
 		lVal = lfc.b.CreateSub(arg0(), arg1(), v.String())
+	case OpSub64borrow:
+		lVal = lfc.carryBorrow(v, "llvm.usub.with.overflow.i64")
 	case OpSub32F, OpSub64F:
 		lVal = lfc.b.CreateFSub(arg0(), arg1(), v.String())
 	case OpMul64, OpMul32, OpMul16, OpMul8:
@@ -1648,7 +1721,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 				lVal = call
 			}
 		default:
-			v.Fatalf("%s selects unsupported tuple source %s", v.Op, src.Op)
+			lVal = lfc.selectPureTuple(v, src, sel)
 		}
 	case OpSelectN:
 		sel := int(auxIntToInt64(v.AuxInt))
@@ -2261,7 +2334,7 @@ func getLLVMType(typ *types.Type) llvm.Type {
 		lType = llvm.StructType([]llvm.Type{GlobalCtxt.DoubleType(), GlobalCtxt.DoubleType()}, false)
 	case types.TTUPLE, types.TRESULTS:
 		var fields []llvm.Type
-		for i := 0; i < typ.NumFields(); i++ {
+		for i, count := 0, llvmTupleFieldCount(typ); i < count; i++ {
 			if field := typ.FieldType(i); !field.IsMemory() {
 				fields = append(fields, getLLVMType(field))
 			}
