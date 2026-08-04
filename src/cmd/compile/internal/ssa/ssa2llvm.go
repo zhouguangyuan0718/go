@@ -262,6 +262,22 @@ func getOrInsertLLVMIntrinsic(name string, typ llvm.Type) llvm.Value {
 	return fn
 }
 
+func (lfc *LLVMFuncContext) llvmLifetimeStart(slot llvmStackSlot) {
+	sig := llvm.FunctionType(
+		GlobalCtxt.VoidType(),
+		[]llvm.Type{GlobalCtxt.PointerType(0)},
+		false,
+	)
+	fn := getOrInsertLLVMIntrinsic("llvm.lifetime.start.p0", sig)
+	lfc.b.CreateCall(sig, fn, []llvm.Value{slot.Value}, "")
+}
+
+func (lfc *LLVMFuncContext) llvmFakeUse(value llvm.Value) {
+	sig := llvm.FunctionType(GlobalCtxt.VoidType(), nil, true)
+	fn := getOrInsertLLVMIntrinsic("llvm.fake.use", sig)
+	lfc.b.CreateCall(sig, fn, []llvm.Value{value}, "")
+}
+
 func (lfc *LLVMFuncContext) llvmUnaryIntrinsic(v *Value, name string) llvm.Value {
 	x := lfc.GenLV(v.Args[0])
 	want := getLLVMType(v.Type)
@@ -1316,6 +1332,9 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 // homes.
 func (lfc *LLVMFuncContext) materializeAddressedResults(v *Value, call llvm.Value, aux *AuxCall) {
 	for _, result := range lfc.AddressedResults[v.ID] {
+		if result.Slot.Type.HasPointers() {
+			lfc.llvmLifetimeStart(result.Slot)
+		}
 		value := call
 		if aux.NResults() > 1 {
 			value = lfc.b.CreateExtractValue(call, int(result.Index), result.Owner.String()+".value")
@@ -1444,8 +1463,22 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		if !v.Type.IsMemory() && v.Type != types.TypeInvalid {
 			lVal = llvm.Undef(getLLVMType(v.Type))
 		}
-	case OpVarDef, OpVarLive:
+	case OpVarDef:
 		lVal = arg0()
+		if name, ok := v.Aux.(*ir.Name); ok {
+			if slot, ok := lfc.Locals[llvmLocalKeyForName(name)]; ok {
+				if slot.Type.HasPointers() {
+					lfc.llvmLifetimeStart(slot)
+				}
+			}
+		}
+	case OpVarLive:
+		lVal = arg0()
+		if name, ok := v.Aux.(*ir.Name); ok {
+			if slot, ok := lfc.Locals[llvmLocalKeyForName(name)]; ok && slot.Type.HasPointers() {
+				lfc.llvmFakeUse(slot.Value)
+			}
+		}
 	case OpKeepAlive:
 		lVal = arg1()
 	case OpLocalAddr:
@@ -2165,6 +2198,18 @@ func LLVMCompile(f *Func) {
 	// cannot become dynamic allocas (which Go stack growth cannot support).
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
 	var parameterHomes []*Value
+	localHasVarDef := make(map[llvmLocalKey]bool)
+	for _, BB := range f.Blocks {
+		for _, v := range BB.Values {
+			if v.Op != OpVarDef {
+				continue
+			}
+			if name, ok := v.Aux.(*ir.Name); ok {
+				localHasVarDef[llvmLocalKeyForName(name)] = true
+			}
+		}
+	}
+	var entryLifetimeSlots []llvmStackSlot
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
 			if v.Op != OpLocalAddr || v.Uses == 0 {
@@ -2198,6 +2243,9 @@ func LLVMCompile(f *Func) {
 			FCtxt.Locals[key] = llvmStackSlot{Value: slot, Type: name.Type()}
 			if name.Class == ir.PPARAM {
 				parameterHomes = append(parameterHomes, v)
+			}
+			if name.Type().HasPointers() && (name.Class == ir.PPARAM || !localHasVarDef[key]) {
+				entryLifetimeSlots = append(entryLifetimeSlots, FCtxt.Locals[key])
 			}
 		}
 	}
@@ -2246,6 +2294,9 @@ func LLVMCompile(f *Func) {
 			}
 			FCtxt.ResultSlots[v.ID] = slot.Value
 		}
+	}
+	for _, slot := range entryLifetimeSlots {
+		FCtxt.llvmLifetimeStart(slot)
 	}
 	// LLVM requires all phi nodes to precede non-phi instructions in a
 	// block. Predeclare them before recursive value emission can insert any
