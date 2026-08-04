@@ -84,6 +84,16 @@ func bitLen32(x uint32) int {
 }
 
 //go:noinline
+func add64Carry(x, y, carry uint64) (uint64, uint64) {
+	return bits.Add64(x, y, carry)
+}
+
+//go:noinline
+func sub64Borrow(x, y, borrow uint64) (uint64, uint64) {
+	return bits.Sub64(x, y, borrow)
+}
+
+//go:noinline
 func selectInt(cond, x, y int) int {
 	return subtle.ConstantTimeSelect(cond, x, y)
 }
@@ -166,6 +176,18 @@ func main() {
 	}
 	if bitLen64(0) != 0 || bitLen64(1<<63) != 64 || bitLen32(1<<31) != 32 {
 		panic("bit length semantics")
+	}
+	if sum, carry := add64Carry(^uint64(0), 0, 1); sum != 0 || carry != 1 {
+		panic("add carry semantics")
+	}
+	if sum, carry := add64Carry(41, 1, 0); sum != 42 || carry != 0 {
+		panic("add without carry semantics")
+	}
+	if difference, borrow := sub64Borrow(0, 0, 1); difference != ^uint64(0) || borrow != 1 {
+		panic("sub borrow semantics")
+	}
+	if difference, borrow := sub64Borrow(43, 1, 0); difference != 42 || borrow != 0 {
+		panic("sub without borrow semantics")
 	}
 	if selectInt(1, 11, 22) != 11 || selectInt(0, 11, 22) != 22 {
 		panic("conditional select semantics")
