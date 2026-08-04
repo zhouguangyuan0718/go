@@ -196,6 +196,14 @@ func llvmNullPointerIsValidAttribute() llvm.Attribute {
 	return GlobalCtxt.CreateEnumAttribute(kind, 0)
 }
 
+func llvmNoInlineAttribute() llvm.Attribute {
+	kind := llvm.AttributeKindID("noinline")
+	if kind == 0 {
+		base.Fatalf("LLVM does not provide the noinline function attribute")
+	}
+	return GlobalCtxt.CreateEnumAttribute(kind, 0)
+}
+
 func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallConv) {
 	fn.SetFunctionCallConv(cc)
 	if sig.ResultCount > 1 {
@@ -254,15 +262,132 @@ func getOrInsertLLVMIntrinsic(name string, typ llvm.Type) llvm.Value {
 	return fn
 }
 
-func (lfc *LLVMFuncContext) llvmUnaryFloat64Intrinsic(v *Value, name string) llvm.Value {
+func (lfc *LLVMFuncContext) llvmUnaryIntrinsic(v *Value, name string) llvm.Value {
 	x := lfc.GenLV(v.Args[0])
-	f64 := GlobalCtxt.DoubleType()
-	if got, want := x.Type(), f64; got != want || getLLVMType(v.Type) != want {
-		v.Fatalf("%s requires a float64 operand and result", v.Op)
+	want := getLLVMType(v.Type)
+	if x.Type() != want {
+		v.Fatalf("%s has incompatible LLVM operand and result types", v.Op)
 	}
-	sig := llvm.FunctionType(f64, []llvm.Type{f64}, false)
+	sig := llvm.FunctionType(want, []llvm.Type{want}, false)
 	fn := getOrInsertLLVMIntrinsic(name, sig)
 	return lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String())
+}
+
+func (lfc *LLVMFuncContext) llvmBinaryIntrinsic(v *Value, name string) llvm.Value {
+	x, y := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1])
+	want := getLLVMType(v.Type)
+	if x.Type() != want || y.Type() != want {
+		v.Fatalf("%s has incompatible LLVM operand and result types", v.Op)
+	}
+	sig := llvm.FunctionType(want, []llvm.Type{want, want}, false)
+	fn := getOrInsertLLVMIntrinsic(name, sig)
+	return lfc.b.CreateCall(sig, fn, []llvm.Value{x, y}, v.String())
+}
+
+func (lfc *LLVMFuncContext) llvmTernaryIntrinsic(v *Value, name string) llvm.Value {
+	x, y, z := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
+	want := getLLVMType(v.Type)
+	if x.Type() != want || y.Type() != want || z.Type() != want {
+		v.Fatalf("%s has incompatible LLVM operand and result types", v.Op)
+	}
+	sig := llvm.FunctionType(want, []llvm.Type{want, want, want}, false)
+	fn := getOrInsertLLVMIntrinsic(name, sig)
+	return lfc.b.CreateCall(sig, fn, []llvm.Value{x, y, z}, v.String())
+}
+
+func (lfc *LLVMFuncContext) bitLen(v *Value) llvm.Value {
+	x := lfc.GenLV(v.Args[0])
+	if x.Type().TypeKind() != llvm.IntegerTypeKind {
+		v.Fatalf("%s has a non-integer LLVM operand", v.Op)
+	}
+	bits := x.Type().IntTypeWidth()
+	if bits != 8 && bits != 16 && bits != 32 && bits != 64 {
+		v.Fatalf("%s has unsupported operand width %d", v.Op, bits)
+	}
+
+	i1 := GlobalCtxt.Int1Type()
+	sig := llvm.FunctionType(x.Type(), []llvm.Type{x.Type(), i1}, false)
+	fn := getOrInsertLLVMIntrinsic("llvm.ctlz.i"+fmt.Sprint(bits), sig)
+	leading := lfc.b.CreateCall(sig, fn, []llvm.Value{
+		x,
+		llvm.ConstInt(i1, 0, false), // ctlz(0, false) is the operand width.
+	}, v.String()+".leading")
+	length := lfc.b.CreateSub(llvm.ConstInt(x.Type(), uint64(bits), false), leading, v.String()+".width")
+
+	want := getLLVMType(v.Type)
+	if want.TypeKind() != llvm.IntegerTypeKind {
+		v.Fatalf("%s has a non-integer LLVM result", v.Op)
+	}
+	switch {
+	case bits < want.IntTypeWidth():
+		return lfc.b.CreateZExt(length, want, v.String())
+	case bits > want.IntTypeWidth():
+		return lfc.b.CreateTrunc(length, want, v.String())
+	default:
+		length.SetName(v.String())
+		return length
+	}
+}
+
+func (lfc *LLVMFuncContext) callerPC(v *Value) llvm.Value {
+	// LLVM's caller-state intrinsics do not themselves prevent inlining. Go
+	// already made its inlining decision before this point, so preserve that
+	// established frame boundary through the LLVM pipeline.
+	lfc.LF.AddFunctionAttr(llvmNoInlineAttribute())
+
+	ptr := GlobalCtxt.PointerType(0)
+	i32 := GlobalCtxt.Int32Type()
+	sig := llvm.FunctionType(ptr, []llvm.Type{i32}, false)
+	fn := getOrInsertLLVMIntrinsic("llvm.returnaddress", sig)
+	pc := lfc.b.CreateCall(sig, fn, []llvm.Value{llvm.ConstInt(i32, 0, false)}, v.String()+".ptr")
+	want := getLLVMType(v.Type)
+	if want.TypeKind() != llvm.IntegerTypeKind || want.IntTypeWidth() != int(lfc.F.Config.PtrSize*8) {
+		v.Fatalf("GetCallerPC has incompatible LLVM result type")
+	}
+	return lfc.b.CreatePtrToInt(pc, want, v.String())
+}
+
+func (lfc *LLVMFuncContext) callerSP(v *Value) llvm.Value {
+	lfc.LF.AddFunctionAttr(llvmNoInlineAttribute())
+
+	ptr := GlobalCtxt.PointerType(0)
+	sig := llvm.FunctionType(ptr, nil, false)
+	var sp llvm.Value
+	switch lfc.F.Config.arch {
+	case "arm64":
+		// AArch64 implements sponentry as a fixed frame object at offset zero,
+		// which remains the entry SP after fixed or dynamically chosen frames.
+		fn := getOrInsertLLVMIntrinsic("llvm.sponentry", sig)
+		sp = lfc.b.CreateCall(sig, fn, nil, v.String()+".ptr")
+	case "amd64", "386":
+		// On x86 the call instruction stores the return PC immediately below
+		// the caller's SP. addressofreturnaddress is frame-layout aware, unlike
+		// reading SP and adding the current frame size.
+		fn := getOrInsertLLVMIntrinsic("llvm.addressofreturnaddress", sig)
+		returnSlot := lfc.b.CreateCall(sig, fn, nil, v.String()+".returnslot")
+		offset := llvm.ConstInt(getLLVMType(types.Types[types.TUINTPTR]), uint64(lfc.F.Config.PtrSize), false)
+		sp = lfc.b.CreateGEP(GlobalCtxt.Int8Type(), returnSlot, []llvm.Value{offset}, v.String()+".ptr")
+	default:
+		v.Fatalf("GetCallerSP is unsupported for LLVM target %s", lfc.F.Config.arch)
+	}
+
+	want := getLLVMType(v.Type)
+	if want.TypeKind() != llvm.IntegerTypeKind || want.IntTypeWidth() != int(lfc.F.Config.PtrSize*8) {
+		v.Fatalf("GetCallerSP has incompatible LLVM result type")
+	}
+	return lfc.b.CreatePtrToInt(sp, want, v.String())
+}
+
+func (lfc *LLVMFuncContext) stackAddress(v *Value) llvm.Value {
+	ptr := GlobalCtxt.PointerType(0)
+	sig := llvm.FunctionType(ptr, nil, false)
+	fn := getOrInsertLLVMIntrinsic("llvm.stackaddress.p0", sig)
+	sp := lfc.b.CreateCall(sig, fn, nil, v.String()+".ptr")
+	want := getLLVMType(v.Type)
+	if want.TypeKind() != llvm.IntegerTypeKind || want.IntTypeWidth() != int(lfc.F.Config.PtrSize*8) {
+		v.Fatalf("SP has incompatible LLVM result type")
+	}
+	return lfc.b.CreatePtrToInt(sp, want, v.String())
 }
 
 func markLLVMGCLeaf(fn, call llvm.Value) {
@@ -533,8 +658,14 @@ func (lfc *LLVMFuncContext) shift(v *Value, kind llvmShiftKind) llvm.Value {
 func (lfc *LLVMFuncContext) rotateLeft(v *Value) llvm.Value {
 	x := lfc.GenLV(v.Args[0])
 	count := lfc.GenLV(v.Args[1])
-	if x.Type().TypeKind() != llvm.IntegerTypeKind || count.Type() != x.Type() || x.Type() != getLLVMType(v.Type) {
+	if x.Type().TypeKind() != llvm.IntegerTypeKind || count.Type().TypeKind() != llvm.IntegerTypeKind || x.Type() != getLLVMType(v.Type) {
 		v.Fatalf("%s has incompatible LLVM operand types", v.Op)
+	}
+	switch {
+	case count.Type().IntTypeWidth() < x.Type().IntTypeWidth():
+		count = lfc.b.CreateZExt(count, x.Type(), v.String()+".count")
+	case count.Type().IntTypeWidth() > x.Type().IntTypeWidth():
+		count = lfc.b.CreateTrunc(count, x.Type(), v.String()+".count")
 	}
 	sig := llvm.FunctionType(x.Type(), []llvm.Type{x.Type(), x.Type(), x.Type()}, false)
 	fn := getOrInsertLLVMIntrinsic("llvm.fshl.i"+fmt.Sprint(x.Type().IntTypeWidth()), sig)
@@ -1181,9 +1312,13 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	arg0 := func() llvm.Value { return lfc.GenLV(v.Args[0]) }
 	arg1 := func() llvm.Value { return lfc.GenLV(v.Args[1]) }
 	switch v.Op {
-	case OpInitMem, OpSP, OpSB, OpInlMark, OpWBend:
+	case OpInitMem, OpSB, OpInlMark, OpWBend:
 		// LLVM models memory ordering through instruction dependencies, not an
-		// explicit SSA memory value. SP/SB are only address-space tokens here.
+		// explicit SSA memory value. SB is only an address-space token here.
+	case OpSP:
+		// Unlike SB, SP can participate in integer expressions such as the
+		// caller-frame-size calculation emitted for GetCallerSP.
+		lVal = lfc.stackAddress(v)
 	case OpUnknown:
 		// SSA construction leaves Unknown values only in dead code. Preserve
 		// their "value does not matter" semantics as LLVM undef; live Go
@@ -1210,6 +1345,10 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			v.Fatalf("closure context requested by a function without a closure ABI parameter")
 		}
 		lVal = lfc.ClosureContext
+	case OpGetCallerPC:
+		lVal = lfc.callerPC(v)
+	case OpGetCallerSP:
+		lVal = lfc.callerSP(v)
 	case OpAddr:
 		sym, ok := v.Aux.(*obj.LSym)
 		if !ok {
@@ -1297,11 +1436,31 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpNeg32F, OpNeg64F:
 		lVal = lfc.b.CreateFNeg(arg0(), v.String())
 	case OpSqrt:
-		lVal = lfc.llvmUnaryFloat64Intrinsic(v, "llvm.sqrt.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.sqrt.f64")
+	case OpSqrt32:
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.sqrt.f32")
 	case OpAbs:
-		lVal = lfc.llvmUnaryFloat64Intrinsic(v, "llvm.fabs.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.fabs.f64")
+	case OpFloor:
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.floor.f64")
+	case OpCeil:
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.ceil.f64")
 	case OpTrunc:
-		lVal = lfc.llvmUnaryFloat64Intrinsic(v, "llvm.trunc.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.trunc.f64")
+	case OpRound:
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.round.f64")
+	case OpRoundToEven:
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.roundeven.f64")
+	case OpMin64F:
+		lVal = lfc.llvmBinaryIntrinsic(v, "llvm.minimum.f64")
+	case OpMin32F:
+		lVal = lfc.llvmBinaryIntrinsic(v, "llvm.minimum.f32")
+	case OpMax64F:
+		lVal = lfc.llvmBinaryIntrinsic(v, "llvm.maximum.f64")
+	case OpMax32F:
+		lVal = lfc.llvmBinaryIntrinsic(v, "llvm.maximum.f32")
+	case OpFMA:
+		lVal = lfc.llvmTernaryIntrinsic(v, "llvm.fma.f64")
 	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, arg0(), arg1(), v.String()+".i1"), v.String())
 	case OpEqPtr:
@@ -1360,6 +1519,15 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.shift(v, llvmShiftRightUnsigned)
 	case OpRotateLeft64, OpRotateLeft32, OpRotateLeft16, OpRotateLeft8:
 		lVal = lfc.rotateLeft(v)
+	case OpBitLen64, OpBitLen32, OpBitLen16, OpBitLen8:
+		lVal = lfc.bitLen(v)
+	case OpCondSelect:
+		x, y := arg0(), arg1()
+		if x.Type() != y.Type() || x.Type() != getLLVMType(v.Type) {
+			v.Fatalf("%s has incompatible LLVM value types", v.Op)
+		}
+		cond := lfc.llvmCondition(lfc.GenLV(v.Args[2]), v.String()+".cond")
+		lVal = lfc.b.CreateSelect(cond, x, y, v.String())
 	case OpSignExt8to16, OpSignExt8to32, OpSignExt8to64,
 		OpSignExt16to32, OpSignExt16to64, OpSignExt32to64:
 		lVal = lfc.b.CreateSExt(arg0(), getLLVMType(v.Type), v.String())
@@ -1463,7 +1631,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
 			OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
 			OpAtomicExchange32, OpAtomicExchange32Variant,
+			OpAtomicAnd64value, OpAtomicAnd64valueVariant,
+			OpAtomicAnd32value, OpAtomicAnd32valueVariant,
+			OpAtomicAnd8value, OpAtomicAnd8valueVariant,
 			OpAtomicOr64value, OpAtomicOr64valueVariant,
+			OpAtomicOr32value, OpAtomicOr32valueVariant,
+			OpAtomicOr8value, OpAtomicOr8valueVariant,
 			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
 			load := lfc.GenLV(src)
 			if sel == 0 {
@@ -1499,7 +1672,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
 			OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
 			OpAtomicExchange32, OpAtomicExchange32Variant,
+			OpAtomicAnd64value, OpAtomicAnd64valueVariant,
+			OpAtomicAnd32value, OpAtomicAnd32valueVariant,
+			OpAtomicAnd8value, OpAtomicAnd8valueVariant,
 			OpAtomicOr64value, OpAtomicOr64valueVariant,
+			OpAtomicOr32value, OpAtomicOr32valueVariant,
+			OpAtomicOr8value, OpAtomicOr8valueVariant,
 			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
 			load := lfc.GenLV(src)
 			if sel == 0 {
@@ -1585,7 +1763,20 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-	case OpAtomicOr64value, OpAtomicOr64valueVariant:
+	case OpAtomicAnd8, OpAtomicAnd32,
+		OpAtomicAnd64value, OpAtomicAnd64valueVariant,
+		OpAtomicAnd32value, OpAtomicAnd32valueVariant,
+		OpAtomicAnd8value, OpAtomicAnd8valueVariant:
+		lVal = lfc.b.CreateAtomicRMW(
+			llvm.AtomicRMWBinOpAnd, arg0(), arg1(),
+			llvm.AtomicOrderingSequentiallyConsistent,
+			false,
+		)
+		lVal.SetName(v.String())
+	case OpAtomicOr8, OpAtomicOr32,
+		OpAtomicOr64value, OpAtomicOr64valueVariant,
+		OpAtomicOr32value, OpAtomicOr32valueVariant,
+		OpAtomicOr8value, OpAtomicOr8valueVariant:
 		lVal = lfc.b.CreateAtomicRMW(
 			llvm.AtomicRMWBinOpOr, arg0(), arg1(),
 			llvm.AtomicOrderingSequentiallyConsistent,

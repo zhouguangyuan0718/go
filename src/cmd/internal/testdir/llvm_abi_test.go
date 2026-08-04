@@ -834,6 +834,61 @@ func runLLVMABICommand(t *testing.T, stdin []byte, name string, args ...string) 
 	return out
 }
 
+func runLLVMCallerStateTest(t *testing.T, gorootTestDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "caller-state.a")
+	source := filepath.Join(gorootTestDir, "internal", "runtime", "sys", "inlinegcpc.go")
+	runLLVMABICommand(t, nil, goTool, "tool", "compile",
+		"-p=internal/runtime/sys", "-enablellvm", "-llvmironly", "-o", archive, source)
+	ir, err := os.ReadFile(archive + ".ll")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	patterns := []string{
+		`(?m)^define goabiinternal i64 @"internal/runtime/sys\.pc"\(\) #[0-9]+`,
+		`(?m)^define goabiinternal i64 @"internal/runtime/sys\.sp"\(\) #[0-9]+`,
+		`call ptr @llvm\.returnaddress\(i32 0\)`,
+		`attributes #[0-9]+ = \{ noinline `,
+	}
+	switch runtime.GOARCH {
+	case "arm64":
+		patterns = append(patterns, `call ptr @llvm\.sponentry\(\)`)
+	case "amd64":
+		patterns = append(patterns, `call ptr @llvm\.addressofreturnaddress\(\)`, `getelementptr i8, ptr .*, i64 8`)
+	default:
+		t.Fatalf("unsupported caller-state test architecture %s", runtime.GOARCH)
+	}
+	for _, pattern := range patterns {
+		if !regexp.MustCompile(pattern).Match(ir) {
+			t.Fatalf("caller-state IR does not match %q\n%s", pattern, ir)
+		}
+	}
+
+	opt := llvmToolPath(t, "opt", "GOALLC_OPT")
+	runLLVMABICommand(t, nil, opt, "-passes=verify", "-disable-output", archive+".ll")
+	llc := llvmToolPath(t, "llc", "GOALLC_LLC")
+	plugin := llvmABIPassPlugin(t, llc)
+	runLLVMABICommand(t, nil, llc, "-load-pass-plugin="+plugin,
+		"-filetype=obj", archive+".ll", "-o", filepath.Join(dir, "caller-state.o"))
+
+	appendArchive := filepath.Join(dir, "append.a")
+	appendSource := filepath.Join(gorootTestDir, "codegen", "append.go")
+	runLLVMABICommand(t, nil, goTool, "tool", "compile",
+		"-p=codegen", "-enablellvm", "-llvmironly", "-o", appendArchive, appendSource)
+	appendIR, err := os.ReadFile(appendArchive + ".ll")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(appendIR, []byte("call ptr @llvm.stackaddress.p0()")) {
+		t.Fatalf("append IR does not materialize the current logical SP")
+	}
+	runLLVMABICommand(t, nil, opt, "-passes=verify", "-disable-output", appendArchive+".ll")
+	runLLVMABICommand(t, nil, llc, "-load-pass-plugin="+plugin,
+		"-filetype=obj", appendArchive+".ll", "-o", filepath.Join(dir, "append.o"))
+}
+
 func llvmABIPassPlugin(t *testing.T, llc string) string {
 	t.Helper()
 	if configured := os.Getenv("GOALLC_PASS_PLUGIN"); configured != "" {
