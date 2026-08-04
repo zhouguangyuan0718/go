@@ -1026,7 +1026,18 @@
       "winbatch.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "fixedbugs/issue16985.go": "32-bit atomic exchange preserves sequentially consistent LLVM execution",
       "fixedbugs/issue19182.go": "64-bit atomic addition preserves sequentially consistent cross-goroutine visibility",
-      "fixedbugs/issue71857.go": "64-bit atomic OR returns the previous value through LLVM atomicrmw"
+      "fixedbugs/issue71857.go": "64-bit atomic OR returns the previous value through LLVM atomicrmw",
+      "fixedbugs/issue23522.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue24449.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue5493.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue69507.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue71932.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue80188.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "typeparam/boundmethod.go": "generic bound method calls repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "typeparam/graph.go": "generic graph traversal repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "typeparam/issue51303.go": "generic interface method calls repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "typeparam/metrics.go": "generic metrics aggregation repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "typeparam/stringer.go": "generic Stringer method calls repeatedly qualified through LLVM compile, GoObj link, and execution"
     },
     "blacklist": {
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"
