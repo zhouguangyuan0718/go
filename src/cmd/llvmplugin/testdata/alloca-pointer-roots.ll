@@ -9,6 +9,7 @@ declare goabiinternal void @mutate_pointer_slot(ptr)
 declare goabiinternal void @mutate_nocapture(ptr captures(none))
 declare goabiinternal void @escape_pointer_slot(ptr)
 declare goabiinternal void @unknown_writing()
+declare goabiinternal void @observe_stack_address(ptr)
 declare goabiinternal i64 @readonly_pointer_slot(ptr readonly) memory(read)
 declare goabiinternal i64 @readnone_callee() memory(none)
 
@@ -90,6 +91,37 @@ entry:
   call goabiinternal void @safepoint()
   %result = load ptr, ptr %field, align 8
   ret ptr %result
+}
+
+define goabiinternal void @alloca_direct_address_across_calls()
+    "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca ptr, align 8
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  call goabiinternal void @safepoint()
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  ret void
+}
+
+define goabiinternal void @alloca_gep_value_across_calls()
+    "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca %pointer_field, align 8
+  %field = getelementptr inbounds %pointer_field, ptr %slot, i32 0, i32 1
+  call goabiinternal void @observe_stack_address(ptr %field)
+  call goabiinternal void @safepoint()
+  call goabiinternal void @observe_stack_address(ptr %field)
+  ret void
+}
+
+define goabiinternal void @alloca_pointer_free_address_across_calls()
+    "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca i64, align 8
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  call goabiinternal void @safepoint()
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  ret void
 }
 
 define goabiinternal ptr @alloca_address_passed_to_callee(
@@ -184,13 +216,16 @@ entry:
   ret i64 %sum.1
 }
 
-@llvm.used = appending global [14 x ptr] [
+@llvm.used = appending global [17 x ptr] [
   ptr @pointer_slot,
   ptr @nested_whole_aggregate,
   ptr @alloca_call_skip,
   ptr @alloca_multiple_calls,
   ptr @alloca_loop,
   ptr @alloca_gep_address_across_call,
+  ptr @alloca_direct_address_across_calls,
+  ptr @alloca_gep_value_across_calls,
+  ptr @alloca_pointer_free_address_across_calls,
   ptr @alloca_address_passed_to_callee,
   ptr @alloca_marker_free_at_safepoint,
   ptr @alloca_high_bitmap_word,
