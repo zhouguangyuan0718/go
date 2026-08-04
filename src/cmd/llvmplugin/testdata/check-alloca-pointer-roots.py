@@ -296,10 +296,15 @@ def check_objview(objview, object_path):
         fail("locals-only alloca unexpectedly emitted StackObjects")
 
     stack_object_kinds = funcdata_kinds("alloca_address_passed_to_callee")
-    if "locals_pointer_maps" not in stack_object_kinds:
-        fail("address-observable alloca has no LocalsPointerMaps")
     if "stack_objects" not in stack_object_kinds:
         fail("address-observable alloca has no StackObjects")
+    stack_object = function("alloca_address_passed_to_callee")
+    stack_object_data = {
+        entry["kind"]: entry for entry in stack_object["funcdata"]
+    }
+    stack_object_maps = stack_object_data["locals_pointer_maps"]["stack_map"]
+    if any(bitmap.get("set_bits") for bitmap in stack_object_maps["bitmaps"]):
+        fail("StackObject deopt record polluted LocalsPointerMaps")
 
     pointer_free = function("alloca_pointer_free_address_across_calls")
     pointer_free_data = {
