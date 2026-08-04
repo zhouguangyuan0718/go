@@ -723,6 +723,107 @@ func (lfc *LLVMFuncContext) aggregate(v *Value, args []*Value) llvm.Value {
 	return result
 }
 
+type llvmDirectIfaceCarrier uint8
+
+const (
+	llvmDirectIfaceInvalid llvmDirectIfaceCarrier = iota
+	llvmDirectIfaceEmpty
+	llvmDirectIfaceHasPointer
+)
+
+// llvmDirectIfacePath finds the single pointer carrier in an LLVM aggregate.
+// Direct-interface aggregates contain exactly one pointer leaf; every other
+// element is a zero-sized struct or array. Derive the path from the LLVM type
+// graph so this conversion is independent of the source aggregate shape.
+func llvmDirectIfacePath(t llvm.Type) ([]int, llvmDirectIfaceCarrier) {
+	switch t.TypeKind() {
+	case llvm.PointerTypeKind:
+		return nil, llvmDirectIfaceHasPointer
+	case llvm.StructTypeKind:
+		var path []int
+		carrier := llvmDirectIfaceEmpty
+		for i, element := range t.StructElementTypes() {
+			elementPath, elementCarrier := llvmDirectIfacePath(element)
+			switch elementCarrier {
+			case llvmDirectIfaceEmpty:
+				continue
+			case llvmDirectIfaceHasPointer:
+				if carrier == llvmDirectIfaceHasPointer {
+					return nil, llvmDirectIfaceInvalid
+				}
+				path = append([]int{i}, elementPath...)
+				carrier = llvmDirectIfaceHasPointer
+			default:
+				return nil, llvmDirectIfaceInvalid
+			}
+		}
+		return path, carrier
+	case llvm.ArrayTypeKind:
+		if t.ArrayLength() == 0 {
+			return nil, llvmDirectIfaceEmpty
+		}
+		elementPath, carrier := llvmDirectIfacePath(t.ElementType())
+		switch carrier {
+		case llvmDirectIfaceEmpty:
+			return nil, llvmDirectIfaceEmpty
+		case llvmDirectIfaceHasPointer:
+			if t.ArrayLength() == 1 {
+				return append([]int{0}, elementPath...), llvmDirectIfaceHasPointer
+			}
+		}
+	}
+	return nil, llvmDirectIfaceInvalid
+}
+
+func (lfc *LLVMFuncContext) insertLLVMValueAtPath(v *Value, value llvm.Value, target llvm.Type, path []int) llvm.Value {
+	if len(path) == 0 {
+		if value.Type() != target {
+			v.Fatalf("direct interface pointer carrier has incompatible LLVM type")
+		}
+		return value
+	}
+
+	index := path[0]
+	var element llvm.Type
+	switch target.TypeKind() {
+	case llvm.StructTypeKind:
+		elements := target.StructElementTypes()
+		if index < 0 || index >= len(elements) {
+			v.Fatalf("direct interface struct carrier index %d is out of range", index)
+		}
+		element = elements[index]
+	case llvm.ArrayTypeKind:
+		if index < 0 || index >= target.ArrayLength() {
+			v.Fatalf("direct interface array carrier index %d is out of range", index)
+		}
+		element = target.ElementType()
+	default:
+		v.Fatalf("direct interface carrier path enters non-aggregate LLVM type")
+	}
+
+	elementValue := lfc.insertLLVMValueAtPath(v, value, element, path[1:])
+	return lfc.b.CreateInsertValue(llvm.Undef(target), elementValue, index, v.String()+".carrier")
+}
+
+func (lfc *LLVMFuncContext) llvmIData(v *Value) llvm.Value {
+	data := lfc.b.CreateExtractValue(lfc.GenLV(v.Args[0]), 1, v.String()+".data")
+	want := getLLVMType(v.Type)
+	if data.Type() == want {
+		data.SetName(v.String())
+		return data
+	}
+	if !types.IsDirectIface(v.Type) {
+		v.Fatalf("IData has LLVM pointer carrier for non-direct Go type %v", v.Type)
+	}
+	path, carrier := llvmDirectIfacePath(want)
+	if carrier != llvmDirectIfaceHasPointer {
+		v.Fatalf("direct Go interface type %v has no unique LLVM pointer carrier", v.Type)
+	}
+	result := lfc.insertLLVMValueAtPath(v, data, want, path)
+	result.SetName(v.String())
+	return result
+}
+
 // reshapeLLVMValue converts between the distinct nominal LLVM aggregate types
 // used for a generic shape and one of its concrete instantiations. Go's type
 // system already records these as identical for shape-aware operations; keep
@@ -1529,8 +1630,10 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.aggregate(v, v.Args)
 	case OpStringPtr, OpSlicePtr, OpSlicePtrUnchecked, OpComplexReal, OpITab:
 		lVal = lfc.b.CreateExtractValue(arg0(), 0, v.String())
-	case OpComplexImag, OpIData:
+	case OpComplexImag:
 		lVal = lfc.b.CreateExtractValue(arg0(), 1, v.String())
+	case OpIData:
+		lVal = lfc.llvmIData(v)
 	case OpStringLen, OpSliceLen:
 		lVal = lfc.b.CreateExtractValue(arg0(), 1, v.String())
 	case OpSliceCap:
