@@ -94,6 +94,26 @@ func sub64Borrow(x, y, borrow uint64) (uint64, uint64) {
 }
 
 //go:noinline
+func reverseBytes32(x uint32) uint32 {
+	return bits.ReverseBytes32(x)
+}
+
+//go:noinline
+func reverseBytes64(x uint64) uint64 {
+	return bits.ReverseBytes64(x)
+}
+
+//go:noinline
+func reverseBits64(x uint64) uint64 {
+	return bits.Reverse64(x)
+}
+
+//go:noinline
+func mul64HiLo(x, y uint64) (uint64, uint64) {
+	return bits.Mul64(x, y)
+}
+
+//go:noinline
 func selectInt(cond, x, y int) int {
 	return subtle.ConstantTimeSelect(cond, x, y)
 }
@@ -188,6 +208,15 @@ func main() {
 	}
 	if difference, borrow := sub64Borrow(43, 1, 0); difference != 42 || borrow != 0 {
 		panic("sub without borrow semantics")
+	}
+	if reverseBytes32(0x01234567) != 0x67452301 || reverseBytes64(0x0123456789abcdef) != 0xefcdab8967452301 {
+		panic("byte swap semantics")
+	}
+	if reverseBits64(1) != 1<<63 || reverseBits64(0xf0) != 0x0f<<56 {
+		panic("bit reverse semantics")
+	}
+	if high, low := mul64HiLo(^uint64(0), 2); high != 1 || low != ^uint64(1) {
+		panic("wide multiply semantics")
 	}
 	if selectInt(1, 11, 22) != 11 || selectInt(0, 11, 22) != 22 {
 		panic("conditional select semantics")
