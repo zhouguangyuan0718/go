@@ -1481,6 +1481,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 	case OpKeepAlive:
 		lVal = arg1()
+		lfc.llvmFakeUse(arg0())
 	case OpLocalAddr:
 		if v.Uses == 0 {
 			break
@@ -2198,18 +2199,7 @@ func LLVMCompile(f *Func) {
 	// cannot become dynamic allocas (which Go stack growth cannot support).
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
 	var parameterHomes []*Value
-	localHasVarDef := make(map[llvmLocalKey]bool)
-	for _, BB := range f.Blocks {
-		for _, v := range BB.Values {
-			if v.Op != OpVarDef {
-				continue
-			}
-			if name, ok := v.Aux.(*ir.Name); ok {
-				localHasVarDef[llvmLocalKeyForName(name)] = true
-			}
-		}
-	}
-	var entryLifetimeSlots []llvmStackSlot
+	var parameterLifetimeSlots []llvmStackSlot
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
 			if v.Op != OpLocalAddr || v.Uses == 0 {
@@ -2243,9 +2233,9 @@ func LLVMCompile(f *Func) {
 			FCtxt.Locals[key] = llvmStackSlot{Value: slot, Type: name.Type()}
 			if name.Class == ir.PPARAM {
 				parameterHomes = append(parameterHomes, v)
-			}
-			if name.Type().HasPointers() && (name.Class == ir.PPARAM || !localHasVarDef[key]) {
-				entryLifetimeSlots = append(entryLifetimeSlots, FCtxt.Locals[key])
+				if name.Type().HasPointers() {
+					parameterLifetimeSlots = append(parameterLifetimeSlots, FCtxt.Locals[key])
+				}
 			}
 		}
 	}
@@ -2295,7 +2285,7 @@ func LLVMCompile(f *Func) {
 			FCtxt.ResultSlots[v.ID] = slot.Value
 		}
 	}
-	for _, slot := range entryLifetimeSlots {
+	for _, slot := range parameterLifetimeSlots {
 		FCtxt.llvmLifetimeStart(slot)
 	}
 	// LLVM requires all phi nodes to precede non-phi instructions in a

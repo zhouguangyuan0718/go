@@ -104,10 +104,11 @@ entry:
   ret ptr %result
 }
 
-define goabiinternal void @alloca_uninitialized_at_safepoint(
+define goabiinternal void @alloca_marker_free_at_safepoint(
     ptr %pointer) "go-stack-growth-statepoint" gc "goallc" {
 entry:
   %slot = alloca ptr, align 8
+  store ptr null, ptr %slot, align 8
   call goabiinternal void @safepoint()
   store ptr %pointer, ptr %slot, align 8
   ret void
@@ -191,7 +192,7 @@ entry:
   ptr @alloca_loop,
   ptr @alloca_gep_address_across_call,
   ptr @alloca_address_passed_to_callee,
-  ptr @alloca_uninitialized_at_safepoint,
+  ptr @alloca_marker_free_at_safepoint,
   ptr @alloca_high_bitmap_word,
   ptr @alloca_multiple_records,
   ptr @alloca_select_same_base,
