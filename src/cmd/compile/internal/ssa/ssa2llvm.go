@@ -295,6 +295,26 @@ func (lfc *LLVMFuncContext) llvmTernaryIntrinsic(v *Value, name string) llvm.Val
 	return lfc.b.CreateCall(sig, fn, []llvm.Value{x, y, z}, v.String())
 }
 
+func (lfc *LLVMFuncContext) buildPureTuple(v *Value, values ...llvm.Value) llvm.Value {
+	resultType := getLLVMType(v.Type)
+	if resultType.TypeKind() != llvm.StructTypeKind {
+		v.Fatalf("%s has a non-struct LLVM result", v.Op)
+	}
+	fields := resultType.StructElementTypes()
+	if len(fields) != len(values) {
+		v.Fatalf("%s has %d LLVM result fields for %d values", v.Op, len(fields), len(values))
+	}
+	result := llvm.Undef(resultType)
+	for i, value := range values {
+		if value.Type() != fields[i] {
+			v.Fatalf("%s result field %d has incompatible LLVM type", v.Op, i)
+		}
+		result = lfc.b.CreateInsertValue(result, value, i, "")
+	}
+	result.SetName(v.String())
+	return result
+}
+
 func (lfc *LLVMFuncContext) carryBorrow(v *Value, intrinsic string) llvm.Value {
 	x, y, carryIn := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
 	i64 := GlobalCtxt.Int64Type()
@@ -315,19 +335,23 @@ func (lfc *LLVMFuncContext) carryBorrow(v *Value, intrinsic string) llvm.Value {
 	overflow := lfc.b.CreateOr(overflow1, overflow2, v.String()+".overflow")
 	carry := lfc.b.CreateZExt(overflow, i64, v.String()+".carry")
 
-	resultType := getLLVMType(v.Type)
-	if resultType.TypeKind() != llvm.StructTypeKind {
-		v.Fatalf("%s has a non-struct LLVM result", v.Op)
+	return lfc.buildPureTuple(v, value, carry)
+}
+
+func (lfc *LLVMFuncContext) unsignedMul64HiLo(v *Value) llvm.Value {
+	x, y := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1])
+	i64 := GlobalCtxt.Int64Type()
+	if x.Type() != i64 || y.Type() != i64 {
+		v.Fatalf("%s requires two i64 operands", v.Op)
 	}
-	fields := resultType.StructElementTypes()
-	if len(fields) != 2 || fields[0] != i64 || fields[1] != i64 {
-		v.Fatalf("%s has an incompatible LLVM result tuple", v.Op)
-	}
-	result := llvm.Undef(resultType)
-	result = lfc.b.CreateInsertValue(result, value, 0, "")
-	result = lfc.b.CreateInsertValue(result, carry, 1, "")
-	result.SetName(v.String())
-	return result
+	i128 := GlobalCtxt.IntType(128)
+	x = lfc.b.CreateZExt(x, i128, v.String()+".x")
+	y = lfc.b.CreateZExt(y, i128, v.String()+".y")
+	product := lfc.b.CreateMul(x, y, v.String()+".wide")
+	low := lfc.b.CreateTrunc(product, i64, v.String()+".low")
+	highWide := lfc.b.CreateLShr(product, llvm.ConstInt(i128, 64, false), v.String()+".high.wide")
+	high := lfc.b.CreateTrunc(highWide, i64, v.String()+".high")
+	return lfc.buildPureTuple(v, high, low)
 }
 
 func llvmTupleFieldCount(typ *types.Type) int {
@@ -393,6 +417,33 @@ func (lfc *LLVMFuncContext) bitLen(v *Value) llvm.Value {
 	default:
 		length.SetName(v.String())
 		return length
+	}
+}
+
+func (lfc *LLVMFuncContext) byteSwap(v *Value) llvm.Value {
+	x := lfc.GenLV(v.Args[0])
+	if x.Type().TypeKind() != llvm.IntegerTypeKind {
+		v.Fatalf("%s has a non-integer LLVM operand", v.Op)
+	}
+	bits := x.Type().IntTypeWidth()
+	if bits != 16 && bits != 32 && bits != 64 {
+		v.Fatalf("%s has unsupported operand width %d", v.Op, bits)
+	}
+	sig := llvm.FunctionType(x.Type(), []llvm.Type{x.Type()}, false)
+	fn := getOrInsertLLVMIntrinsic("llvm.bswap.i"+fmt.Sprint(bits), sig)
+	result := lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String()+".swapped")
+	want := getLLVMType(v.Type)
+	if want.TypeKind() != llvm.IntegerTypeKind {
+		v.Fatalf("%s has a non-integer LLVM result", v.Op)
+	}
+	switch {
+	case bits < want.IntTypeWidth():
+		return lfc.b.CreateZExt(result, want, v.String())
+	case bits > want.IntTypeWidth():
+		return lfc.b.CreateTrunc(result, want, v.String())
+	default:
+		result.SetName(v.String())
+		return result
 	}
 }
 
@@ -1475,6 +1526,8 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateFSub(arg0(), arg1(), v.String())
 	case OpMul64, OpMul32, OpMul16, OpMul8:
 		lVal = lfc.b.CreateMul(arg0(), arg1(), v.String())
+	case OpMul64uhilo:
+		lVal = lfc.unsignedMul64HiLo(v)
 	case OpHmul32, OpHmul64:
 		lVal = lfc.highMultiply(v, true)
 	case OpHmul32u, OpHmul64u:
@@ -1592,6 +1645,14 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.shift(v, llvmShiftRightUnsigned)
 	case OpRotateLeft64, OpRotateLeft32, OpRotateLeft16, OpRotateLeft8:
 		lVal = lfc.rotateLeft(v)
+	case OpBswap64, OpBswap32, OpBswap16:
+		lVal = lfc.byteSwap(v)
+	case OpBitRev64, OpBitRev32, OpBitRev16, OpBitRev8:
+		resultType := getLLVMType(v.Type)
+		if resultType.TypeKind() != llvm.IntegerTypeKind {
+			v.Fatalf("%s has a non-integer LLVM result", v.Op)
+		}
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.bitreverse.i"+fmt.Sprint(resultType.IntTypeWidth()))
 	case OpBitLen64, OpBitLen32, OpBitLen16, OpBitLen8:
 		lVal = lfc.bitLen(v)
 	case OpCondSelect:
