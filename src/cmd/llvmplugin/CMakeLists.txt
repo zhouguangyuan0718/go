@@ -473,15 +473,37 @@ if(BUILD_TESTING)
       "do not support pointer vectors in allocas"
   )
 
+  set(GOALLC_POINTER_ALLOCA_LIFETIME_EXTRA_ARGS)
+  if(GOALLC_OBJVIEW_EXECUTABLE)
+    list(APPEND GOALLC_POINTER_ALLOCA_LIFETIME_EXTRA_ARGS
+      --objview "${GOALLC_OBJVIEW_EXECUTABLE}")
+  endif()
   add_test(
     NAME GoALLCStatepoints.PointerAllocaLifetimeSupported
     COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-alloca-pointer-lifetime.py"
+      --llc "${GOALLC_LLC_EXECUTABLE}"
+      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
+      --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-unsupported.ll"
+      ${GOALLC_POINTER_ALLOCA_LIFETIME_EXTRA_ARGS}
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.PathLocalPointerAllocaLifetime
+    COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
-      -verify-machineinstrs
+      -goallc-pass-plugin-emit-ir
       -filetype=null
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-unsupported.ll"
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-ambiguous.ll"
   )
+  set_tests_properties(
+    GoALLCStatepoints.PathLocalPointerAllocaLifetime PROPERTIES
+    PASS_REGULAR_EXPRESSION "1280262988"
+    FAIL_REGULAR_EXPRESSION "1398033231")
 
   add_test(
     NAME GoALLCStatepoints.VolatilePointerAllocaSupported
