@@ -162,9 +162,11 @@ def check_rewritten_ir(ir):
     if "llvm.statepoint.fixed_stack_home" in ir:
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
+    # Five address-observable StackObjects get entry initialization. The one
+    # marker-free LocalsOnly fixture already has its own source null store.
     null_initializers = re.findall(r"^\s*store ptr null, ptr ", ir, re.MULTILINE)
-    if len(null_initializers) != 17:
-        fail(f"found {len(null_initializers)} null initializers, want 17")
+    if len(null_initializers) != 6:
+        fail(f"found {len(null_initializers)} null initializers, want six")
 
     locals_one = [record("locals", "slot", 8, 1, [1])]
     stack_one = [record("stack_object", "slot", 8, 1, [1])]
@@ -182,7 +184,7 @@ def check_rewritten_ir(ir):
         "alloca_gep_address_across_call",
         [[record("locals", "slot", 16, 2, [0x2])]],
     )
-    expect_records(ir, "alloca_uninitialized_at_safepoint", [locals_one])
+    expect_records(ir, "alloca_marker_free_at_safepoint", [locals_one])
     expect_records(
         ir,
         "alloca_high_bitmap_word",
@@ -218,7 +220,14 @@ def check_rewritten_ir(ir):
     statepoint_end = escaped.index("@llvm.experimental.gc.statepoint")
     if re.search(r"store ptr .*ptr %slot", escaped[statepoint_end:]):
         fail("callee-writable alloca is stored after the call")
+    entry_initialize = escaped.find("store ptr null, ptr %slot")
+    source_store = escaped.find("store ptr %pointer, ptr %slot")
+    if min(entry_initialize, source_store) < 0 or entry_initialize >= source_store:
+        fail("StackObject is not initialized before its source store")
 
+    locals_only = function_body(ir, "alloca_multiple_calls")
+    if "store ptr null" in locals_only:
+        fail("LocalsOnly alloca received plugin initialization")
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir
     )
@@ -226,10 +235,10 @@ def check_rewritten_ir(ir):
     # the remaining two are ordinary movable scalar roots.
     if len(relocates) != 20:
         fail(f"found {len(relocates)} relocates, want 20")
-    uninitialized = function_body(ir, "alloca_uninitialized_at_safepoint")
-    if '"gc-live"(ptr %pointer' not in uninitialized:
+    marker_free = function_body(ir, "alloca_marker_free_at_safepoint")
+    if '"gc-live"(ptr %pointer' not in marker_free:
         fail("ordinary scalar SSA pointer is missing from gc-live")
-    if "%pointer.relocated" not in uninitialized:
+    if "%pointer.relocated" not in marker_free:
         fail("ordinary scalar SSA pointer was not relocated")
 
 

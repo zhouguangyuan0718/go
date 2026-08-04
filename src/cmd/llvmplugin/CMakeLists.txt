@@ -491,7 +491,7 @@ if(BUILD_TESTING)
   )
 
   add_test(
-    NAME GoALLCStatepoints.PathDependentPointerAllocaBecomesStackObject
+    NAME GoALLCStatepoints.PathLocalPointerAllocaLifetime
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
       "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
@@ -501,8 +501,9 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-ambiguous.ll"
   )
   set_tests_properties(
-    GoALLCStatepoints.PathDependentPointerAllocaBecomesStackObject PROPERTIES
-    PASS_REGULAR_EXPRESSION "1398033231")
+    GoALLCStatepoints.PathLocalPointerAllocaLifetime PROPERTIES
+    PASS_REGULAR_EXPRESSION "1280262988"
+    FAIL_REGULAR_EXPRESSION "1398033231")
 
   add_test(
     NAME GoALLCStatepoints.VolatilePointerAllocaSupported

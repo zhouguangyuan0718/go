@@ -60,7 +60,7 @@ The current SSA value and CFG rewrite support matrix is:
 | Fixed struct/array SSA aggregates | Supported | Pointer leaves are scalarized before liveness and reconstructed from the current relocated SSA leaves. |
 | Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
 | Aggregate load results and store operands | Supported | First-class SSA values use aggregate normalization. Pointer leaves in surviving fixed allocas remain memory roots described by the alloca deopt layout protocol. |
-| Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Pointer slots are zero-initialized at each definite lifetime start. An active alloca is an explicit `gc-live` root with a rematerialized `gc.relocate`; its ptrmap contributes callsite `LocalsPointerMaps`. A record-kind tag additionally makes address-observable or lifetime-ambiguous allocas function-wide `FUNCDATA_StackObjects`. No synthetic per-field load or write-back is introduced. |
+| Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Go `VarDef` emits `llvm.lifetime.start`; parameter homes and addressed result homes have explicit starts at their initialization sites. The statepoint pass uses starts as backward liveness kills and real address uses as gens, so the last use supplies the implicit end. Active contents contribute callsite `LocalsPointerMaps`; address-observable objects additionally get function-wide `FUNCDATA_StackObjects` and one entry initialization because stack growth adjusts them even while source-dead. Locals-only storage is not initialized by the plugin, and no lifetime ends are emitted. |
 | Fixed and scalable vectors | Unsupported | Vector lane and scalable-count semantics require a separate design; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
 | `invoke`, `callbr`, non-deopt operand bundles, unsupported parameter attributes, and `musttail` | Unsupported | One ordinary deopt bundle is preserved before the alloca suffix. `nest`, `captures`, and `readonly` parameter attributes are preserved; other shapes fail closed. |
@@ -115,16 +115,29 @@ constant address derivation, and local PHI/select uses remain compiler
 controlled. The frontend Addrtaken metadata is provenance only and never keeps
 an alloca alive or overrides this final structural classification.
 
-For every surviving fixed object, the plugin enumerates pointer offsets and
-uses LLVM's `StackLifetime` may/must analysis over
-`llvm.lifetime.start`/`llvm.lifetime.end`. Pointer slots are zeroed immediately
-after each definite lifetime start, and the alloca enters `gc-live` only at
-statepoints where that lifetime is definitely active. Legacy IR without
-markers retains frame-entry initialization and whole-frame liveness. A
-path-dependent lifetime at one callsite falls back to an entry-initialized,
-whole-frame-live StackObject. The original lifetime markers remain in IR for
-the normal code-generation pipeline. The record
-carries a `LocalsOnly` or `StackObject` kind tag, the alloca address,
+The Go frontend emits `llvm.lifetime.start` at each pointer-containing
+`OpVarDef`. Repeated starts are intentional: `VarDef` denotes complete
+reinitialization, including in branches and loops. Parameter homes start before
+their synthetic incoming-value store, and addressed result homes start after
+the producing call and before their result store. `OpVarLive` remains an
+`llvm.fake.use` of the home. The producer's existing Zero, Store, or Move owns
+source-lifetime initialization; the frontend marker helper adds no pointer
+clears, and neither side emits `llvm.lifetime.end`.
+
+For every surviving fixed object, statepoint rewriting enumerates pointer
+offsets and performs a backward, path-sensitive dataflow over its optimized
+address-use graph. A lifetime start is a kill and a real load, store, call use,
+comparison, `llvm.fake.use`, or other terminal address use is a gen. This makes
+the final real use the implicit lifetime end without modifying IR. Derived
+GEP/cast/PHI/select addresses are followed to their terminal uses. Marker-free
+or unclassifiable objects remain conservatively active at every statepoint;
+their producer must already have initialized every scanned pointer word. The
+original lifetime starts remain in IR for the normal code-generation pipeline.
+Address-observable objects are different: Go's runtime adjusts every pointer
+word in every `StackObjects` record during stack growth, whether the object is
+source-live or not. The plugin therefore zeroes only those pointer leaves once
+at frame entry. This is independent of a later VarDef reinitialization. The
+record carries a `LocalsOnly` or `StackObject` kind tag, the alloca address,
 whole-object size and alignment, pointer size, valid bitmap bit count, and
 64-bit bitmap words. The envelope and every record carry explicit lengths, and
 a trailing duplicate envelope length makes the suffix recoverable after
@@ -172,11 +185,11 @@ narrow Go ABI contract above.
 
 The final combined order is:
 
-1. **Optimized alloca classification.** Enumerate pointer leaves, classify
+1. **Optimized alloca classification and activity.** Enumerate pointer leaves, classify
    final IR uses as address-observable stack objects or direct-only locals,
-   and query LLVM `StackLifetime` at each call. Zero pointer leaves at each
-   definite start; ambiguous lifetime falls back to an entry-initialized
-   StackObject.
+   then compute callsite activity from frontend lifetime starts and terminal
+   address uses. Marker-free objects remain conservatively active; StackObjects
+   alone receive function-entry pointer initialization.
 2. **Aggregate normalization.** Use aggregate-only liveness to find and
    decompose supported live first-class struct/array values, then rebuild
    aggregates immediately before their uses.
@@ -292,11 +305,6 @@ does not resolve to one unique direct frame object at offset zero.
 `LocalsPointerMaps`; direct-only pointer leaves use locals-only records. A
 merged alloca address is an ordinary pointer root rather than object contents.
 ArgLive is not a replacement for the entry argument bitmap.
-
-TODO: emit precise lifetime ends from Go liveness so pointer leaves can stop
-retaining heap objects after their last semantic use. The current frontend
-mostly emits lifetime starts; LLVM `StackLifetime` therefore remains
-conservative after a start when no end marker exists.
 
 TODO: LLVM opaque pointer types currently make the first itab/type word of a
 Go interface and pointers to `NotInHeap` types look like ordinary GC pointers.
