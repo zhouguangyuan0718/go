@@ -36,23 +36,26 @@ the old uses make the required reaching definition explicit, and LLVM's public
 `PromoteMemToReg` utility removes the temporary memory operations and forms the
 relocation PHIs. This applies the same SSA construction to straight-line code,
 conditional paths, loop backedges, and irreducible control flow.
-Static `alloca` addresses and constant GEP/cast forms derived from them are
-native frame addresses, not Go heap pointers. Pointer-containing allocas are
-explicit `gc-live` values while their storage is active so the adjacent alloca
-ptrmap describes their contents; SelectionDAG rematerializes their
-`gc.relocate` results from the same fixed frame index. Other direct alloca
-addresses need no root. A PHI/select of stack addresses cannot be
-rematerialized as one frame index, so the merged pointer is an ordinary
-`gc-live` value. Pointer values loaded from the allocation remain ordinary
-tracked roots.
+Raw static `alloca` values are native frame identities, not Go heap pointers.
+Pointer-containing allocas are explicit `gc-live` values while their storage
+is active so the adjacent alloca ptrmap describes their contents. Direct
+loads, stores, lifetime markers, and address derivations retain that identity.
+An observable use of the alloca address itself is first split onto a zero-offset
+GEP. When that or another GEP/cast-derived stack address is live across a call,
+only its base alloca enters `gc-live`; after `gc.relocate`, the pass rebuilds
+the derived address in IR and relocation SSA routes later uses to it. Go
+SelectionDAG lowering recomputes the relocated alloca from its current
+FrameIndex after the statepoint without a spill/reload. PHI/select values which
+cannot be rebuilt from one alloca remain ordinary scalar roots. Pointer values
+loaded from the allocation remain ordinary tracked roots.
 
 The current SSA value and CFG rewrite support matrix is:
 
 | Value or control-flow shape | Status | Current contract |
 | --- | --- | --- |
 | Pointer arguments | AArch64 GoObj qualified; SelectionDAG home reuse also tested on X86 | Values live after a call use caller statepoints; exact stack inputs stay in their fixed ABI homes, while register inputs and transformed values use normal statepoint spills. Call-only arguments are described by the callee's type-derived entry map. |
-| Static `alloca` addresses | Supported | Direct fixed-allocation addresses and constant GEP/cast forms are rematerialized frame addresses. Merged PHI/select addresses use ordinary `gc-live` and relocation. Pointers loaded from memory remain tracked. |
-| `select`, GEP, and pointer casts | Supported | Each resulting pointer SSA value is tracked conservatively. |
+| Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. Observable direct uses are split onto a zero-offset GEP; GEP/cast chains are rebuilt from the alloca relocate. Direct memory uses stay on the FrameIndex, and pointers loaded from memory remain tracked. |
+| `select`, GEP, and pointer casts | Supported | Fixed-allocation GEP/no-op cast chains use base-allocation relocation and IR rematerialization. Merged or non-stack pointer values remain ordinary scalar roots. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
@@ -193,24 +196,26 @@ The final combined order is:
 2. **Aggregate normalization.** Use aggregate-only liveness to find and
    decompose supported live first-class struct/array values, then rebuild
    aggregates immediately before their uses.
-3. **Scalar statepoint insertion.** Compute liveness, put each active alloca
-   and ordinary scalar root in `gc-live`, append the alloca ptrmap records to
-   deopt, and emit `gc.result` plus `gc.relocate`. Static alloca relocates are
-   rematerialized and excluded from relocation-SSA repair.
-4. **Whole-function relocation SSA.** Model the original scalar definition and
-   every relocate as stores to temporary promotable allocas, rewrite old uses
-   through loads, and call the public `PromoteMemToReg` utility. This constructs
-   conditional, loop/backedge, and irreducible-CFG PHIs and removes all
-   temporary memory traffic.
+3. **Scalar statepoint insertion.** Split observable direct alloca-address uses
+   from the raw storage identity, compute scalar and derived-address liveness,
+   put each active base alloca and ordinary scalar root in `gc-live`, append the
+   unchanged alloca ptrmap records to deopt, and emit `gc.result` plus
+   `gc.relocate`.
+4. **Whole-function relocation SSA.** Rebuild live GEP/cast address chains from
+   each base-allocation relocate. Model those definitions and ordinary scalar
+   relocates as stores to temporary promotable allocas, rewrite old uses through
+   loads, and call the public `PromoteMemToReg` utility. This constructs
+   conditional, loop/backedge, and irreducible-CFG PHIs while preserving raw
+   alloca identity for direct memory, lifetime, deopt, StackObjects, and content
+   pointer maps.
 
 Future stages remain:
 
-1. **Base/derived pointers.** Adapt the scalar GEP/cast path of LLVM's
-   `findBasePointer`, then add `select` and PHI conflict handling. Ambiguous
-   relationships continue to fail closed.
-2. **Rematerialization.** Consider LLVM's GEP/cast rematerialization only after
-   base/derived correctness.
-3. **Additional call shapes only when required by Go.** Do not import generic
+1. **Heap base/derived pointers.** Adapt the scalar GEP/cast path of LLVM's
+   `findBasePointer` if a future moving heap collector needs base identity;
+   the current rematerialization path is deliberately limited to fixed stack
+   allocations.
+2. **Additional call shapes only when required by Go.** Do not import generic
    deopt, transition-bundle, invoke/EH edge normalization, or module-wide
    attribute stripping merely because the LLVM pass supports them.
 

@@ -154,19 +154,19 @@ def record(kind, base, size, bits, words):
 
 def check_rewritten_ir(ir):
     statepoints = re.findall(r"@llvm\.experimental\.gc\.statepoint", ir)
-    # Seventeen calls plus the intrinsic declaration.
-    if len(statepoints) != 18:
-        fail(f"found {len(statepoints) - 1} statepoints, want 17")
-    if len(re.findall(r'"deopt"\(', ir)) != 17:
-        fail("pointer allocas do not have seventeen deopt records")
+    # Twenty-six calls plus the intrinsic declaration.
+    if len(statepoints) != 27:
+        fail(f"found {len(statepoints) - 1} statepoints, want 26")
+    if len(re.findall(r'"deopt"\(', ir)) != 23:
+        fail("pointer allocas do not have twenty-three deopt records")
     if "llvm.statepoint.fixed_stack_home" in ir:
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
-    # Five address-observable StackObjects get entry initialization. The one
+    # Seven address-observable StackObjects get entry initialization. The one
     # marker-free LocalsOnly fixture already has its own source null store.
     null_initializers = re.findall(r"^\s*store ptr null, ptr ", ir, re.MULTILINE)
-    if len(null_initializers) != 6:
-        fail(f"found {len(null_initializers)} null initializers, want six")
+    if len(null_initializers) != 8:
+        fail(f"found {len(null_initializers)} null initializers, want eight")
 
     locals_one = [record("locals", "slot", 8, 1, [1])]
     stack_one = [record("stack_object", "slot", 8, 1, [1])]
@@ -184,6 +184,23 @@ def check_rewritten_ir(ir):
         "alloca_gep_address_across_call",
         [[record("locals", "slot", 16, 2, [0x2])]],
     )
+    direct_address = expect_records(
+        ir, "alloca_direct_address_across_calls", [stack_one] * 3
+    )
+    gep_address = expect_records(
+        ir,
+        "alloca_gep_value_across_calls",
+        [[record("stack_object", "slot", 16, 2, [0x2])]] * 3,
+    )
+    pointer_free_address = function_body(
+        ir, "alloca_pointer_free_address_across_calls"
+    )
+    if (
+        '"deopt"(' in pointer_free_address
+        or pointer_free_address.count('"gc-live"(ptr %slot)') != 2
+        or "ptr %slot.address.remat" not in pointer_free_address
+    ):
+        fail("pointer-free alloca address changed the content-ptrmap protocol")
     expect_records(ir, "alloca_marker_free_at_safepoint", [locals_one])
     expect_records(
         ir,
@@ -215,6 +232,21 @@ def check_rewritten_ir(ir):
     if '"gc-live"(ptr %selected' not in selected or "%selected.relocated" not in selected:
         fail("alloca-address select is not represented as an ordinary live pointer")
 
+    if (
+        "%slot.address = getelementptr inbounds i8, ptr %slot, i64 0"
+        not in direct_address
+        or '"gc-live"(ptr %slot)' not in direct_address
+        or '"gc-live"(ptr %slot.address' in direct_address
+        or "ptr %slot.address.remat" not in direct_address
+    ):
+        fail("direct alloca address is not rematerialized from its base relocate")
+    if (
+        '"gc-live"(ptr %slot)' not in gep_address
+        or '"gc-live"(ptr %field' in gep_address
+        or "ptr %field.remat" not in gep_address
+    ):
+        fail("derived alloca address is not rematerialized from its base relocate")
+
     if '"gc-live"(ptr %slot)' not in escaped or "%slot.relocated" not in escaped:
         fail("callee-writable alloca is not an explicit rematerialized root")
     statepoint_end = escaped.index("@llvm.experimental.gc.statepoint")
@@ -231,10 +263,12 @@ def check_rewritten_ir(ir):
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir
     )
-    # Eighteen alloca roots use gc.relocate as a rematerialized frame address;
-    # the remaining two are ordinary movable scalar roots.
-    if len(relocates) != 20:
-        fail(f"found {len(relocates)} relocates, want 20")
+    # Twenty-four active pointer-containing alloca roots and two pointer-free
+    # address roots retain their storage identity. Two ordinary scalar roots
+    # are relocated separately; derived stack addresses are rebuilt from the
+    # alloca relocates instead of becoming ptrmap roots.
+    if len(relocates) != 28:
+        fail(f"found {len(relocates)} relocates, want 28")
     marker_free = function_body(ir, "alloca_marker_free_at_safepoint")
     if '"gc-live"(ptr %pointer' not in marker_free:
         fail("ordinary scalar SSA pointer is missing from gc-live")
@@ -246,11 +280,14 @@ def check_objview(objview, object_path):
     document = json.loads(run([objview, "-format=json", object_path]))
     symbols = document["members"][0]["go_object"]["symbols"]
 
-    def funcdata_kinds(name):
+    def function(name):
         matches = [symbol for symbol in symbols if symbol.get("name") == name]
         if len(matches) != 1 or not matches[0].get("function"):
             fail(f"objview did not find one function symbol {name}")
-        return [entry["kind"] for entry in matches[0]["function"]["funcdata"]]
+        return matches[0]["function"]
+
+    def funcdata_kinds(name):
+        return [entry["kind"] for entry in function(name)["funcdata"]]
 
     locals_kinds = funcdata_kinds("alloca_multiple_calls")
     if "locals_pointer_maps" not in locals_kinds:
@@ -263,6 +300,16 @@ def check_objview(objview, object_path):
         fail("address-observable alloca has no LocalsPointerMaps")
     if "stack_objects" not in stack_object_kinds:
         fail("address-observable alloca has no StackObjects")
+
+    pointer_free = function("alloca_pointer_free_address_across_calls")
+    pointer_free_data = {
+        entry["kind"]: entry for entry in pointer_free["funcdata"]
+    }
+    if "stack_objects" in pointer_free_data:
+        fail("pointer-free address root unexpectedly emitted StackObjects")
+    pointer_free_maps = pointer_free_data["locals_pointer_maps"]["stack_map"]
+    if any(bitmap.get("set_bits") for bitmap in pointer_free_maps["bitmaps"]):
+        fail("pointer-free address root polluted LocalsPointerMaps")
 
 
 def main():
@@ -320,7 +367,7 @@ def main():
             ],
             input_text=optimized,
         )
-        if len(re.findall(r'"deopt"\(', optimized_rewritten)) != 7:
+        if len(re.findall(r'"deopt"\(', optimized_rewritten)) != 13:
             fail("default<O2> did not preserve stack-object records")
         if "goallc.source_addrtaken" in optimized_rewritten:
             fail("source address-taken provenance escaped final classification")
@@ -341,13 +388,13 @@ def main():
             ]
         )
         statepoint_lines = re.findall(r"(?m)^.*STATEPOINT.*$", machine_ir)
-        if len(statepoint_lines) != 17:
-            fail(f"MIR has {len(statepoint_lines)} statepoints, want 17")
+        if len(statepoint_lines) != 26:
+            fail(f"MIR has {len(statepoint_lines)} statepoints, want 26")
         alloca_statepoints = [
             line for line in statepoint_lines if str(BEGIN) in line
         ]
-        if len(alloca_statepoints) != 17:
-            fail("MIR does not contain seventeen alloca statepoints")
+        if len(alloca_statepoints) != 23:
+            fail("MIR does not contain twenty-three alloca statepoints")
         for statepoint in alloca_statepoints:
             if (
                 str(LOCALS_TAG) not in statepoint
