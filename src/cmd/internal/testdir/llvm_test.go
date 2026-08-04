@@ -80,6 +80,10 @@ func runLLVMTests(t *testing.T, common testCommon) {
 			runLLVMAllocaStatepointTest(t, common.gorootTestDir)
 		})
 
+		t.Run("caller-state", func(t *testing.T) {
+			runLLVMCallerStateTest(t, common.gorootTestDir)
+		})
+
 		t.Run("writebarrier-helpers", runLLVMWriteBarrierHelperTest)
 
 		t.Run("compile-only-regressions", func(t *testing.T) {
