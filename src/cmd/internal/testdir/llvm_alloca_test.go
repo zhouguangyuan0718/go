@@ -220,10 +220,10 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 	})
 	checkLLVMABISourceStackMaps(t, "GoALLC", symbol,
 		88,
-		[][]int{nil, nil},
-		[][]int{nil, {5, 7, 8, 9}},
-		[]int32{-1, 1, 0},
-		[]int32{1, 1, 1, 1, 0})
+		[][]int{nil},
+		[][]int{nil},
+		[]int32{-1, 0},
+		[]int32{0, 0, 0, 0, 0})
 
 	goallcStackObjects := llvmABIStackObjects(t, symbol)
 	if got, want := len(goallcStackObjects), 1; got != want {
@@ -235,9 +235,12 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 		t.Fatalf("GoALLC StackObject=%+v, want negative offset, size=40, ptrbytes=40, and ABI0 runtime.gcbits.1d00000000000000", object)
 	}
 
-	// StackObjects describe function-wide address-taken object identity and
-	// layout. LocalsPointerMaps separately roots the object's fields while its
-	// lifetime is active, matching native Go's two distinct metadata roles.
+	// StackObjects describe the function-wide identity and layout of the
+	// address-taken object. Its direct gc-live alloca address is an activity and
+	// relocation signal only; it must not duplicate the object's pointer fields
+	// in LocalsPointerMaps. Native Go currently emits a static locals bitmap for
+	// this fixture, which remains useful evidence of the native metadata shape
+	// but is not GoALLC's StackObject/deopt contract.
 	nativeSymbol := findLLVMABISymbol(t, readLLVMABIObject(t, nativeObject),
 		"p.localAcrossSafepoints")
 	if got := llvmABIStackMapBitmaps(t, nativeSymbol, "locals_pointer_maps"); !reflect.DeepEqual(got, [][]int{nil, {0, 2, 3, 4}}) {

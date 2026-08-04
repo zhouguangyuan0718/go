@@ -74,16 +74,14 @@ def check_goobj(llc, plugin, objview, input_path):
         fail(f"function-wide StackObjects={stack_objects}, want one object")
     locals_maps = funcdata.get("locals_pointer_maps", {}).get("stack_map", {})
     bitmaps = locals_maps.get("bitmaps", [])
-    if len(bitmaps) != 2 or bitmaps[0].get("set_bits") or len(
-        bitmaps[1].get("set_bits", [])
-    ) != 1:
-        fail(f"StackObject lifetime LocalsPointerMaps={bitmaps}, want one active map")
+    if any(bitmap.get("set_bits") for bitmap in bitmaps):
+        fail(f"StackObject lifetime polluted LocalsPointerMaps: {bitmaps}")
     queries = [
         query["stack_map_index"]
         for query in function.get("stack_map_queries", [])[:3]
     ]
-    if queries != [0, 1, 0]:
-        fail(f"StackObject callsite stack-map indices={queries}, want [0, 1, 0]")
+    if queries != [0, 0, 0]:
+        fail(f"StackObject callsite stack-map indices={queries}, want [0, 0, 0]")
 
 
 def main():
@@ -142,7 +140,7 @@ def main():
     if stack_body.count('"gc-live"(ptr %slot)') != 1 or stack_body.count(
         "%slot.relocated"
     ) != 1:
-        fail("stack object is not active at exactly one statepoint")
+        fail("stack-object activity is not one explicit rematerialized gc-live")
     if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in stack_body:
         fail("stack object does not preserve its frame identity across stack coloring")
     entry_initialize = stack_body.find("store ptr null")
