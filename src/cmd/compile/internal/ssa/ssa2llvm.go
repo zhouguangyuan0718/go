@@ -64,6 +64,7 @@ const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
 const goSourceAddressTakenMD = "goallc.source_addrtaken"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
+const goObjSymbolNameMD = "goobj.symbol.name"
 const llvmFramePointerAttr = "frame-pointer"
 const llvmFramePointerNonLeaf = "non-leaf"
 
@@ -225,30 +226,39 @@ func configureLLVMCall(call llvm.Value, sig llvmFuncSignature) {
 	}
 }
 
+func llvmFunctionStorageName(name string, cc llvm.CallConv) string {
+	if cc == goABI0CallConv {
+		return name + ".goallc.abi0"
+	}
+	return name
+}
+
 func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallConv) llvm.Value {
-	fn := CurrentModule.NamedFunction(name)
+	storageName := llvmFunctionStorageName(name, cc)
+	fn := CurrentModule.NamedFunction(storageName)
 	if fn.IsNil() {
-		fn = llvm.AddFunction(CurrentModule, name+".goallc.final", sig.Type)
-		if placeholder := CurrentModule.NamedGlobal(name); !placeholder.IsNil() {
+		fn = llvm.AddFunction(CurrentModule, storageName+".goallc.final", sig.Type)
+		if placeholder := CurrentModule.NamedGlobal(storageName); !placeholder.IsNil() {
 			// An OpAddr may have needed the code address before this function
 			// reached the compile queue. Opaque pointers let the provisional
 			// global be replaced by the correctly typed function definition.
 			placeholder.ReplaceAllUsesWith(fn)
 			placeholder.EraseFromParentAsGlobal()
 		}
-		fn.SetName(name)
+		fn.SetName(storageName)
 	} else if got := fn.GlobalValueType(); got != sig.Type {
 		if fn.BasicBlocksCount() != 0 {
 			base.Fatalf("conflicting LLVM function type for definition %s", name)
 		}
 		// Compiler data can refer to an ABI function before AuxCall exposes
 		// its exact signature. Replace that provisional declaration now.
-		replacement := llvm.AddFunction(CurrentModule, name+".goallc.final", sig.Type)
+		replacement := llvm.AddFunction(CurrentModule, storageName+".goallc.final", sig.Type)
 		fn.ReplaceAllUsesWith(replacement)
 		fn.EraseFromParentAsFunction()
-		replacement.SetName(name)
+		replacement.SetName(storageName)
 		fn = replacement
 	}
+	setGoObjSymbolNameMetadata(fn, name)
 	configureLLVMFunction(fn, sig, cc)
 	return fn
 }
@@ -2693,6 +2703,7 @@ func Output(fileName string) error {
 	}
 	if !goObjImportsWritten {
 		emitGoObjImportMetadata()
+		emitGoObjCgoMetadata()
 		goObjImportsWritten = true
 	}
 	return llvm.LLVMPrintModuleToFile(CurrentModule, fileName)
