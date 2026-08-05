@@ -51,7 +51,6 @@ func attachGoObjSymbolRef(value llvm.Value, s *obj.LSym) {
 	if value.IsNil() || s == nil {
 		base.Fatalf("invalid LLVM value in GoObj symbol reference")
 	}
-	setGoObjSymbolNameMetadata(value, s.Name)
 
 	if !base.Ctxt.Flag_linkshared && !s.IsLinkname() {
 		if idx := goobj.BuiltinIdx(s.Name, int(s.ABI())); idx >= 0 {
@@ -79,8 +78,8 @@ func attachGoObjSymbolRef(value llvm.Value, s *obj.LSym) {
 	}))
 }
 
-func setGoObjSymbolNameMetadata(value llvm.Value, name string) {
-	if value.Name() == name {
+func setGoObjABI0SymbolNameMetadata(value llvm.Value, name string, cc llvm.CallConv) {
+	if cc != goABI0CallConv {
 		return
 	}
 	value.SetGlobalMetadata(GlobalCtxt.MDKindID(goObjSymbolNameMD), GlobalCtxt.MDNode([]llvm.Metadata{
@@ -452,11 +451,13 @@ func llvmExternalDataRef(s *obj.LSym, data map[*obj.LSym]bool) llvm.Value {
 		storageName := llvmFunctionStorageName(s.Name, llvmCallConv(s.ABI()))
 		if f := CurrentModule.NamedFunction(storageName); !f.IsNil() {
 			attachGoObjSymbolRef(f, s)
+			setGoObjABI0SymbolNameMetadata(f, s.Name, llvmCallConv(s.ABI()))
 			return f
 		}
 		f := llvm.AddFunction(CurrentModule, storageName, llvm.FunctionType(GlobalCtxt.VoidType(), nil, false))
 		f.SetFunctionCallConv(llvmCallConv(s.ABI()))
 		attachGoObjSymbolRef(f, s)
+		setGoObjABI0SymbolNameMetadata(f, s.Name, llvmCallConv(s.ABI()))
 		return f
 	}
 	if g := CurrentModule.NamedGlobal(s.Name); !g.IsNil() {
