@@ -40,6 +40,7 @@ constexpr StringLiteral GoALLCGCName = "goallc";
 constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
 constexpr StringLiteral GoSourceAddressTakenMD = "goallc.source_addrtaken";
+constexpr StringLiteral GoObjMarkerRelocMD = "goobj.marker_reloc";
 constexpr StringLiteral StackColoringNoMergeMD = "llvm.stackcoloring.no_merge";
 
 // This strategy exists for statepoint verification and lowering. GoALLC owns
@@ -1399,9 +1400,61 @@ Error rewriteFunction(Function &F) {
   return Error::success();
 }
 
+Error materializeFunctionMarkerRelocs(Module &M) {
+  SmallVector<Instruction *, 16> Markers;
+  NamedMDNode *Relocs = nullptr;
+  for (Function &F : M) {
+    for (Instruction &I : instructions(F)) {
+      auto *II = dyn_cast<IntrinsicInst>(&I);
+      if (!II || II->getIntrinsicID() != Intrinsic::sideeffect)
+        continue;
+      MDNode *MD = I.getMetadata(GoObjMarkerRelocMD);
+      if (!MD)
+        continue;
+      if (MD->getNumOperands() != 3)
+        return createStringError(
+            std::errc::invalid_argument,
+            "GoALLC function marker relocation metadata must have three "
+            "operands");
+      auto *TargetMD = dyn_cast<ValueAsMetadata>(MD->getOperand(0));
+      auto *Target =
+          TargetMD ? dyn_cast<GlobalValue>(TargetMD->getValue()) : nullptr;
+      auto *Type = mdconst::dyn_extract<ConstantInt>(MD->getOperand(1));
+      auto *Addend = mdconst::dyn_extract<ConstantInt>(MD->getOperand(2));
+      if (!Target || !Type || Type->getValue().ugt(UINT16_MAX) || !Addend)
+        return createStringError(
+            std::errc::invalid_argument,
+            "GoALLC function marker relocation metadata is invalid");
+      switch (Type->getZExtValue()) {
+      case GoObj::R_USEIFACE:
+      case GoObj::R_USEIFACEMETHOD:
+      case GoObj::R_USENAMEDMETHOD:
+      case GoObj::R_INITORDER:
+        break;
+      default:
+        return createStringError(
+            std::errc::invalid_argument,
+            "GoALLC function marker relocation metadata has an unsupported "
+            "type");
+      }
+      if (!Relocs)
+        Relocs = M.getOrInsertNamedMetadata("goobj.marker_relocs");
+      Metadata *Operands[] = {ValueAsMetadata::get(&F), TargetMD,
+                              MD->getOperand(1).get(), MD->getOperand(2).get()};
+      Relocs->addOperand(MDNode::get(M.getContext(), Operands));
+      Markers.push_back(&I);
+    }
+  }
+  for (Instruction *Marker : Markers)
+    Marker->eraseFromParent();
+  return Error::success();
+}
+
 } // namespace
 
 Error goallc::rewriteStatepoints(Module &M, TargetMachine &) {
+  if (Error Err = materializeFunctionMarkerRelocs(M))
+    return Err;
   for (Function &F : M) {
     if (F.isDeclaration() || !isGoCallingConv(F.getCallingConv()) ||
         !F.hasGC() || F.getGC() != GoALLCGCName)
