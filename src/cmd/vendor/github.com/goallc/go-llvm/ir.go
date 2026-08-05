@@ -67,6 +67,9 @@ type (
 	Attribute struct {
 		C C.LLVMAttributeRef
 	}
+	OperandBundle struct {
+		C C.LLVMOperandBundleRef
+	}
 	Opcode              C.LLVMOpcode
 	AtomicRMWBinOp      C.LLVMAtomicRMWBinOp
 	AtomicOrdering      C.LLVMAtomicOrdering
@@ -92,12 +95,16 @@ func (c PassManager) IsNil() bool    { return c.C == nil }
 func (c Use) IsNil() bool            { return c.C == nil }
 func (c Attribute) IsNil() bool      { return c.C == nil }
 func (c Metadata) IsNil() bool       { return c.C == nil }
+func (c OperandBundle) IsNil() bool  { return c.C == nil }
 
 // helpers
 func llvmTypeRefPtr(t *Type) *C.LLVMTypeRef    { return (*C.LLVMTypeRef)(unsafe.Pointer(t)) }
 func llvmValueRefPtr(t *Value) *C.LLVMValueRef { return (*C.LLVMValueRef)(unsafe.Pointer(t)) }
 func llvmMetadataRefPtr(t *Metadata) *C.LLVMMetadataRef {
 	return (*C.LLVMMetadataRef)(unsafe.Pointer(t))
+}
+func llvmOperandBundleRefPtr(t *OperandBundle) *C.LLVMOperandBundleRef {
+	return (*C.LLVMOperandBundleRef)(unsafe.Pointer(t))
 }
 func llvmBasicBlockRefPtr(t *BasicBlock) *C.LLVMBasicBlockRef {
 	return (*C.LLVMBasicBlockRef)(unsafe.Pointer(t))
@@ -143,6 +150,27 @@ func llvmMetadataRefs(mds []Metadata) (*C.LLVMMetadataRef, C.unsigned) {
 		pt = llvmMetadataRefPtr(&mds[0])
 	}
 	return pt, ptlen
+}
+
+func llvmOperandBundleRefs(bundles []OperandBundle) (*C.LLVMOperandBundleRef, C.unsigned) {
+	var pt *C.LLVMOperandBundleRef
+	ptlen := C.unsigned(len(bundles))
+	if ptlen > 0 {
+		pt = llvmOperandBundleRefPtr(&bundles[0])
+	}
+	return pt, ptlen
+}
+
+func NewOperandBundle(tag string, args []Value) (bundle OperandBundle) {
+	ctag := C.CString(tag)
+	defer C.free(unsafe.Pointer(ctag))
+	values, nvalues := llvmValueRefs(args)
+	bundle.C = C.LLVMCreateOperandBundle(ctag, C.size_t(len(tag)), values, nvalues)
+	return
+}
+
+func (bundle OperandBundle) Dispose() {
+	C.LLVMDisposeOperandBundle(bundle.C)
 }
 
 //-------------------------------------------------------------------------
@@ -1910,6 +1938,16 @@ func (b Builder) CreateCall(t Type, fn Value, args []Value, name string) (v Valu
 	defer C.free(unsafe.Pointer(cname))
 	ptr, nvals := llvmValueRefs(args)
 	v.C = C.LLVMBuildCall2(b.C, t.C, fn.C, ptr, nvals, cname)
+	return
+}
+
+func (b Builder) CreateCallWithOperandBundles(t Type, fn Value, args []Value, bundles []OperandBundle, name string) (v Value) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	values, nvalues := llvmValueRefs(args)
+	operandBundles, nbundles := llvmOperandBundleRefs(bundles)
+	v.C = C.LLVMBuildCallWithOperandBundles(b.C, t.C, fn.C, values, nvalues,
+		operandBundles, nbundles, cname)
 	return
 }
 
