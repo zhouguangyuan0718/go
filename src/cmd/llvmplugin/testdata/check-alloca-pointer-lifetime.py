@@ -160,6 +160,30 @@ def main():
         fail("loop alloca is not one explicit active root")
     if loop_body.count("call void @llvm.lifetime.start") != 1:
         fail("loop lifetime start was not preserved")
+
+    phi_body = function_body(ir, "phi_edge_pointer_alloca")
+    if phi_body.count("@llvm.experimental.gc.statepoint") != 1:
+        fail("PHI-edge lifetime function does not contain one statepoint")
+    if phi_body.count('"deopt"(') != 1 or phi_body.count(
+        f"i64 {ALLOCA_TAG}"
+    ) != 1:
+        fail("PHI-edge stack object layout is missing")
+    if (
+        "%slot.address = getelementptr inbounds i8, ptr %slot, i64 0"
+        not in phi_body
+    ):
+        fail("PHI incoming alloca was not canonicalized after lifetime.start")
+    if (
+        "phi ptr [ %slot.address, %initialize ], [ %other, %external ]"
+        not in phi_body
+    ):
+        fail("PHI incoming edge did not use the canonical alloca address")
+    if '"gc-live"(ptr %selected)' not in phi_body:
+        fail("merged PHI address is not an independent scalar root")
+    if '"gc-live"(ptr %slot)' in phi_body:
+        fail("PHI incoming alloca incorrectly entered merge-block live-out")
+    if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in phi_body:
+        fail("PHI-reachable stack object did not preserve its frame identity")
     if args.objview:
         check_goobj(args.llc, args.plugin, args.objview, args.input)
 

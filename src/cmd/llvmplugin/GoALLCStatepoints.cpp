@@ -223,7 +223,10 @@ Error canonicalizeDirectAllocaAddresses(Function &F, DominatorTree &DT) {
 
       if (!LifetimeStarts.empty() &&
           !llvm::any_of(LifetimeStarts, [&](IntrinsicInst *Start) {
-            return DT.dominates(Start, UsePoint);
+            // A PHI operand is used on its incoming edge, not in the PHI's
+            // block. Check the concrete Use so a lifetime.start in that
+            // predecessor can dominate just the alloca-carrying value.
+            return DT.dominates(Start, *U);
           })) {
         return createStringError(
             std::errc::not_supported,
@@ -231,19 +234,23 @@ Error canonicalizeDirectAllocaAddresses(Function &F, DominatorTree &DT) {
             "lifetime.start");
       }
 
-      Value *UseAddress = UseAddresses.lookup(UsePoint);
+      Instruction *InsertBefore = UsePoint;
+      if (auto *Phi = dyn_cast<PHINode>(UsePoint))
+        InsertBefore = Phi->getIncomingBlock(*U)->getTerminator();
+
+      Value *UseAddress = UseAddresses.lookup(InsertBefore);
       if (!UseAddress) {
         if (Address == Alloca) {
-          IRBuilder<> Builder(UsePoint);
+          IRBuilder<> Builder(InsertBefore);
           UseAddress = Builder.CreateInBoundsGEP(
               Builder.getInt8Ty(), Alloca, Builder.getInt64(0),
               Alloca->hasName() ? Alloca->getName() + ".address"
                                 : "alloca.address");
         } else {
           UseAddress =
-              rematerializeAllocaAddress(Address, Alloca, UsePoint);
+              rematerializeAllocaAddress(Address, Alloca, InsertBefore);
         }
-        UseAddresses[UsePoint] = UseAddress;
+        UseAddresses[InsertBefore] = UseAddress;
       }
       U->set(UseAddress);
     }
