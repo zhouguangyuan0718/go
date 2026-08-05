@@ -97,6 +97,7 @@ define goabiinternal void @alloca_direct_address_across_calls()
     "go-stack-growth-statepoint" gc "goallc" {
 entry:
   %slot = alloca ptr, align 8
+  store ptr null, ptr %slot, align 8
   call goabiinternal void @observe_stack_address(ptr %slot)
   call goabiinternal void @safepoint()
   call goabiinternal void @observe_stack_address(ptr %slot)
@@ -108,6 +109,7 @@ define goabiinternal void @alloca_gep_value_across_calls()
 entry:
   %slot = alloca %pointer_field, align 8
   %field = getelementptr inbounds %pointer_field, ptr %slot, i32 0, i32 1
+  store ptr null, ptr %field, align 8
   call goabiinternal void @observe_stack_address(ptr %field)
   call goabiinternal void @safepoint()
   call goabiinternal void @observe_stack_address(ptr %field)
@@ -118,6 +120,7 @@ define goabiinternal void @alloca_pointer_free_address_across_calls()
     "go-stack-growth-statepoint" gc "goallc" {
 entry:
   %slot = alloca i64, align 8
+  store i64 0, ptr %slot, align 8
   call goabiinternal void @observe_stack_address(ptr %slot)
   call goabiinternal void @safepoint()
   call goabiinternal void @observe_stack_address(ptr %slot)

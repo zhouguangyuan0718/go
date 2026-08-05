@@ -190,7 +190,9 @@ bool isDirectFrameAddressUse(const Use &U) {
 Value *rematerializeAllocaAddress(Value *Address, Value *RelocatedBase,
                                   Instruction *InsertBefore);
 
-Error canonicalizeDirectAllocaAddresses(Function &F, DominatorTree &DT) {
+Error canonicalizeDirectAllocaAddresses(
+    Function &F, DominatorTree &DT,
+    SmallPtrSetImpl<AllocaInst *> &WholeLifetimeAllocas) {
   SmallVector<Value *, 32> Addresses;
   for (Instruction &I : instructions(F))
     if (isStaticAllocaAddress(&I))
@@ -228,10 +230,11 @@ Error canonicalizeDirectAllocaAddresses(Function &F, DominatorTree &DT) {
             // predecessor can dominate just the alloca-carrying value.
             return DT.dominates(Start, *U);
           })) {
-        return createStringError(
-            std::errc::not_supported,
-            "GoALLC first-class alloca address use is not dominated by "
-            "lifetime.start");
+        // LLVM can legally move non-dereferencing address operations outside
+        // the source VarDef interval. Preserve that data flow by widening the
+        // storage lifetime later; Go GC activity still uses the original
+        // lifetime markers as backward liveness kills.
+        WholeLifetimeAllocas.insert(Alloca);
       }
 
       Instruction *InsertBefore = UsePoint;
@@ -872,26 +875,53 @@ void protectStackObjectsFromColoring(
   }
 }
 
-void initializeStackObjects(
-    MutableArrayRef<PointerAllocaRecord> PointerAllocas) {
-  for (PointerAllocaRecord &Record : PointerAllocas) {
-    if (!Record.NeedsStackObject)
+Error promoteAllocasToWholeFunctionLifetime(
+    Function &F, const SmallPtrSetImpl<AllocaInst *> &WholeLifetimeAllocas) {
+  if (WholeLifetimeAllocas.empty())
+    return Error::success();
+
+  SmallVector<AllocaInst *, 8> OrderedAllocas;
+  SmallVector<Instruction *, 16> OldLifetimeMarkers;
+  for (Instruction &I : instructions(F)) {
+    if (auto *Alloca = dyn_cast<AllocaInst>(&I);
+        Alloca && WholeLifetimeAllocas.contains(Alloca)) {
+      OrderedAllocas.push_back(Alloca);
       continue;
-    // A potential StackObject has function-wide metadata. If the writer finds
-    // an unmatched layout, stack growth adjusts every pointer word in that
-    // record even outside the object's source lifetime, so those words must be
-    // valid from frame entry onward.
-    IRBuilder<> Builder(Record.Alloca->getNextNode());
-    Builder.SetCurrentDebugLocation(Record.Alloca->getDebugLoc());
-    for (const PointerAllocaLeaf &Leaf : Record.Leaves) {
-      std::string Name = allocaLeafName(*Record.Alloca, Leaf);
-      Value *Address = pointerAllocaLeafAddress(Builder, *Record.Alloca, Leaf,
-                                                Name + ".init.addr");
-      Align Alignment = commonAlignment(Record.Alloca->getAlign(), Leaf.Offset);
-      Builder.CreateAlignedStore(ConstantPointerNull::get(Leaf.Type), Address,
-                                 Alignment);
     }
+    auto *Lifetime = dyn_cast<LifetimeIntrinsic>(&I);
+    if (!Lifetime)
+      continue;
+    auto *Alloca = dyn_cast<AllocaInst>(Lifetime->getArgOperand(0));
+    if (Alloca && WholeLifetimeAllocas.contains(Alloca))
+      OldLifetimeMarkers.push_back(Lifetime);
   }
+
+  for (Instruction *Marker : OldLifetimeMarkers)
+    Marker->eraseFromParent();
+
+  const DataLayout &DL = F.getDataLayout();
+  for (AllocaInst *Alloca : OrderedAllocas) {
+    std::optional<TypeSize> AllocationSize = Alloca->getAllocationSize(DL);
+    if (!AllocationSize || AllocationSize->isScalable())
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC cannot widen a dynamically sized alloca lifetime");
+
+    // Keep one storage lifetime from function entry through return. The
+    // original VarDef markers have already served as Go GC liveness kills;
+    // they must not reset this entry initialization back to uninitialized.
+    IRBuilder<> Builder(Alloca->getNextNode());
+    Builder.SetCurrentDebugLocation(Alloca->getDebugLoc());
+    Builder.CreateLifetimeStart(Alloca);
+    uint64_t ByteSize = AllocationSize->getFixedValue();
+    if (ByteSize != 0)
+      Builder.CreateMemSet(Alloca, Builder.getInt8(0),
+                           Builder.getInt64(ByteSize), Alloca->getAlign());
+    Alloca->setMetadata(
+        StackColoringNoMergeMD,
+        MDNode::get(Alloca->getContext(), ArrayRef<Metadata *>()));
+  }
+  return Error::success();
 }
 
 bool isPointerAllocaActiveAt(const PointerAllocaRecord &Record,
@@ -1271,7 +1301,9 @@ Error rewriteFunction(Function &F) {
   }
 
   DominatorTree DT(F);
-  if (Error Err = canonicalizeDirectAllocaAddresses(F, DT))
+  SmallPtrSet<AllocaInst *, 8> WholeLifetimeAllocas;
+  if (Error Err =
+          canonicalizeDirectAllocaAddresses(F, DT, WholeLifetimeAllocas))
     return Err;
   SmallVector<PointerAllocaRecord, 8> PointerAllocas;
   if (Error Err = collectPointerAllocas(F, PointerAllocas))
@@ -1336,7 +1368,9 @@ Error rewriteFunction(Function &F) {
       Record.AllocaAddresses.remove(Address);
   }
   protectStackObjectsFromColoring(PointerAllocas);
-  initializeStackObjects(PointerAllocas);
+  if (Error Err =
+          promoteAllocasToWholeFunctionLifetime(F, WholeLifetimeAllocas))
+    return Err;
   for (SafepointRecord &Record : llvm::reverse(Records)) {
     SmallVector<const PointerAllocaRecord *, 8> AllocaRecords;
     for (const PointerAllocaRecord &Alloca : PointerAllocas) {

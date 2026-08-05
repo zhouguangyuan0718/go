@@ -140,14 +140,15 @@ def main():
         fail("call-only stack-object address entered caller live-out")
     if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in stack_body:
         fail("stack object does not preserve its frame identity across stack coloring")
-    entry_initialize = stack_body.find("store ptr null")
-    source_initialize = stack_body.rfind("store ptr null")
+    source_initialize = stack_body.find("store ptr null")
     first_call = stack_body.find("@llvm.experimental.gc.statepoint")
     lifetime_start = stack_body.find("call void @llvm.lifetime.start")
-    if min(entry_initialize, first_call, lifetime_start, source_initialize) < 0:
+    if min(first_call, lifetime_start, source_initialize) < 0:
         fail("stack object initialization sequence is incomplete")
-    if not entry_initialize < first_call < lifetime_start < source_initialize:
-        fail("stack object entry and source initialization are misordered")
+    if stack_body.count("store ptr null") != 1:
+        fail("ordinary stack object was unnecessarily initialized at entry")
+    if not first_call < lifetime_start < source_initialize:
+        fail("stack object source initialization is misordered")
 
     loop_body = function_body(ir, "loop_reinitialized_pointer_alloca")
     if loop_body.count("@llvm.experimental.gc.statepoint") != 2:
@@ -184,6 +185,37 @@ def main():
         fail("PHI incoming alloca incorrectly entered merge-block live-out")
     if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in phi_body:
         fail("PHI-reachable stack object did not preserve its frame identity")
+
+    aggregate_body = function_body(ir, "hoisted_aggregate_pointer_alloca")
+    if aggregate_body.count("@llvm.experimental.gc.statepoint") != 3:
+        fail("hoisted aggregate lifetime function does not contain three statepoints")
+    if aggregate_body.count(f"i64 {ALLOCA_TAG}") != 3:
+        fail("promoted alloca layout is not available at every statepoint")
+    if aggregate_body.count("call void @llvm.lifetime.start") != 1:
+        fail("promoted alloca does not have one whole-function lifetime start")
+    if "call void @llvm.lifetime.end" in aggregate_body:
+        fail("promoted alloca retained a lifetime end")
+    lifetime_start = aggregate_body.find("call void @llvm.lifetime.start")
+    entry_initialize = aggregate_body.find("call void @llvm.memset")
+    first_call = aggregate_body.find("@llvm.experimental.gc.statepoint")
+    source_initialize = aggregate_body.find("store ptr null")
+    if min(lifetime_start, entry_initialize, first_call, source_initialize) < 0:
+        fail("promoted alloca initialization sequence is incomplete")
+    if not lifetime_start < entry_initialize < first_call < source_initialize:
+        fail("promoted alloca was not initialized before its widened live range")
+    if "%slice.cap.leaf.0 = extractvalue" not in aggregate_body:
+        fail("hoisted aggregate stack address was not scalarized")
+    if "%slice.cap.leaf.0.relocated" not in aggregate_body:
+        fail("hoisted aggregate stack address was not relocated")
+    statepoints = [
+        line
+        for line in aggregate_body.splitlines()
+        if "@llvm.experimental.gc.statepoint" in line
+    ]
+    if '"gc-live"(ptr %slice.cap.leaf.0)' not in statepoints[0]:
+        fail("hoisted stack address is not live before its eventual use")
+    if '"gc-live"' in statepoints[-1]:
+        fail("promoted storage remained GC-live after its final use")
     if args.objview:
         check_goobj(args.llc, args.plugin, args.objview, args.input)
 
