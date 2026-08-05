@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/goallc/go-llvm"
 )
@@ -29,7 +30,7 @@ func emitGoObjImportMetadata() {
 	}
 }
 
-func emitGoObjCgoMetadata() {
+func emitGoObjCgoModuleAsm() {
 	if len(typecheck.Target.CgoPragmas) == 0 {
 		return
 	}
@@ -37,9 +38,9 @@ func emitGoObjCgoMetadata() {
 	if err != nil {
 		base.Fatalf("serializing cgo pragmas for LLVM: %v", err)
 	}
-	CurrentModule.AddNamedMetadataOperand("goobj.cgo", GlobalCtxt.MDNode([]llvm.Metadata{
-		GlobalCtxt.MDString(string(data)),
-	}))
+	// Cgo pragmas are a textual section of the Go object header, so carry
+	// them through LLVM as an object-format directive rather than IR metadata.
+	CurrentModule.SetInlineAsm(".goobj.cgo " + strconv.Quote(string(data)) + "\n")
 }
 
 // attachGoObjSymbolRef attaches the part of an undefined Go symbol's identity
