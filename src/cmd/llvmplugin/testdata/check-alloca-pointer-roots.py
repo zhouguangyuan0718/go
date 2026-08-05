@@ -9,8 +9,7 @@ import tempfile
 
 
 BEGIN = 1195461697
-LOCALS_TAG = 1280262988
-STACK_OBJECT_TAG = 1398033231
+ALLOCA_TAG = 1095520067
 END = 1095519299
 WORD_BITS = 64
 
@@ -76,11 +75,7 @@ def parse_protocol(bundle):
         if cursor + 10 > len(tokens) - 1:
             fail(f"truncated record {record_index}: {bundle}")
         tag = parse_i64(tokens[cursor], "record tag")
-        if tag == LOCALS_TAG:
-            kind = "locals"
-        elif tag == STACK_OBJECT_TAG:
-            kind = "stack_object"
-        else:
+        if tag != ALLOCA_TAG:
             fail(f"wrong record tag {record_index}: {bundle}")
         record_length = parse_i64(tokens[cursor + 1], "record length")
         base = tokens[cursor + 2]
@@ -104,7 +99,6 @@ def parse_protocol(bundle):
         ]
         records.append(
             (
-                kind,
                 base.removeprefix("ptr %"),
                 byte_offset,
                 byte_size,
@@ -148,8 +142,8 @@ def expect_records(ir, function_name, expected, expected_prefixes=None):
     return function
 
 
-def record(kind, base, size, bits, words):
-    return (kind, base, 0, size, 8, 8, bits, WORD_BITS, tuple(words))
+def record(base, size, bits, words):
+    return (base, 0, size, 8, 8, bits, WORD_BITS, tuple(words))
 
 
 def check_rewritten_ir(ir):
@@ -162,35 +156,34 @@ def check_rewritten_ir(ir):
     if "llvm.statepoint.fixed_stack_home" in ir:
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
-    # Seven address-observable StackObjects get entry initialization. The one
-    # marker-free LocalsOnly fixture already has its own source null store.
+    # Eight address-observable allocas get entry initialization. The one
+    # marker-free direct-only fixture already has its own source null store.
     null_initializers = re.findall(r"^\s*store ptr null, ptr ", ir, re.MULTILINE)
-    if len(null_initializers) != 8:
-        fail(f"found {len(null_initializers)} null initializers, want eight")
+    if len(null_initializers) != 9:
+        fail(f"found {len(null_initializers)} null initializers, want nine")
 
-    locals_one = [record("locals", "slot", 8, 1, [1])]
-    stack_one = [record("stack_object", "slot", 8, 1, [1])]
-    expect_records(ir, "pointer_slot", [stack_one], [["i64 7"]])
+    one = [record("slot", 8, 1, [1])]
+    expect_records(ir, "pointer_slot", [one], [["i64 7"]])
     expect_records(
         ir,
         "nested_whole_aggregate",
-        [[record("locals", "slot", 48, 6, [0x29])]],
+        [[record("slot", 48, 6, [0x29])]],
     )
-    expect_records(ir, "alloca_call_skip", [locals_one])
-    expect_records(ir, "alloca_multiple_calls", [locals_one, locals_one])
-    expect_records(ir, "alloca_loop", [locals_one])
+    expect_records(ir, "alloca_call_skip", [one])
+    expect_records(ir, "alloca_multiple_calls", [one, one])
+    expect_records(ir, "alloca_loop", [one])
     expect_records(
         ir,
         "alloca_gep_address_across_call",
-        [[record("locals", "slot", 16, 2, [0x2])]],
+        [[record("slot", 16, 2, [0x2])]],
     )
     direct_address = expect_records(
-        ir, "alloca_direct_address_across_calls", [stack_one] * 3
+        ir, "alloca_direct_address_across_calls", [one] * 3
     )
     gep_address = expect_records(
         ir,
         "alloca_gep_value_across_calls",
-        [[record("stack_object", "slot", 16, 2, [0x2])]] * 3,
+        [[record("slot", 16, 2, [0x2])]] * 3,
     )
     pointer_free_address = function_body(
         ir, "alloca_pointer_free_address_across_calls"
@@ -207,31 +200,28 @@ def check_rewritten_ir(ir):
         != 2
     ):
         fail("pointer-free alloca address changed the content-ptrmap protocol")
-    expect_records(ir, "alloca_marker_free_at_safepoint", [locals_one])
+    expect_records(ir, "alloca_marker_free_at_safepoint", [one])
     expect_records(
         ir,
         "alloca_high_bitmap_word",
-        [[record("locals", "slot", 512, 64, [1 << 63])]],
+        [[record("slot", 512, 64, [1 << 63])]],
     )
     expect_records(
         ir,
         "alloca_multiple_records",
-        [[
-            record("locals", "left", 8, 1, [1]),
-            record("locals", "right", 8, 1, [1]),
-        ]],
+        [[record("left", 8, 1, [1])]],
     )
-    expect_records(ir, "alloca_select_same_base", [locals_one])
+    expect_records(ir, "alloca_select_same_base", [one])
 
     escaped = expect_records(
-        ir, "alloca_address_passed_to_callee", [stack_one]
+        ir, "alloca_address_passed_to_callee", [one]
     )
-    expect_records(ir, "alloca_nocapture_writable", [stack_one])
+    expect_records(ir, "alloca_nocapture_writable", [one])
     expect_records(
-        ir, "alloca_escaped_before_unknown_write", [stack_one, stack_one]
+        ir, "alloca_escaped_before_unknown_write", [one, one]
     )
     expect_records(
-        ir, "alloca_readonly_and_readnone", [stack_one, stack_one]
+        ir, "alloca_readonly_and_readnone", [one, one]
     )
 
     selected = function_body(ir, "alloca_select_same_base")
@@ -284,16 +274,16 @@ def check_rewritten_ir(ir):
 
     locals_only = function_body(ir, "alloca_multiple_calls")
     if "store ptr null" in locals_only:
-        fail("LocalsOnly alloca received plugin initialization")
+        fail("direct-only alloca received plugin initialization")
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir
     )
-    # Twenty-four active pointer-containing alloca roots retain their storage
+    # Twenty active pointer-containing alloca roots retain their storage
     # identity and two ordinary scalar roots are relocated separately.
     # Pointer-free and derived stack addresses are rebuilt at their uses, so
     # they need neither an alloca relocate nor their own ptrmap root.
-    if len(relocates) != 26:
-        fail(f"found {len(relocates)} relocates, want 26")
+    if len(relocates) != 22:
+        fail(f"found {len(relocates)} relocates, want 22")
     marker_free = function_body(ir, "alloca_marker_free_at_safepoint")
     if '"gc-live"(ptr %pointer' not in marker_free:
         fail("ordinary scalar SSA pointer is missing from gc-live")
@@ -320,16 +310,27 @@ def check_objview(objview, object_path):
     if "stack_objects" in locals_kinds:
         fail("locals-only alloca unexpectedly emitted StackObjects")
 
-    stack_object_kinds = funcdata_kinds("alloca_address_passed_to_callee")
+    active_only_kinds = funcdata_kinds("alloca_address_passed_to_callee")
+    if "stack_objects" in active_only_kinds:
+        fail("all-callsite-live alloca unexpectedly emitted StackObjects")
+    active_only = function("alloca_address_passed_to_callee")
+    active_only_data = {
+        entry["kind"]: entry for entry in active_only["funcdata"]
+    }
+    active_only_maps = active_only_data["locals_pointer_maps"]["stack_map"]
+    if not any(bitmap.get("set_bits") for bitmap in active_only_maps["bitmaps"]):
+        fail("matching alloca gc-live did not expand LocalsPointerMaps")
+
+    stack_object_kinds = funcdata_kinds("alloca_direct_address_across_calls")
     if "stack_objects" not in stack_object_kinds:
-        fail("address-observable alloca has no StackObjects")
-    stack_object = function("alloca_address_passed_to_callee")
+        fail("unmatched alloca layout did not emit StackObjects")
+    stack_object = function("alloca_direct_address_across_calls")
     stack_object_data = {
         entry["kind"]: entry for entry in stack_object["funcdata"]
     }
     stack_object_maps = stack_object_data["locals_pointer_maps"]["stack_map"]
-    if any(bitmap.get("set_bits") for bitmap in stack_object_maps["bitmaps"]):
-        fail("StackObject root polluted LocalsPointerMaps")
+    if not any(bitmap.get("set_bits") for bitmap in stack_object_maps["bitmaps"]):
+        fail("active StackObject layout did not expand LocalsPointerMaps")
 
     pointer_free = function("alloca_pointer_free_address_across_calls")
     pointer_free_data = {
@@ -426,10 +427,7 @@ def main():
         if len(alloca_statepoints) != 23:
             fail("MIR does not contain twenty-three alloca statepoints")
         for statepoint in alloca_statepoints:
-            if (
-                str(LOCALS_TAG) not in statepoint
-                and str(STACK_OBJECT_TAG) not in statepoint
-            ) or "%stack." not in statepoint:
+            if str(ALLOCA_TAG) not in statepoint or "%stack." not in statepoint:
                 fail(f"MIR alloca record is malformed: {statepoint}")
 
         output = f"{directory}/alloca-pointer-roots.goobj"

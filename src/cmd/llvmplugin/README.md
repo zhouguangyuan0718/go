@@ -128,24 +128,25 @@ source-lifetime initialization; the frontend marker helper adds no pointer
 clears, and neither side emits `llvm.lifetime.end`.
 
 For every surviving fixed object, statepoint rewriting enumerates pointer
-offsets and performs a backward, path-sensitive dataflow over its optimized
-address-use graph. A lifetime start is a kill and a real load, store, call use,
-comparison, `llvm.fake.use`, or other terminal address use is a gen. This makes
-the final real use the implicit lifetime end without modifying IR. Derived
-GEP/cast/PHI/select addresses are followed to their terminal uses. Marker-free
-or unclassifiable objects remain conservatively active at every statepoint;
-their producer must already have initialized every scanned pointer word. The
-original lifetime starts remain in IR for the normal code-generation pipeline.
+offsets and performs a backward, path-sensitive live-out dataflow over its
+optimized address-use graph. A lifetime start is a kill and a real load, store,
+call use, comparison, `llvm.fake.use`, or other terminal address use is a gen.
+The callsite is sampled before applying that call's use transfer, so an address
+used only as a current call argument is live-in but not caller `gc-live`.
+Direct GEP/cast chains retain the alloca base; PHI/select/freeze results become
+independent scalar roots and do not make every possible incoming alloca live
+after the merge. This makes the final real use the implicit lifetime end
+without modifying IR. Unclassifiable objects fail closed. The original
+lifetime starts remain in IR for the normal code-generation pipeline.
 Address-observable objects are different: Go's runtime adjusts every pointer
 word in every `StackObjects` record during stack growth, whether the object is
 source-live or not. The plugin therefore zeroes only those pointer leaves once
 at frame entry. This is independent of a later VarDef reinitialization. The
-record carries a `LocalsOnly` or `StackObject` kind tag, the alloca address,
-whole-object size and alignment, pointer size, valid bitmap bit count, and
-64-bit bitmap words. The envelope and every record carry explicit lengths, and
-a trailing duplicate envelope length makes the suffix recoverable after
-ordinary deopt operands. There is deliberately no contract version in the
-first grammar.
+record carries one generic tag, the alloca address, whole-object size and
+alignment, pointer size, valid bitmap bit count, and 64-bit bitmap words. The
+envelope and every record carry explicit lengths, and a trailing duplicate
+envelope length makes the suffix recoverable after ordinary deopt operands.
+There is deliberately no contract version in the first grammar.
 
 LowerStatepoint lowers both the deopt alloca address and explicit `gc-live`
 alloca through their normal direct FrameIndex paths and preserves the adjacent
@@ -155,14 +156,16 @@ as a deopt layout carrier is not implicitly promoted to a GC root; explicit
 `NoRelocate` and rematerializes the same frame index, so no root spill is
 created. The Go-owned StackMaps bridge retains the deopt prefix and resolves
 both inline constants and `ConstantIndex` values. The GoObj writer strictly
-parses the suffix and maps every active direct alloca plus bitmap bit to that
-callsite's `LocalsPointerMaps`. `StackObject` records additionally remain
-identical at every ordinary statepoint and emit native-layout
-`FUNCDATA_StackObjects` plus content-addressed GC bitmaps; `LocalsOnly` records
-do not. The writer fails closed on malformed lengths, non-direct bases,
-inconsistent layout, nonzero padding, duplicates, overlaps, or locations
-outside the GC locals range. The deopt grammar does not escape the object
-writer.
+parses the suffix and maps every layout with a matching direct `gc-live` alloca
+plus bitmap bit to that callsite's `LocalsPointerMaps`. An unmatched layout is
+a function-level StackObject candidate; the writer requires that same layout
+at every ordinary statepoint before emitting native-layout
+`FUNCDATA_StackObjects` plus content-addressed GC bitmaps. A record may
+therefore contribute locals bits at active callsites and still establish a
+function-level StackObject at an inactive callsite. The writer fails closed on
+malformed lengths, non-direct bases, incomplete function-level layouts,
+nonzero padding, duplicates, overlaps, or locations outside the GC locals
+range. The deopt grammar does not escape the object writer.
 
 Because a StackObject record describes one function-wide frame object, the
 plugin marks that alloca with `llvm.stackcoloring.no_merge`. Stack coloring
@@ -190,9 +193,9 @@ The final combined order is:
 
 1. **Optimized alloca classification and activity.** Enumerate pointer leaves, classify
    final IR uses as address-observable stack objects or direct-only locals,
-   then compute callsite activity from frontend lifetime starts and terminal
-   address uses. Marker-free objects remain conservatively active; StackObjects
-   alone receive function-entry pointer initialization.
+   then compute callsite live-out from frontend lifetime starts and terminal
+   address uses. Address-observable objects alone receive function-entry
+   pointer initialization.
 2. **Aggregate normalization.** Use aggregate-only liveness to find and
    decompose supported live first-class struct/array values, then rebuild
    aggregates immediately before their uses.
