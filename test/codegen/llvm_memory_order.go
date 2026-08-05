@@ -6,7 +6,13 @@
 
 package codegen
 
+import "runtime"
+
 var llvmMemoryOrderRoot *int
+
+func llvmSemanticKeepAlive(value *int) {
+	runtime.KeepAlive(value)
+}
 
 //go:noinline
 func llvmMemoryOrderStore(value *int) {
@@ -22,6 +28,10 @@ func llvmMemoryOrderStore(value *int) {
 // LLVM-OPT: call ptr @llvm.go.gc.write.barrier(i32 2)
 // LLVM-OPT: store ptr %[[VALUE]], ptr @codegen.llvmMemoryOrderRoot
 // LLVM-OPT: ret ptr %[[VALUE]]
+// LLVM-LABEL: define goabiinternal void @codegen.llvmSemanticKeepAlive(
+// LLVM: call void @llvm.donothing() [ "go.keepalive"(ptr %{{.*}}) ]
+// LLVM-OPT-LABEL: define goabiinternal void @codegen.llvmSemanticKeepAlive(
+// LLVM-OPT: call void @llvm.donothing() [ "go.keepalive"(ptr %{{.*}}) ]
 func llvmMemoryOrderLoad(value *int) *int {
 	llvmMemoryOrderStore(value)
 	return llvmMemoryOrderRoot

@@ -282,10 +282,14 @@ func (lfc *LLVMFuncContext) llvmLifetimeStart(slot llvmStackSlot) {
 	lfc.b.CreateCall(sig, fn, []llvm.Value{slot.Value}, "")
 }
 
-func (lfc *LLVMFuncContext) llvmFakeUse(value llvm.Value) {
-	sig := llvm.FunctionType(GlobalCtxt.VoidType(), nil, true)
-	fn := getOrInsertLLVMIntrinsic("llvm.fake.use", sig)
-	lfc.b.CreateCall(sig, fn, []llvm.Value{value}, "")
+func (lfc *LLVMFuncContext) llvmKeepAlive(value llvm.Value) {
+	// An operand bundle is a real SSA use that follows the call through
+	// inlining. llvm.donothing survives long enough for the statepoint pass to
+	// consume that liveness, then code generation emits no instruction for it.
+	fn := getLLVMIntrinsicDeclaration("llvm.donothing")
+	bundle := llvm.NewOperandBundle("go.keepalive", []llvm.Value{value})
+	lfc.b.CreateCallWithOperandBundles(fn.GlobalValueType(), fn, nil, []llvm.OperandBundle{bundle}, "")
+	bundle.Dispose()
 }
 
 func (lfc *LLVMFuncContext) llvmUnaryIntrinsic(v *Value, name string) llvm.Value {
@@ -1577,12 +1581,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = arg0()
 		if name, ok := v.Aux.(*ir.Name); ok {
 			if slot, ok := lfc.Locals[llvmLocalKeyForName(name)]; ok && slot.Type.HasPointers() {
-				lfc.llvmFakeUse(slot.Value)
+				lfc.llvmKeepAlive(slot.Value)
 			}
 		}
 	case OpKeepAlive:
 		lVal = arg1()
-		lfc.llvmFakeUse(arg0())
+		lfc.llvmKeepAlive(arg0())
 	case OpLocalAddr:
 		if v.Uses == 0 {
 			break
