@@ -505,6 +505,7 @@ Error scalarizeLivePointerAggregates(Function &F) {
     if (!LeafValuesOrErr)
       return LeafValuesOrErr.takeError();
     SmallVector<Value *, 8> LeafValues = std::move(*LeafValuesOrErr);
+    DenseMap<Instruction *, Value *> RebuiltAtUsePoint;
 
     for (Use *U : OriginalUses) {
       auto *Extract = dyn_cast<ExtractValueInst>(U->getUser());
@@ -526,6 +527,10 @@ Error scalarizeLivePointerAggregates(Function &F) {
             std::errc::not_supported,
             "GoALLC statepoints cannot rebuild a non-instruction aggregate "
             "use");
+      if (Value *Rebuilt = RebuiltAtUsePoint.lookup(InsertBefore)) {
+        U->set(Rebuilt);
+        continue;
+      }
       IRBuilder<> Builder(InsertBefore);
       Builder.SetCurrentDebugLocation(InsertBefore->getDebugLoc());
       Value *Rebuilt = PoisonValue::get(Candidate->getType());
@@ -534,6 +539,7 @@ Error scalarizeLivePointerAggregates(Function &F) {
             Rebuilt, LeafValue, Leaf.Indices,
             Candidate->hasName() ? Candidate->getName() + ".rebuilt" : "");
       }
+      RebuiltAtUsePoint[InsertBefore] = Rebuilt;
       U->set(Rebuilt);
     }
     for (Value *LeafValue : LeafValues)
