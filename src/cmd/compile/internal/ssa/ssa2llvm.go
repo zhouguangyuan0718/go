@@ -2703,7 +2703,7 @@ func Output(fileName string) error {
 	}
 	if !goObjImportsWritten {
 		emitGoObjImportMetadata()
-		emitGoObjCgoMetadata()
+		emitGoObjCgoModuleAsm()
 		goObjImportsWritten = true
 	}
 	return llvm.LLVMPrintModuleToFile(CurrentModule, fileName)
