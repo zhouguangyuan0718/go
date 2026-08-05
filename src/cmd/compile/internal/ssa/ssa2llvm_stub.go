@@ -12,7 +12,7 @@ func InitModule(pkg *types.Pkg) {
 func LowerGoObjData() {
 }
 
-func FinalizeGoObjContentHashes() {
+func FinalizeGoObjSymbolMetadata() {
 }
 
 func Output(fileName string) error {
