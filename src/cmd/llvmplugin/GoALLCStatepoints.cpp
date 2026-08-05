@@ -98,13 +98,8 @@ struct PointerAllocaLeaf {
 };
 
 struct PointerAllocaRecord {
-  enum class Kind {
-    LocalsOnly,
-    StackObject,
-  };
-
   AllocaInst *Alloca;
-  Kind RecordKind;
+  bool NeedsStackObject;
   uint64_t ByteSize;
   uint64_t Alignment;
   uint64_t BitCount;
@@ -174,8 +169,7 @@ bool isDirectFrameAddressUse(const Use &U) {
   if (!I)
     return false;
   if (isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
-      isa<AddrSpaceCastInst>(I) || isa<FreezeInst>(I) || isa<PHINode>(I) ||
-      isa<SelectInst>(I))
+      isa<AddrSpaceCastInst>(I))
     return true;
   if (auto *Load = dyn_cast<LoadInst>(I))
     return &U == &Load->getOperandUse(LoadInst::getPointerOperandIndex());
@@ -229,7 +223,10 @@ Error canonicalizeDirectAllocaAddresses(Function &F, DominatorTree &DT) {
 
       if (!LifetimeStarts.empty() &&
           !llvm::any_of(LifetimeStarts, [&](IntrinsicInst *Start) {
-            return DT.dominates(Start, UsePoint);
+            // A PHI operand is used on its incoming edge, not in the PHI's
+            // block. Check the concrete Use so a lifetime.start in that
+            // predecessor can dominate just the alloca-carrying value.
+            return DT.dominates(Start, *U);
           })) {
         return createStringError(
             std::errc::not_supported,
@@ -237,19 +234,23 @@ Error canonicalizeDirectAllocaAddresses(Function &F, DominatorTree &DT) {
             "lifetime.start");
       }
 
-      Value *UseAddress = UseAddresses.lookup(UsePoint);
+      Instruction *InsertBefore = UsePoint;
+      if (auto *Phi = dyn_cast<PHINode>(UsePoint))
+        InsertBefore = Phi->getIncomingBlock(*U)->getTerminator();
+
+      Value *UseAddress = UseAddresses.lookup(InsertBefore);
       if (!UseAddress) {
         if (Address == Alloca) {
-          IRBuilder<> Builder(UsePoint);
+          IRBuilder<> Builder(InsertBefore);
           UseAddress = Builder.CreateInBoundsGEP(
               Builder.getInt8Ty(), Alloca, Builder.getInt64(0),
               Alloca->hasName() ? Alloca->getName() + ".address"
                                 : "alloca.address");
         } else {
           UseAddress =
-              rematerializeAllocaAddress(Address, Alloca, UsePoint);
+              rematerializeAllocaAddress(Address, Alloca, InsertBefore);
         }
-        UseAddresses[UsePoint] = UseAddress;
+        UseAddresses[InsertBefore] = UseAddress;
       }
       U->set(UseAddress);
     }
@@ -671,9 +672,13 @@ bool allocaNeedsStackObject(AllocaInst &Alloca) {
       if (!I)
         return true;
 
+      if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<FreezeInst>(I))
+        // A merged/frozen address is tracked as an independent scalar root.
+        // It needs StackObject metadata so the runtime can discover and scan
+        // the alloca dynamically when that root points into this frame.
+        return true;
       if (isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
-          isa<AddrSpaceCastInst>(I) || isa<PHINode>(I) || isa<SelectInst>(I) ||
-          isa<FreezeInst>(I)) {
+          isa<AddrSpaceCastInst>(I)) {
         if (!I->getType()->isPointerTy())
           return true;
         Worklist.push_back(I);
@@ -765,7 +770,12 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record) {
           Record.ActivityUnclear = true;
           continue;
         }
-        Worklist.push_back(I);
+        // Only direct GEP/cast chains remain the same frame address. A
+        // phi/select/freeze result is an independent SSA pointer root: its
+        // live-out does not make every possible incoming alloca live after the
+        // merge.
+        if (rematerializableAllocaBase(I) == Record.Alloca)
+          Worklist.push_back(I);
         continue;
       }
       if (auto *Intrinsic = dyn_cast<IntrinsicInst>(I)) {
@@ -794,7 +804,7 @@ bool pointerAllocaLiveInBlock(const PointerAllocaRecord &Record,
 // as a backward kill and terminal address operations as uses. This gives each
 // start a path-sensitive interval whose end is the final real use, without
 // inserting lifetime.end or changing the producer's initialization sequence.
-void computePointerAllocaActivity(
+Error computePointerAllocaActivity(
     Function &F, SmallVectorImpl<PointerAllocaRecord> &PointerAllocas,
     ArrayRef<SafepointRecord> Safepoints, const DominatorTree &DT) {
   SmallPtrSet<const CallInst *, 16> SafepointCalls;
@@ -803,13 +813,10 @@ void computePointerAllocaActivity(
 
   for (PointerAllocaRecord &Record : PointerAllocas) {
     collectPointerAllocaAddressUses(Record);
-    if (Record.ActivityUnclear || Record.LifetimeMarkers.empty()) {
-      if (Record.ActivityUnclear)
-        Record.RecordKind = PointerAllocaRecord::Kind::StackObject;
-      for (const SafepointRecord &Safepoint : Safepoints)
-        Record.ActiveCalls.push_back(Safepoint.Call);
-      continue;
-    }
+    if (Record.ActivityUnclear)
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC cannot determine pointer alloca live-out activity");
 
     DenseMap<const BasicBlock *, bool> LiveIn;
     bool Changed;
@@ -832,23 +839,28 @@ void computePointerAllocaActivity(
         return LiveIn.lookup(Succ);
       });
       for (Instruction &I : llvm::reverse(BB)) {
-        if (llvm::is_contained(Record.LifetimeMarkers, &I))
-          Live = false;
-        else if (llvm::is_contained(Record.AddressUses, &I))
-          Live = true;
+        // A caller stack map describes values live after the call. Apply the
+        // current instruction's use transfer only after recording the
+        // safepoint, so an address used solely as this call's argument is not
+        // a caller gc-live root.
         auto *Call = dyn_cast<CallInst>(&I);
         if (Call && SafepointCalls.contains(Call) &&
             (Live || !DT.isReachableFromEntry(Call->getParent())))
           Record.ActiveCalls.push_back(Call);
+        if (llvm::is_contained(Record.LifetimeMarkers, &I))
+          Live = false;
+        else if (llvm::is_contained(Record.AddressUses, &I))
+          Live = true;
       }
     }
   }
+  return Error::success();
 }
 
 void protectStackObjectsFromColoring(
     MutableArrayRef<PointerAllocaRecord> PointerAllocas) {
   for (PointerAllocaRecord &Record : PointerAllocas) {
-    if (Record.RecordKind != PointerAllocaRecord::Kind::StackObject)
+    if (!Record.NeedsStackObject)
       continue;
     // A Go StackObject has function-wide identity and layout metadata.  It
     // cannot share storage with another lifetime-disjoint alloca because both
@@ -863,11 +875,12 @@ void protectStackObjectsFromColoring(
 void initializeStackObjects(
     MutableArrayRef<PointerAllocaRecord> PointerAllocas) {
   for (PointerAllocaRecord &Record : PointerAllocas) {
-    if (Record.RecordKind != PointerAllocaRecord::Kind::StackObject)
+    if (!Record.NeedsStackObject)
       continue;
-    // StackObjects is function-wide metadata. During stack growth the runtime
-    // adjusts every pointer word in every record, even outside the object's
-    // source lifetime, so those words must be valid from frame entry onward.
+    // A potential StackObject has function-wide metadata. If the writer finds
+    // an unmatched layout, stack growth adjusts every pointer word in that
+    // record even outside the object's source lifetime, so those words must be
+    // valid from frame entry onward.
     IRBuilder<> Builder(Record.Alloca->getNextNode());
     Builder.SetCurrentDebugLocation(Record.Alloca->getDebugLoc());
     for (const PointerAllocaLeaf &Leaf : Record.Leaves) {
@@ -954,10 +967,8 @@ Error collectPointerAllocas(
     // In particular, a source Addrtaken alloca can be downgraded when all
     // observable address uses disappeared during optimization.
     Alloca->setMetadata(GoSourceAddressTakenMD, nullptr);
-    PointerAllocaRecord::Kind Kind =
-        allocaNeedsStackObject(*Alloca) ? PointerAllocaRecord::Kind::StackObject
-                                        : PointerAllocaRecord::Kind::LocalsOnly;
-    PointerAllocas.push_back({Alloca, Kind, ByteSize,
+    bool NeedsStackObject = allocaNeedsStackObject(*Alloca);
+    PointerAllocas.push_back({Alloca, NeedsStackObject, ByteSize,
                               Alloca->getAlign().value(), BitCount,
                               std::move(BitmapWords), std::move(Leaves)});
   }
@@ -1031,9 +1042,7 @@ void appendAllocaPtrMapDeoptOperands(
   AppendConstant(ProtocolLength);
   AppendConstant(Allocas.size());
   for (const PointerAllocaRecord *Alloca : Allocas) {
-    AppendConstant(Alloca->RecordKind == PointerAllocaRecord::Kind::StackObject
-                       ? GoObj::AllocaPtrMapStackObjectRecordTag
-                       : GoObj::AllocaPtrMapLocalsRecordTag);
+    AppendConstant(GoObj::AllocaPtrMapRecordTag);
     AppendConstant(10 + Alloca->BitmapWords.size());
     Deopt.push_back(Alloca->Alloca);
     AppendConstant(0); // First contract version describes the whole alloca.
@@ -1293,7 +1302,8 @@ Error rewriteFunction(Function &F) {
   for (const SafepointRecord &Record : Records)
     if (Error Err = validateSafepoint(Record))
       return Err;
-  computePointerAllocaActivity(F, PointerAllocas, Records, DT);
+  if (Error Err = computePointerAllocaActivity(F, PointerAllocas, Records, DT))
+    return Err;
   DenseMap<AllocaInst *, const PointerAllocaRecord *> PointerAllocaRecords;
   for (const PointerAllocaRecord &Alloca : PointerAllocas)
     PointerAllocaRecords[Alloca.Alloca] = &Alloca;
@@ -1303,9 +1313,9 @@ Error rewriteFunction(Function &F) {
     for (Value *Address : Record.AllocaAddresses) {
       AllocaInst *Base = rematerializableAllocaBase(Address);
       bool IsActive = true;
-      if (const PointerAllocaRecord *PointerRecord =
-              PointerAllocaRecords.lookup(Base)) {
-        IsActive = isPointerAllocaActiveAt(*PointerRecord, *Record.Call);
+      if (PointerAllocaRecords.contains(Base)) {
+        // Record.AllocaAddresses is already the standard SSA live-out set for
+        // this call. Do not replace it with the storage activity approximation.
       } else {
         SmallVector<IntrinsicInst *, 4> LifetimeStarts;
         for (User *U : Base->users())
@@ -1330,16 +1340,15 @@ Error rewriteFunction(Function &F) {
   for (SafepointRecord &Record : llvm::reverse(Records)) {
     SmallVector<const PointerAllocaRecord *, 8> AllocaRecords;
     for (const PointerAllocaRecord &Alloca : PointerAllocas) {
-      bool IsActive = isPointerAllocaActiveAt(Alloca, *Record.Call);
+      bool IsActive = Record.Live.contains(Alloca.Alloca) ||
+                      isPointerAllocaActiveAt(Alloca, *Record.Call);
       if (IsActive)
         Record.Live.insert(Alloca.Alloca);
-      // StackObjects is function-wide metadata, so carry its layout at every
-      // ordinary statepoint. The alloca's gc-live presence separately carries
-      // activity/relocation information; the deopt record kind tells GoObj
-      // whether that information expands a LocalsOnly pointer map or belongs
-      // to a StackObject.
-      if (IsActive ||
-          Alloca.RecordKind == PointerAllocaRecord::Kind::StackObject)
+      // Address-observable layouts are function-wide metadata, so carry them
+      // at every ordinary statepoint. A matching direct gc-live base means the
+      // contents are live at this call; an unmatched occurrence lets GoObj
+      // infer the function-level StackObject set.
+      if (IsActive || Alloca.NeedsStackObject)
         AllocaRecords.push_back(&Alloca);
     }
     if (Error Err = rewriteCall(Record, AllocaRecords))

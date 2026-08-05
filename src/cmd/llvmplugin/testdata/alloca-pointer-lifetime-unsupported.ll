@@ -44,3 +44,24 @@ exit:
   call goabiinternal void @safepoint()
   ret void
 }
+
+define goabiinternal void @phi_edge_pointer_alloca(
+    i1 %use_stack, ptr %other) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca ptr, align 8
+  br i1 %use_stack, label %initialize, label %external
+
+initialize:
+  call void @llvm.lifetime.start.p0(i64 8, ptr %slot)
+  store ptr null, ptr %slot, align 8
+  br label %merge
+
+external:
+  br label %merge
+
+merge:
+  %selected = phi ptr [ %slot, %initialize ], [ %other, %external ]
+  call goabiinternal void @safepoint()
+  call void (...) @llvm.fake.use(ptr %selected)
+  ret void
+}

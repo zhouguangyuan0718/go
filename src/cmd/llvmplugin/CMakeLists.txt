@@ -559,8 +559,7 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     GoALLCStatepoints.PathLocalPointerAllocaLifetime PROPERTIES
-    PASS_REGULAR_EXPRESSION "1280262988"
-    FAIL_REGULAR_EXPRESSION "1398033231")
+    PASS_REGULAR_EXPRESSION "1095520067")
 
   add_test(
     NAME GoALLCStatepoints.VolatilePointerAllocaSupported

@@ -19,7 +19,7 @@ type llvmAllocaArchitectureChecks struct {
 	betweenCallsPattern  string
 	restoredStorePattern string
 	goallcLocals         uint32
-	goallcStackObject    int32
+	goallcPointerBits    []int
 }
 
 var llvmAllocaChecks = map[string]llvmAllocaArchitectureChecks{
@@ -27,13 +27,13 @@ var llvmAllocaChecks = map[string]llvmAllocaArchitectureChecks{
 		betweenCallsPattern:  `(?s)\bbl\s+p\.mutateLocal\n(.*?)\bbl\s+p\.safepoint`,
 		restoredStorePattern: `(?m)^\s*(?:str|stp)\b`,
 		goallcLocals:         88,
-		goallcStackObject:    -40,
+		goallcPointerBits:    []int{5, 7, 8, 9},
 	},
 	"linux/amd64": {
 		betweenCallsPattern:  `(?s)\bcallq\s+p\.mutateLocal\n(.*?)\bcallq\s+p\.safepoint`,
 		restoredStorePattern: `(?m)^\s*mov[a-z]*\s+[^,\n]+,\s*-[0-9]+\(%rbp\)`,
 		goallcLocals:         96,
-		goallcStackObject:    -48,
+		goallcPointerBits:    []int{6, 8, 9, 10},
 	},
 }
 
@@ -185,7 +185,7 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 			got, want, machineFunction)
 	}
 	for _, statepoint := range ordinaryStatepoints {
-		for _, constant := range []string{"1195461697", "1398033231", "40", "29", "1095519299"} {
+		for _, constant := range []string{"1195461697", "1095520067", "40", "29", "1095519299"} {
 			if !bytes.Contains(statepoint, []byte(constant)) {
 				t.Fatalf("STATEPOINT lost alloca contract constant %s: %s", constant, statepoint)
 			}
@@ -226,27 +226,21 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 	})
 	checkLLVMABISourceStackMaps(t, "GoALLC", symbol,
 		checks.goallcLocals,
-		[][]int{nil},
-		[][]int{nil},
-		[]int32{-1, 0},
-		[]int32{0, 0, 0, 0, 0})
+		[][]int{nil, nil},
+		[][]int{nil, checks.goallcPointerBits},
+		[]int32{-1, 1, 0},
+		[]int32{1, 1, 1, 1, 0})
 
 	goallcStackObjects := llvmABIStackObjects(t, symbol)
-	if got, want := len(goallcStackObjects), 1; got != want {
-		t.Fatalf("GoALLC StackObjects=%v, want one object", goallcStackObjects)
-	}
-	if object := goallcStackObjects[0]; object.Offset != checks.goallcStackObject || object.Size != 40 ||
-		object.PtrBytes != 40 || object.GCData == nil ||
-		object.GCData.Name != "runtime.gcbits.1d00000000000000" || object.GCData.ABI != 0 {
-		t.Fatalf("GoALLC StackObject=%+v, want offset=%d, size=40, ptrbytes=40, and ABI0 runtime.gcbits.1d00000000000000", object, checks.goallcStackObject)
+	if len(goallcStackObjects) != 0 {
+		t.Fatalf("GoALLC all-callsite-live object emitted StackObjects=%v", goallcStackObjects)
 	}
 
-	// StackObjects describe the function-wide identity and layout of the
-	// address-taken object. Its direct gc-live alloca address is an activity and
-	// relocation signal only; it must not duplicate the object's pointer fields
-	// in LocalsPointerMaps. Native Go currently emits a static locals bitmap for
-	// this fixture, which remains useful evidence of the native metadata shape
-	// but is not GoALLC's StackObject/deopt contract.
+	// A matching direct gc-live alloca expands the deopt layout into the
+	// callsite's LocalsPointerMaps. This fixture is live at every ordinary
+	// statepoint, so it does not need the fallback function-level StackObject.
+	// Native Go emits the equivalent pointer fields with a different frame-bit
+	// bias and retains source-level StackObjects metadata.
 	nativeSymbol := findLLVMABISymbol(t, readLLVMABIObject(t, nativeObject),
 		"p.localAcrossSafepoints")
 	if got := llvmABIStackMapBitmaps(t, nativeSymbol, "locals_pointer_maps"); !reflect.DeepEqual(got, [][]int{nil, {0, 2, 3, 4}}) {
