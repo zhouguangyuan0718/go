@@ -35,6 +35,7 @@ var sink *HeapObj
 
 //go:noinline
 func use(p *StkObj) {
+	runtime.KeepAlive(p)
 }
 
 //go:noinline
