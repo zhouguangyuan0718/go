@@ -422,6 +422,37 @@ func TestResolvePassPluginExplicit(t *testing.T) {
 	}
 }
 
+func TestResolveOpt(t *testing.T) {
+	dir := t.TempDir()
+	llc := filepath.Join(dir, "llc")
+	opt := filepath.Join(dir, "opt")
+	for _, path := range []string{llc, opt} {
+		if err := os.WriteFile(path, nil, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := resolveOpt(llc, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != opt {
+		t.Fatalf("resolveOpt next to llc = %q, want %q", got, opt)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "custom-opt")
+	if err := os.WriteFile(explicit, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err = resolveOpt(llc, explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != explicit {
+		t.Fatalf("resolveOpt explicit path = %q, want %q", got, explicit)
+	}
+}
+
 func TestResolvePassPluginNextToLLC(t *testing.T) {
 	root := t.TempDir()
 	llc := filepath.Join(root, "bin", "llc")

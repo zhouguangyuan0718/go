@@ -1107,6 +1107,9 @@ func (t test) run() error {
 			<-t.runoutputGate
 		}()
 		runInDir = ""
+		if t.llvm {
+			return t.runLLVMRunoutputCase(tempDir, args, runcmd)
+		}
 		cmd := []string{goTool, "run", t.goGcflags()}
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
