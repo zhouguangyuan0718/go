@@ -63,6 +63,7 @@ const goAsyncUnsafeAttr = "go-async-unsafe"
 const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
 const goSourceAddressTakenMD = "goallc.source_addrtaken"
+const goObjMarkerRelocMD = "goobj.marker_reloc"
 const llvmFramePointerAttr = "frame-pointer"
 const llvmFramePointerNonLeaf = "non-leaf"
 
@@ -2271,7 +2272,6 @@ func LLVMCompile(f *Func) {
 	// the Go stack.
 	FCtxt.LF.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goStackGrowthStatepointAttr, ""))
 	FCtxt.LF.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(llvmFramePointerAttr, llvmFramePointerNonLeaf))
-	setGoObjMarkerRelocMetadata(FCtxt.LF, f.OwnAux.Fn)
 	if sig.HasClosureContext {
 		FCtxt.ClosureContext = FCtxt.LF.Param(sig.ClosureContextIndex)
 		FCtxt.ClosureContext.SetName(".closureptr")
@@ -2328,6 +2328,7 @@ func LLVMCompile(f *Func) {
 	// ordinary instruction emission so LocalAddr values in loops and branches
 	// cannot become dynamic allocas (which Go stack growth cannot support).
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
+	emitGoObjFunctionMarkerRelocs(FCtxt.b, f.OwnAux.Fn)
 	var parameterHomes []*Value
 	var parameterLifetimeSlots []llvmStackSlot
 	for _, BB := range f.Blocks {

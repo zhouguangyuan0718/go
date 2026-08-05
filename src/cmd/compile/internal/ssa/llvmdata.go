@@ -608,6 +608,39 @@ func setGoObjMarkerRelocMetadata(source llvm.Value, s *obj.LSym) {
 	}
 }
 
+// Function marker relocations participate in linker reachability but carry no
+// storage. Represent them as inlineable side-effect markers until the LLVM
+// optimization pipeline has finished. The statepoint plugin then anchors each
+// cloned marker to its final containing function and removes the intrinsic.
+func emitGoObjFunctionMarkerRelocs(b llvm.Builder, s *obj.LSym) {
+	var sideeffect llvm.Value
+	for _, r := range s.R {
+		switch r.Type {
+		case objabi.R_USEIFACE, objabi.R_USEIFACEMETHOD, objabi.R_USENAMEDMETHOD:
+		case objabi.R_INITORDER:
+			if r.Off != 0 || r.Siz != 0 || r.Add != 0 {
+				base.Fatalf("invalid R_INITORDER relocation in %s", s.Name)
+			}
+		default:
+			continue
+		}
+		if r.Sym == nil {
+			base.Fatalf("nil GoObj marker target in %s", s.Name)
+		}
+		if sideeffect.IsNil() {
+			sideeffect = getLLVMIntrinsicDeclaration("llvm.sideeffect")
+		}
+		target := llvmGoDataRef(r.Sym)
+		preserveGoObjMetadataValues(target)
+		marker := b.CreateCall(sideeffect.GlobalValueType(), sideeffect, nil, "")
+		marker.SetMetadata(GlobalCtxt.MDKindID(goObjMarkerRelocMD), GlobalCtxt.MDNode([]llvm.Metadata{
+			target.ConstantAsMetadata(),
+			llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(uint16(r.Type)), false).ConstantAsMetadata(),
+			llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(r.Add), true).ConstantAsMetadata(),
+		}))
+	}
+}
+
 // R_KEEP is a zero-width linker reachability edge, not a storage relocation.
 // Keep it separate from !goobj.weak_relocs so llc can synthesize the GoObj record
 // without inventing bytes or a target-address expression in the global.
