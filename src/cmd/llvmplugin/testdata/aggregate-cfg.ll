@@ -133,6 +133,23 @@ merge:
   ret ptr %result
 }
 
+define goabiinternal ptr @aggregate_phi_duplicate_edge(
+    i32 %which, %pair %value)
+    "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  call goabiinternal void @safepoint()
+  switch i32 %which, label %merge [
+    i32 0, label %merge
+    i32 1, label %merge
+  ]
+
+merge:
+  %carried = phi %pair [ %value, %entry ], [ %value, %entry ], [ %value, %entry ]
+  call goabiinternal void @leaf_consume_pair(%pair %carried)
+  %result = extractvalue %pair %carried, 0
+  ret ptr %result
+}
+
 define goabiinternal ptr @aggregate_call_result_conditional(
     ptr %seed, i1 %take_call)
     "go-stack-growth-statepoint" gc "goallc" {

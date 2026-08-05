@@ -147,6 +147,14 @@ def main():
     if edge.count("@llvm.experimental.gc.statepoint") != 2:
         fail("aggregate PHI edge case does not contain two statepoints")
 
+    duplicate_edge = function_body(ir, "aggregate_phi_duplicate_edge")
+    require(
+        duplicate_edge,
+        r"%carried = phi %pair \[ (%[-\w.]+), %entry \], "
+        r"\[ \1, %entry \], \[ \1, %entry \]",
+        "shared aggregate reconstruction for duplicate PHI edges",
+    )
+
     for name in (
         "aggregate_call_result_conditional",
         "aggregate_call_result_loop",
