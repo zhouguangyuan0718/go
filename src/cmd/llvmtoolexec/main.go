@@ -25,6 +25,8 @@ import (
 
 var (
 	llcPath        = flag.String("llc", os.Getenv("GOALLC_LLC"), "path to llc")
+	optPath        = flag.String("opt", os.Getenv("GOALLC_OPT"), "path to opt")
+	optPasses      = flag.String("opt-passes", "", "optional LLVM optimization pipeline to run before llc")
 	passPluginPath = flag.String("pass-plugin", os.Getenv("GOALLC_PASS_PLUGIN"), "path to the GoALLC LLVM pass plugin (default next to llc)")
 	keepIR         = flag.Bool("keep-ir", false, "keep the compiler-generated .ll sidecar")
 )
@@ -41,7 +43,7 @@ func main() {
 		return
 	}
 	if isFullVersion(args) {
-		printToolIdentity(tool, args, *llcPath, *passPluginPath)
+		printToolIdentity(tool, args, *llcPath, *optPath, *optPasses, *passPluginPath)
 		return
 	}
 	if !isCompileAction(args) {
@@ -70,12 +72,22 @@ func main() {
 	if _, err := os.Stat(irPath); err != nil {
 		fatalf("compiler did not produce %s: %v", irPath, err)
 	}
+	llcInput := irPath
+	optimizedIRPath := output + ".opt.ll"
+	if *optPasses != "" {
+		opt, err := resolveOpt(llc, *optPath)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		run(opt, "-passes="+*optPasses, "-S", irPath, "-o", optimizedIRPath)
+		llcInput = optimizedIRPath
+	}
 	objPath := filepath.Join(filepath.Dir(output), "llvm-goobj.o")
 	llcArgs := []string{
 		"-load-pass-plugin=" + pluginPath,
 		"-trap-unreachable",
 		"-filetype=obj",
-		irPath,
+		llcInput,
 		"-o", objPath,
 	}
 	run(llc, llcArgs...)
@@ -89,7 +101,27 @@ func main() {
 		if err := os.Remove(irPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fatalf("remove %s: %v", irPath, err)
 		}
+		if *optPasses != "" {
+			if err := os.Remove(optimizedIRPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				fatalf("remove %s: %v", optimizedIRPath, err)
+			}
+		}
 	}
+}
+
+func resolveOpt(llc, configured string) (string, error) {
+	if configured != "" {
+		path, err := resolveExecutable(configured)
+		if err != nil {
+			return "", fmt.Errorf("invalid opt %q: %w", configured, err)
+		}
+		return path, nil
+	}
+	path, err := resolveExecutable(filepath.Join(filepath.Dir(llc), "opt"))
+	if err != nil {
+		return "", fmt.Errorf("missing opt next to llc %q: pass -opt or set GOALLC_OPT: %w", llc, err)
+	}
+	return path, nil
 }
 
 func resolvePassPlugin(llc, configured string) (string, error) {
@@ -203,10 +235,17 @@ func isCompileAction(args []string) bool {
 // -enablellvm compile action. The native compiler identity alone is
 // insufficient because llc and the pass plugin also determine the archive
 // written by this wrapper.
-func printToolIdentity(tool string, args []string, llc, configuredPlugin string) {
+func printToolIdentity(tool string, args []string, llc, configuredOpt, optPasses, configuredPlugin string) {
 	llc, err := resolveLLC(llc)
 	if err != nil {
 		fatalf("%v", err)
+	}
+	var opt string
+	if optPasses != "" {
+		opt, err = resolveOpt(llc, configuredOpt)
+		if err != nil {
+			fatalf("%v", err)
+		}
 	}
 	plugin, err := resolvePassPlugin(llc, configuredPlugin)
 	if err != nil {
@@ -234,19 +273,26 @@ func printToolIdentity(tool string, args []string, llc, configuredPlugin string)
 	if err != nil {
 		fatalf("resolving llvmtoolexec executable: %v", err)
 	}
-	backendFiles, err := backendIdentityFiles(llc, plugin)
+	backendFiles, err := backendIdentityFiles(llc, opt, plugin)
 	if err != nil {
 		fatalf("resolving backend identity files: %v", err)
 	}
-	identity, err := backendIdentity(out, append([]string{wrapper}, backendFiles...)...)
+	identityInput := append([]byte(nil), out...)
+	identityInput = append(identityInput, "\x00opt-passes="...)
+	identityInput = append(identityInput, optPasses...)
+	identity, err := backendIdentity(identityInput, append([]string{wrapper}, backendFiles...)...)
 	if err != nil {
 		fatalf("computing backend identity: %v", err)
 	}
 	fmt.Printf("%s buildID=%s\n", strings.Join(fields, " "), identity)
 }
 
-func backendIdentityFiles(llc, plugin string) ([]string, error) {
-	paths := []string{llc, plugin}
+func backendIdentityFiles(llc, opt, plugin string) ([]string, error) {
+	paths := []string{llc}
+	if opt != "" {
+		paths = append(paths, opt)
+	}
+	paths = append(paths, plugin)
 	root := filepath.Dir(filepath.Dir(llc))
 	var candidates []string
 	for _, pattern := range []string{"libLLVM*.dylib", "libLLVM*.so", "libLLVM*.so.*"} {

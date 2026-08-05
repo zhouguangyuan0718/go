@@ -122,7 +122,7 @@ func runLLVMTests(t *testing.T, common testCommon) {
 
 func runLLVMCompileOnlyRegression(t *testing.T, gorootTestDir, name string) {
 	t.Helper()
-	toolexec := llvmToolexec(t)
+	toolexec := llvmToolexec(t, "")
 	exe := filepath.Join(t.TempDir(), "test.exe")
 	cmd := exec.Command(goTool, "build",
 		"-gcflags=all="+os.Getenv("GO_GCFLAGS"),
@@ -511,28 +511,52 @@ func runLLVMWriteBarrierIRTests(t *testing.T) {
 }
 
 func (t test) runLLVMCase(tempDir string, flags, args []string, runcmd runCmd) error {
-	if goos != runtime.GOOS || goarch != runtime.GOARCH {
-		t.Skip("LLVM execution tests do not support cross compilation")
-	}
-	toolexec := llvmToolexec(t.T)
-	exe := filepath.Join(tempDir, "test.exe")
-	// GoObj DWARF emission is not implemented by the LLVM backend yet. Disable
-	// debug data explicitly so runtime qualification measures compile, link, and
-	// execution support instead of failing in the linker's DWARF writer.
-	cmd := []string{goTool, "build", t.goGcflags(), "-gcflags=-enablellvm", "-ldflags=-w", "-toolexec=" + toolexec, "-o", exe}
-	cmd = append(cmd, flags...)
-	cmd = append(cmd, t.goFileName())
-	if _, err := runcmd(cmd...); err != nil {
-		return err
-	}
-	out, err := runcmd(append([]string{exe}, args...)...)
+	out, err := t.runLLVMProgram(tempDir, "test.exe", t.goFileName(), flags, args, runcmd)
 	if err != nil {
 		return err
 	}
 	return t.checkExpectedOutput(out)
 }
 
-func llvmToolexec(t *testing.T) string {
+func (t test) runLLVMRunoutputCase(tempDir string, args []string, runcmd runCmd) error {
+	out, err := t.runLLVMProgram(tempDir, "generator.exe", t.goFileName(), nil, args, runcmd)
+	if err != nil {
+		return err
+	}
+	generated := filepath.Join(tempDir, "tmp__.go")
+	if err := os.WriteFile(generated, out, 0o666); err != nil {
+		return err
+	}
+	out, err = t.runLLVMProgram(tempDir, "generated.exe", generated, nil, nil, runcmd)
+	if err != nil {
+		return err
+	}
+	return t.checkExpectedOutput(out)
+}
+
+func (t test) runLLVMProgram(tempDir, executable, source string, flags, args []string, runcmd runCmd) ([]byte, error) {
+	if goos != runtime.GOOS || goarch != runtime.GOARCH {
+		t.Skip("LLVM execution tests do not support cross compilation")
+	}
+	toolexec := llvmToolexec(t.T, "default<O2>")
+	exe := filepath.Join(tempDir, executable)
+	// GoObj DWARF emission is not implemented by the LLVM backend yet. Disable
+	// debug data explicitly so runtime qualification measures compile, link, and
+	// execution support instead of failing in the linker's DWARF writer.
+	cmd := []string{goTool, "build", t.goGcflags(), "-gcflags=-enablellvm", "-ldflags=-w", "-toolexec=" + toolexec, "-o", exe}
+	cmd = append(cmd, flags...)
+	cmd = append(cmd, source)
+	if _, err := runcmd(cmd...); err != nil {
+		return nil, err
+	}
+	out, err := runcmd(append([]string{exe}, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func llvmToolexec(t *testing.T, optPasses string) string {
 	t.Helper()
 	out, err := exec.Command(goTool, "tool", "-n", "llvmtoolexec").CombinedOutput()
 	if err != nil {
@@ -541,7 +565,12 @@ func llvmToolexec(t *testing.T) string {
 	wrapper := strings.TrimSpace(string(out))
 
 	llc := llvmToolPath(t, "llc", "GOALLC_LLC")
-	value, err := quoted.Join([]string{wrapper, "-llc=" + llc})
+	args := []string{wrapper, "-llc=" + llc}
+	if optPasses != "" {
+		opt := llvmToolPath(t, "opt", "GOALLC_OPT")
+		args = append(args, "-opt="+opt, "-opt-passes="+optPasses)
+	}
+	value, err := quoted.Join(args)
 	if err != nil {
 		t.Fatal(err)
 	}
