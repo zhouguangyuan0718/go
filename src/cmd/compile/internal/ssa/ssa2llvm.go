@@ -2259,6 +2259,13 @@ func LLVMCompile(f *Func) {
 		f.fe.Fatalf(f.Entry.Pos, "duplicate LLVM definition for %s", f.OwnAux.Fn.Name)
 	}
 	FCtxt.LF.SetGC(goGCStrategy)
+	// Go has already made its source-level inlining decision before LLVM
+	// lowering. Preserve an explicit //go:noinline boundary through LLVM's
+	// interprocedural optimization pipeline as well.
+	frontendFunc := f.Frontend().Func()
+	if frontendFunc != nil && frontendFunc.Pragma&ir.Noinline != 0 {
+		FCtxt.LF.AddFunctionAttr(llvmNoInlineAttribute())
+	}
 	setGoObjFunctionFlags(FCtxt.LF, f.OwnAux.Fn)
 	setGoObjFunctionInfo(FCtxt.LF, f.OwnAux.Fn)
 	inParams := f.OwnAux.ABIInfo().InParams()
