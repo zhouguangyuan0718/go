@@ -333,6 +333,15 @@ func TestCompileInvocationClassification(t *testing.T) {
 	if !isCompileAction([]string{"-p=main", "-o", "out.a", "main.go"}) {
 		t.Fatal("compile with output was not recognized")
 	}
+	if !compilePackageMatches([]string{"-p=command-line-arguments", "-o", "out.a"}, "command-line-arguments") {
+		t.Fatal("selected compile package was not recognized")
+	}
+	if compilePackageMatches([]string{"-p=runtime", "-o", "out.a"}, "command-line-arguments") {
+		t.Fatal("unselected compile package was recognized")
+	}
+	if compilePackageMatches([]string{"-p=command-line-arguments", "-o", "out.a"}, "") {
+		t.Fatal("empty package selector matched a compile action")
+	}
 }
 
 func TestBoolToolFlag(t *testing.T) {

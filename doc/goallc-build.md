@@ -160,6 +160,20 @@ relocatable prefix、manifest、工具、头文件、CMake package 和动态依�
 Release asset 可重定位且 checksum 稳定，再在一个 Go PR 中同时更新上述三个固定
 值。旧 release 和 checksum 不覆盖，以便历史 Go commit 的 CI 可以复现。
 
+## LLVM 测试工具选择
+
+`cmd/internal/testdir` 的 LLVM 测试在开始运行白名单前只选择一次 payload，顺序为
+显式的 `GOALLC_LLVM_DIR`、由 `GOALLC_LLC` 推导的根目录、`make.bash` 写入的
+`$GOROOT/pkg/goallc-llvm-payload`，最后才是兼容入口 `$GOROOT/llvm`。选定后，
+`llc`、`opt`、`FileCheck`、`llvm-config` 和 pass plugin 必须全部来自这个 payload；
+单项环境变量如果指向另一棵 LLVM 会作为基础设施错误立即失败，不再静默回退。
+
+测试启动日志会打印 Go、payload、LLVM 工具、plugin 和优化 pipeline 的绝对路径。
+`llvmtoolexec` 从当前 Go checkout 临时构建，避免复用 `$GOROOT/pkg/tool` 中的旧
+wrapper。运行白名单使用 `default<O2>`，并由 wrapper 按
+`command-line-arguments` 包选择 LLVM lowering；用例 recipe 自己的 `-gcflags`
+保持原样，不会覆盖或关闭 LLVM 编译。
+
 ## plugin 的构建与缓存
 
 不需要在 `make.bash` 前手工构建或复制 plugin。`cmd/dist` 使用 payload 自己的
