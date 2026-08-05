@@ -258,7 +258,7 @@ func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallCon
 		replacement.SetName(storageName)
 		fn = replacement
 	}
-	setGoObjSymbolNameMetadata(fn, name)
+	setGoObjABI0SymbolNameMetadata(fn, name, cc)
 	configureLLVMFunction(fn, sig, cc)
 	return fn
 }
