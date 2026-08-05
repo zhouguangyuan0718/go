@@ -23,15 +23,23 @@ func llvmMemoryOrderStore(value *int) {
 // LLVM: call goabiinternal void @codegen.llvmMemoryOrderStore(
 // LLVM: load ptr, ptr @codegen.llvmMemoryOrderRoot
 // LLVM: ret ptr
+// LLVM-LABEL: define goabiinternal void @codegen.llvmMemoryOrderStore(
+// LLVM-SAME: #[[NOINLINE_ATTR:[0-9]+]] gc "goallc"
 // LLVM-OPT-LABEL: define goabiinternal ptr @codegen.llvmMemoryOrderLoad(
 // LLVM-OPT-SAME: ptr{{[^%]*}}%[[VALUE:[a-zA-Z0-9._]+]])
+// LLVM-OPT: call goabiinternal void @codegen.llvmMemoryOrderStore(ptr %[[VALUE]])
+// LLVM-OPT: %[[ROOT:[a-zA-Z0-9._]+]] = load ptr, ptr @codegen.llvmMemoryOrderRoot
+// LLVM-OPT: ret ptr %[[ROOT]]
+// LLVM-OPT-LABEL: define goabiinternal void @codegen.llvmMemoryOrderStore(
+// LLVM-OPT-SAME: #[[NOINLINE_ATTR:[0-9]+]] gc "goallc"
 // LLVM-OPT: call ptr @llvm.go.gc.write.barrier(i32 2)
 // LLVM-OPT: store ptr %[[VALUE]], ptr @codegen.llvmMemoryOrderRoot
-// LLVM-OPT: ret ptr %[[VALUE]]
 // LLVM-LABEL: define goabiinternal void @codegen.llvmSemanticKeepAlive(
 // LLVM: call void @llvm.donothing() [ "go.keepalive"(ptr %{{.*}}) ]
 // LLVM-OPT-LABEL: define goabiinternal void @codegen.llvmSemanticKeepAlive(
 // LLVM-OPT: call void @llvm.donothing() [ "go.keepalive"(ptr %{{.*}}) ]
+// LLVM: attributes #[[NOINLINE_ATTR]] = { {{.*}}noinline
+// LLVM-OPT: attributes #[[NOINLINE_ATTR]] = { {{.*}}noinline
 func llvmMemoryOrderLoad(value *int) *int {
 	llvmMemoryOrderStore(value)
 	return llvmMemoryOrderRoot
