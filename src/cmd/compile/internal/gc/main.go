@@ -391,7 +391,7 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 		// carries content hashes into GoObj so the linker can coalesce type
 		// descriptors and itabs across packages.
 		base.Ctxt.NumberSyms()
-		ssa.FinalizeGoObjContentHashes()
+		ssa.FinalizeGoObjSymbolMetadata()
 		dumpobj()
 	} else {
 		dumpdata()
