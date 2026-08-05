@@ -347,19 +347,16 @@ home，而不是另建 locals spill。Args 和 Locals 表按完整 pair 一起�
 初始化的结果槽保持为空。StackObjects 仍未生成；追踪 alloca 地址也不能描述
 alloca 对象内部保存的指针字段。
 
-在构建 Go toolchain 前，使用同一个 LLVM payload 的 CMake config 构建、
-测试并安装插件：
+`make.bash` 会使用同一个 LLVM payload 的 CMake config 构建插件，并以新 inode
+原子安装。规范的 LLVM payload、plugin、Go 构建和验证流程见
+[goallc-build.md](goallc-build.md)：
 
 ```sh
-LLVM_PAYLOAD=/path/to/goallc-llvm
-PLUGIN_BUILD=/path/to/empty/plugin-build
-
-cmake -S "$GOROOT/src/cmd/llvmplugin" -B "$PLUGIN_BUILD" -G Ninja \
-  -DLLVM_DIR="$LLVM_PAYLOAD/lib/cmake/llvm" \
-  -DCMAKE_INSTALL_PREFIX="$LLVM_PAYLOAD"
-cmake --build "$PLUGIN_BUILD"
-ctest --test-dir "$PLUGIN_BUILD" --output-on-failure
-cmake --install "$PLUGIN_BUILD"
+cd "$GOROOT/src"
+./make.bash \
+  -llvm-dir=/path/to/goallc-llvm \
+  -llvm-version=23 \
+  -llvm-link=dynamic
 ```
 
 安装结果为 Darwin 上的

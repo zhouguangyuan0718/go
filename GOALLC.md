@@ -442,35 +442,43 @@ rebase 后曾通过：
 
 ## 9. 当前 LLVM 23 集成构建方法
 
-LLVM 从仓库根目录配置：
+规范构建、安装、cache identity 和故障排查约定见
+[doc/goallc-build.md](doc/goallc-build.md)。llvm-project 仓库中的辅助脚本只负责
+生成标准 LLVM payload：
 
 ```sh
-cmake -S llvm -B llvm/cmake-build-debug -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_INSTALL_PREFIX=/private/tmp/goallc-llvm23-install \
-  -DLLVM_ENABLE_PROJECTS=lld \
-  -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
-  -DLLVM_ENABLE_ASSERTIONS=ON \
-  -DLLVM_BUILD_TESTS=OFF \
-  -DLLVM_INCLUDE_TESTS=ON \
-  -DLLVM_BUILD_TOOLS=ON \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DLLVM_BUILD_LLVM_DYLIB=ON \
-  -DLLVM_ENABLE_RTTI=OFF \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-ninja -C llvm/cmake-build-debug -j6
+cd /path/to/llvm-project
+./llvm/utils/goallc/build-payload.bash
 ```
 
-准备统一的 LLVM payload 布局：
+脚本把 LLVM build tree 和标准 `cmake --install` payload 分开，staging 验证后
+整体刷新 payload。Go toolchain 仍通过原生入口构建，`cmd/dist` 会构建并原子安装
+匹配的 plugin：
 
 ```sh
-$GOROOT/llvm/bin/llvm-config
-$GOROOT/llvm/bin/llvm-ar
-$GOROOT/llvm/include/llvm-c/Core.h
-$GOROOT/llvm/lib/libLLVM.dylib       # dynamic
-$GOROOT/llvm/lib/libLLVM*.a          # static component archives
-$GOROOT/llvm/lib/GoALLCStatepoints.dylib  # Darwin pass plugin
-# Linux 对应 lib/GoALLCStatepoints.so
+cd src
+GOALLC_CCACHE=/path/to/ccache \
+./make.bash \
+  -llvm-dir=/path/to/llvm-payload \
+  -llvm-version=23 \
+  -llvm-link=dynamic
+```
+
+不要再用源码头文件与 build tree 的 `bin`/`lib` 拼接 payload。开发测试所需的
+`FileCheck` 通过 `LLVM_INSTALL_UTILS=ON` 一并安装。
+
+Linux amd64 CI 不从源码重复构建 LLVM；它固定下载 llvm-project Release
+`goallc-llvm23.1.0-v1` 的 payload，并校验 archive SHA-256、LLVM revision、
+relocatable prefix 和完整安装布局后再运行 `make.bash`。发布与升级约定见上述
+构建文档。
+
+默认目录和模式可用环境变量覆盖：
+
+```sh
+GOALLC_LLVM_SOURCE=/path/to/llvm-project \
+GOALLC_LLVM_BUILD=/path/to/llvm-build \
+GOALLC_LLVM_INSTALL=/path/to/llvm-payload \
+/path/to/llvm-project/llvm/utils/goallc/build-payload.bash
 ```
 
 不要把 LLVM build 目录全局写入 `DYLD_LIBRARY_PATH`；这会让 Homebrew 的
@@ -479,19 +487,9 @@ payload rpath。
 
 GoALLC 的功能性 pass 源码位于 Go 仓库 `src/cmd/llvmplugin`，不放入 LLVM
 源码树。LLVM 只保留通用的 `llc -load-pass-plugin` 和 pre-codegen callback
-机制。准备 LLVM payload 后、运行 `make.bash` 前，必须用该 payload 自己的
-CMake config 构建并安装插件：
-
-```sh
-LLVM_PAYLOAD=/path/to/llvm
-PLUGIN_BUILD=/path/to/empty/plugin-build
-cmake -S "$GOROOT/src/cmd/llvmplugin" -B "$PLUGIN_BUILD" -G Ninja \
-  -DLLVM_DIR="$LLVM_PAYLOAD/lib/cmake/llvm" \
-  -DCMAKE_INSTALL_PREFIX="$LLVM_PAYLOAD"
-cmake --build "$PLUGIN_BUILD"
-ctest --test-dir "$PLUGIN_BUILD" --output-on-failure
-cmake --install "$PLUGIN_BUILD"
-```
+机制。`make.bash` 会使用选定 payload 的 CMake config 自动构建插件；输入内容
+变化时清空旧 CMake/Ninja 状态再通过 ccache 重建，不能把其他 LLVM 构建出的
+plugin 复制过来。
 
 插件 core 在 Go 仓库中实现 Go ABI 函数的 pointer liveness、稳定 safepoint
 ID、`gc.statepoint` / `gc.relocate` 和 GC leaf 识别。当前 pointer 分类保守
@@ -532,13 +530,14 @@ go test -tags='llvm23 dynamicllvm' ./...
 go test -tags='llvm23 staticllvm' ./...
 ```
 
-构建 Go 集成工具链：
+复用已有标准 payload 时直接运行 Go 的构建入口：
 
 ```sh
-cd /Volumes/Disk1/00.Work/00.Code/goallc/go/src
-./make.bash
-./make.bash -llvm-dir=/path/to/llvm -llvm-version=23 -llvm-link=dynamic
-./make.bash -llvm-dir=/path/to/llvm -llvm-version=23 -llvm-link=static
+cd "$GOROOT/src"
+./make.bash \
+  -llvm-dir=/path/to/llvm-payload \
+  -llvm-version=23 \
+  -llvm-link=dynamic
 ```
 
 `cmd/dist` 使用显式 `-llvm-dir`，未指定时使用 `$GOROOT/llvm`。LLVM

@@ -1,6 +1,9 @@
 name: GoALLC
 
 on:
+  push:
+    branches:
+      - go1.27.master
   pull_request:
   workflow_dispatch:
 
