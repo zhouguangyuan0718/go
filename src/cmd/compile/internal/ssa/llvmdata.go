@@ -4,12 +4,15 @@ package ssa
 
 import (
 	"cmd/compile/internal/base"
+	"cmd/compile/internal/typecheck"
 	"cmd/internal/goobj"
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/goallc/go-llvm"
 )
@@ -25,6 +28,19 @@ func emitGoObjImportMetadata() {
 			GlobalCtxt.MDString(hex.EncodeToString(imp.Fingerprint[:])),
 		}))
 	}
+}
+
+func emitGoObjCgoModuleAsm() {
+	if len(typecheck.Target.CgoPragmas) == 0 {
+		return
+	}
+	data, err := json.Marshal(typecheck.Target.CgoPragmas)
+	if err != nil {
+		base.Fatalf("serializing cgo pragmas for LLVM: %v", err)
+	}
+	// Cgo pragmas are a textual section of the Go object header, so carry
+	// them through LLVM as an object-format directive rather than IR metadata.
+	CurrentModule.SetInlineAsm(".goobj.cgo " + strconv.Quote(string(data)) + "\n")
 }
 
 // attachGoObjSymbolRef attaches the part of an undefined Go symbol's identity
@@ -60,6 +76,15 @@ func attachGoObjSymbolRef(value llvm.Value, s *obj.LSym) {
 		GlobalCtxt.MDString(s.Pkg),
 		llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(s.SymIdx), false).ConstantAsMetadata(),
 		llvm.ConstInt(GlobalCtxt.Int32Type(), flags2, false).ConstantAsMetadata(),
+	}))
+}
+
+func setGoObjABI0SymbolNameMetadata(value llvm.Value, name string, cc llvm.CallConv) {
+	if cc != goABI0CallConv {
+		return
+	}
+	value.SetGlobalMetadata(GlobalCtxt.MDKindID(goObjSymbolNameMD), GlobalCtxt.MDNode([]llvm.Metadata{
+		GlobalCtxt.MDString(name),
 	}))
 }
 
@@ -174,29 +199,48 @@ func LowerGoObjData() {
 	emitGoObjCompilerUsed()
 }
 
-// FinalizeGoObjContentHashes carries the native GoObj identity hash for each
-// lowered content-addressable definition after NumberSyms has assigned the
-// package and symbol indexes used by that hash. LowerGoObjData runs first so
-// imported-reference metadata retains the same pre-numbering classification
-// as the established LLVM path.
-func FinalizeGoObjContentHashes() {
-	if currentLLVMDataLowerer == nil {
-		return
-	}
-	syms := make([]*obj.LSym, 0, len(currentLLVMDataLowerer.lowered))
-	for s := range currentLLVMDataLowerer.lowered {
-		if s.ContentAddressable() {
-			syms = append(syms, s)
+// FinalizeGoObjSymbolMetadata carries native GoObj definition classes after
+// NumberSyms has assigned them. LowerGoObjData runs first so imported-reference
+// metadata retains the same pre-numbering classification as the established
+// LLVM path.
+func FinalizeGoObjSymbolMetadata() {
+	var syms []*obj.LSym
+	if currentLLVMDataLowerer != nil {
+		syms = make([]*obj.LSym, 0, len(currentLLVMDataLowerer.lowered))
+		for s := range currentLLVMDataLowerer.lowered {
+			if s.ContentAddressable() || s.PkgIdx == goobj.PkgIdxNone {
+				syms = append(syms, s)
+			}
 		}
 	}
 	sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
 	for _, s := range syms {
 		g := currentLLVMDataLowerer.values[s]
 		if g.IsNil() {
-			base.Fatalf("missing lowered LLVM global for content-addressable symbol %s", s.Name)
+			base.Fatalf("missing lowered LLVM global for finalized GoObj symbol %s", s.Name)
 		}
-		setGoObjContentHashMetadata(g, s)
+		if s.PkgIdx == goobj.PkgIdxNone {
+			setGoObjNonPackageMetadata(g)
+		}
+		if s.ContentAddressable() {
+			setGoObjContentHashMetadata(g, s)
+		}
 	}
+	for _, s := range base.Ctxt.Text {
+		if s.PkgIdx != goobj.PkgIdxNone {
+			continue
+		}
+		fn := CurrentModule.NamedFunction(llvmFunctionStorageName(s.Name, llvmCallConv(s.ABI())))
+		if !fn.IsNil() {
+			setGoObjNonPackageMetadata(fn)
+		}
+	}
+}
+
+func setGoObjNonPackageMetadata(value llvm.Value) {
+	value.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.symbol.nonpackage"), GlobalCtxt.MDNode([]llvm.Metadata{
+		llvm.ConstInt(GlobalCtxt.Int1Type(), 1, false).ConstantAsMetadata(),
+	}))
 }
 
 // GoObj content hashes depend on the compiler's native symbol classes,
@@ -405,13 +449,16 @@ func llvmExternalDataRef(s *obj.LSym, data map[*obj.LSym]bool) llvm.Value {
 	// example runtime.memequal64 in an equality closure), so do not rely on
 	// STEXT alone here.
 	if s.Type == objabi.STEXT || s.Type == objabi.STEXTFIPS || s.ABI() == obj.ABIInternal {
-		if f := CurrentModule.NamedFunction(s.Name); !f.IsNil() {
+		storageName := llvmFunctionStorageName(s.Name, llvmCallConv(s.ABI()))
+		if f := CurrentModule.NamedFunction(storageName); !f.IsNil() {
 			attachGoObjSymbolRef(f, s)
+			setGoObjABI0SymbolNameMetadata(f, s.Name, llvmCallConv(s.ABI()))
 			return f
 		}
-		f := llvm.AddFunction(CurrentModule, s.Name, llvm.FunctionType(GlobalCtxt.VoidType(), nil, false))
+		f := llvm.AddFunction(CurrentModule, storageName, llvm.FunctionType(GlobalCtxt.VoidType(), nil, false))
 		f.SetFunctionCallConv(llvmCallConv(s.ABI()))
 		attachGoObjSymbolRef(f, s)
+		setGoObjABI0SymbolNameMetadata(f, s.Name, llvmCallConv(s.ABI()))
 		return f
 	}
 	if g := CurrentModule.NamedGlobal(s.Name); !g.IsNil() {
