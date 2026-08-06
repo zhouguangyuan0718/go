@@ -229,10 +229,11 @@ header。`llc` 在建立 code-generation pipeline 前读取并严格校验这些
 
 ## toolexec wrapper
 
-`cmd/llvmtoolexec` 只处理实际参数中启用了 `-enablellvm` 的 `compile`，其余
-compile 和其他 Go tool 调用原样透传。它：
+`cmd/llvmtoolexec` 只处理实际参数中同时启用了 `-enablellvm` 和
+`-llvmironly` 的 `compile`，其余 compile 和其他 Go tool 调用原样透传。它：
 
-1. 保留调用方传入的 `-enablellvm`，并增加 `-llvmironly`；
+1. 原样调用 compiler，由 compiler 写出仅包含 export data 的 archive 和
+   对应 `.ll` sidecar；
 2. 调用
    `llc -load-pass-plugin=<GoALLCStatepoints> -filetype=obj`；GoObj 固定以
    CALL 起点记录 statepoint。插件的
@@ -247,12 +248,13 @@ header。使用 Go 自己的 archive writer 可保证 `__.PKGDEF` 保持第一�
 避免 BSD `ar` 插入 `__.SYMDEF` 后破坏 `cmd/link` 的读取约定。
 
 package 的选择完全由 cmd/go 已有的 `-gcflags` 规则完成。无 pattern 的
-`-gcflags=-enablellvm` 只作用于命令行 package；需要选择某个依赖时使用
-`-gcflags='example.com/project/internal/foo=-enablellvm'`。wrapper 不维护另一套
+`-gcflags='-enablellvm -llvmironly'` 只作用于命令行 package；需要选择某个依赖时使用
+`-gcflags='example.com/project/internal/foo=-enablellvm -llvmironly'`。wrapper 不维护另一套
 package 匹配规则，也不根据 `TOOLEXEC_IMPORTPATH` 猜测选择结果。实际 compile
-没有 `-enablellvm` 时完全透传，并且其 action cache identity 不依赖 LLVM
-backend；只有启用 LLVM 的 compile，其 `-V=full` probe 才携带 `-enablellvm`
-并纳入 backend identity。
+缺少任一 LLVM flag 时完全透传。由于 compiler 的 `-V=full` probe 不携带
+package gcflags，wrapper 的 compiler identity 始终纳入 LLVM backend；这样
+LLVM payload 或 plugin 变化时不会复用旧的 LLVM archive，代价是同一 wrapper
+下的原生 compile 也会保守地失效缓存。
 
 `llc` 的选择顺序是 `-llc`/`GOALLC_LLC`、`GOALLC_LLVM_DIR/bin/llc`、构建
 toolchain 时记录的 LLVM payload、`$GOROOT/llvm/bin/llc`。正常安装后只需传
@@ -266,10 +268,9 @@ pass plugin 默认从 `llc` 所属 LLVM payload 的
 版本混用。`make.bash` 对 Go-owned plugin sources、实际 `llc`、`libLLVM`、
 `llvm-config` 和 LLVM CMake 配置做内容哈希；输入未变时跳过 CMake，输入变化时
 重建并用新 inode 原子刷新 payload 中的插件。时间戳本身不作为缓存身份。
-安装后的 enabled compile probe 把 wrapper、实际 `llc`、动态 `libLLVM` 和
-plugin 的内容纳入对应 package 的 Go action-cache tool ID；因此同一路径下替换
-backend/plugin 也会使启用了 `-enablellvm` 的 package 重新编译，而未启用的
-package 保持原生 compiler cache key。
+安装后的 compile probe 把 wrapper、实际 `llc`、动态 `libLLVM` 和 plugin 的
+内容纳入 Go action-cache tool ID；因此同一路径下替换 backend/plugin 会使该
+wrapper 覆盖的 compile action 重新编译。
 
 插件的功能性源码和测试位于 Go 仓库
 `src/cmd/llvmplugin`，不放入 LLVM 源码树。LLVM 只提供通用的
@@ -374,7 +375,7 @@ cd /path/to/simple-main-package
 TOOLDIR=$("$GOROOT/bin/go" env GOTOOLDIR)
 "$GOROOT/bin/go" build \
   -toolexec="$TOOLDIR/llvmtoolexec" \
-  -gcflags=-enablellvm \
+  -gcflags='-enablellvm -llvmironly' \
   -o app .
 ./app
 ```
@@ -385,22 +386,21 @@ TOOLDIR=$("$GOROOT/bin/go" env GOTOOLDIR)
 ```sh
 "$GOROOT/bin/go" build \
   -toolexec="'$GOROOT/pkg/tool/darwin_arm64/llvmtoolexec' '-llc=/path with spaces/llc' -keep-ir" \
-  -gcflags=-enablellvm \
+  -gcflags='-enablellvm -llvmironly' \
   .
 ```
 
 这里使用 cmd/go 的 quoted command syntax，因此 wrapper flags 和带空格路径不会
 被 shell 或 cmd/go 二次拆错。`-keep-ir` 留下的 IR 路径为 compile 输出 archive
-路径加 `.ll` 后缀。启用了 `-enablellvm` 的真实 compile 缺少 `llc`/plugin 时
-仍然 fail closed；非 compile、没有 `-enablellvm` 的 package 和普通 probe
-透明透传。
+路径加 `.ll` 后缀。同时带有两个 LLVM flags 的真实 compile 缺少 `llc`/plugin
+时仍然 fail closed；非 compile 或缺少任一 flag 的 compile 透明透传。
 
 例如只让一个依赖走 LLVM，可使用：
 
 ```sh
 "$GOROOT/bin/go" build \
   -toolexec="$TOOLDIR/llvmtoolexec" \
-  -gcflags='example.com/project/internal/foo=-enablellvm' \
+  -gcflags='example.com/project/internal/foo=-enablellvm -llvmironly' \
   .
 ```
 
@@ -433,12 +433,14 @@ GoALLC 不维护一套与 Go 仓库重复的测试源码。LLVM 测试由
 - 灰名单是可以执行但尚未要求通过的用例，runner 会记录每个失败和汇总，
   并为每个用例明确输出 `PASS`、`FAIL (allowed)` 或 `SKIP`，但不会因此使
   CI 失败；验证稳定后通过把精确条目加入白名单来提升覆盖；
-- 黑名单完全不执行，只能用于已知会超时或耗尽内存的用例；runner 会校验
-  blacklist reason 明确包含 timeout 或 OOM，并在日志中输出 `NOT RUN`；
+- 黑名单完全不执行，用于已知会超时、耗尽内存、超过一分钟 CI 单例预算，
+  或当前统一关闭的 defer/recover 用例；runner 会校验 blacklist reason
+  明确说明 timeout、OOM、slow 或 defer/recover，并在日志中输出 `NOT RUN`；
 - 三类的匹配优先级为黑名单、精确白名单、灰名单。灰名单可以用 glob 覆盖
-  尚未支持的范围，黑名单中的精确超时/OOM 条目仍能阻止执行；
+  尚未支持的范围，黑名单中的精确资源限制或 defer/recover 条目仍能阻止执行；
 - `platform_graylist` 把公共白名单项在指定平台降为灰名单，普通编译或运行失败
-  不再使用 platform blacklist；`platform_blacklist` 同样只保留超时/OOM；
+  不再使用 platform blacklist；如确需使用，`platform_blacklist` 遵循相同的
+  资源限制和暂时关闭特性规则；
 - runner 会拒绝拼错的白名单、无匹配项的灰/黑名单，以及未被三类之一分类的
   候选，并报告白、灰、黑三类文件数。
 - Linux CI 将策略统计、必过项失败、灰名单逐用例结果和黑名单未运行原因写入
