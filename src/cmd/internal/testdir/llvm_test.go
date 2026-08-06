@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -45,159 +46,130 @@ const (
 	llvmTestBlack
 )
 
-// runLLVMTests reuses the existing GOROOT/test inputs. Whitelisted tests must
-// pass, graylisted tests run for coverage without failing the suite, and
-// blacklisted tests do not run. The blacklist is reserved for tests known to
-// time out or exhaust memory.
-func runLLVMTests(t *testing.T, common testCommon) {
-	t.Run("LLVM", func(t *testing.T) {
-		switch runtime.GOOS + "/" + runtime.GOARCH {
-		case "darwin/arm64", "linux/amd64", "linux/arm64":
-		default:
-			t.Skipf("LLVM GoObj is not configured for %s/%s", runtime.GOOS, runtime.GOARCH)
-		}
-		configureLLVMTestToolchain(t)
-
-		policy := readLLVMTestPolicy(t, common.gorootTestDir)
-		platform := runtime.GOOS + "/" + runtime.GOARCH
-		if err := applyLLVMPlatformPolicy("codegen", platform, &policy.Codegen); err != nil {
-			t.Fatal(err)
-		}
-		if err := applyLLVMPlatformPolicy("runtime", platform, &policy.Runtime); err != nil {
-			t.Fatal(err)
-		}
-		codegenCandidates := llvmTestCandidates(t, common.gorootTestDir, []string{"codegen"}, "asmcheck")
-		runtimeCandidates := llvmTestCandidates(t, common.gorootTestDir, dirs, "run")
-		for name := range llvmTestCandidates(t, common.gorootTestDir, dirs, "runoutput") {
-			runtimeCandidates[name] = true
-		}
-		validateLLVMTestSet(t, common.gorootTestDir, "codegen", codegenCandidates, policy.Codegen, true)
-		validateLLVMTestSet(t, common.gorootTestDir, "runtime", runtimeCandidates, policy.Runtime, false)
-
-		logLLVMTestPolicy(t, "codegen", codegenCandidates, policy.Codegen)
-		logLLVMTestPolicy(t, "runtime", runtimeCandidates, policy.Runtime)
-		logLLVMBlacklist(t, "codegen", codegenCandidates, policy.Codegen)
-		logLLVMBlacklist(t, "runtime", runtimeCandidates, policy.Runtime)
-
-		t.Run("codegen", func(t *testing.T) {
-			names := sortedLLVMTests(t, codegenCandidates, policy.Codegen, llvmTestWhite)
-			for _, name := range names {
-				t.Run(name, func(t *testing.T) {
-					if err := runLLVMCodegenTest(t, common.gorootTestDir, name); err != nil {
-						t.Fatal(err)
-					}
-				})
-			}
-		})
-
-		t.Run("codegen-graylist", func(t *testing.T) {
-			names := sortedLLVMTests(t, codegenCandidates, policy.Codegen, llvmTestGray)
-			passed, failed, skipped := 0, 0, 0
-			for _, name := range names {
-				t.Run(name, func(t *testing.T) {
-					var runErr error
-					t.Cleanup(func() {
-						switch {
-						case t.Skipped():
-							skipped++
-							t.Log("LLVM graylist result: SKIP")
-						case runErr != nil:
-							failed++
-							t.Log("LLVM graylist result: FAIL (allowed)")
-						default:
-							passed++
-							t.Log("LLVM graylist result: PASS")
-						}
-					})
-					runErr = runLLVMCodegenTest(t, common.gorootTestDir, name)
-					if runErr != nil {
-						t.Logf("LLVM graylist failure detail: %v", runErr)
-					}
-				})
-			}
-			t.Logf("LLVM codegen graylist summary: %d passed, %d failed (allowed), %d skipped",
-				passed, failed, skipped)
-		})
-
-		t.Run("abi-differential", func(t *testing.T) {
-			runLLVMABIDifferentialTest(t, common.gorootTestDir)
-		})
-
-		t.Run("alloca-statepoint", func(t *testing.T) {
-			runLLVMAllocaStatepointTest(t, common.gorootTestDir)
-		})
-
-		t.Run("caller-state", func(t *testing.T) {
-			runLLVMCallerStateTest(t, common.gorootTestDir)
-		})
-
-		t.Run("writebarrier-helpers", runLLVMWriteBarrierHelperTest)
-
-		t.Run("compile-only-regressions", func(t *testing.T) {
-			for _, name := range []string{
-				"cmp.go",
-				"typeparam/issue47684c.go",
-			} {
-				t.Run(name, func(t *testing.T) {
-					runLLVMCompileOnlyRegression(t, common.gorootTestDir, name)
-				})
-			}
-		})
-
-		t.Run("runtime", func(t *testing.T) {
-			names := sortedLLVMTests(t, runtimeCandidates, policy.Runtime, llvmTestWhite)
-			for _, name := range names {
-				t.Run(name, func(t *testing.T) {
-					if err := runLLVMRuntimeTest(t, common, name); err != nil {
-						t.Fatal(err)
-					}
-				})
-			}
-		})
-
-		t.Run("runtime-graylist", func(t *testing.T) {
-			names := sortedLLVMTests(t, runtimeCandidates, policy.Runtime, llvmTestGray)
-			passed, failed, skipped := 0, 0, 0
-			for _, name := range names {
-				t.Run(name, func(t *testing.T) {
-					var runErr error
-					t.Cleanup(func() {
-						switch {
-						case t.Skipped():
-							skipped++
-							t.Log("LLVM graylist result: SKIP")
-						case runErr != nil:
-							failed++
-							t.Log("LLVM graylist result: FAIL (allowed)")
-						default:
-							passed++
-							t.Log("LLVM graylist result: PASS")
-						}
-					})
-					runErr = runLLVMRuntimeTest(t, common, name)
-					if runErr != nil {
-						t.Logf("LLVM graylist failure detail: %v", runErr)
-					}
-				})
-			}
-			t.Logf("LLVM runtime graylist summary: %d passed, %d failed (allowed), %d skipped",
-				passed, failed, skipped)
-		})
-
-		t.Run("writebarrier-ir", runLLVMWriteBarrierIRTests)
-	})
+type llvmTestCase struct {
+	suite string
+	class llvmTestClass
 }
 
-func runLLVMRuntimeTest(t *testing.T, common testCommon, name string) error {
-	dir, file := path.Split(name)
-	tc := test{
-		testCommon: common,
-		T:          t,
-		dir:        strings.TrimSuffix(dir, "/"),
-		goFile:     file,
-		llvm:       true,
+type llvmTestCounts struct {
+	passed  int
+	failed  int
+	skipped int
+}
+
+type llvmTestMode struct {
+	cases    map[string]llvmTestCase
+	toolexec string
+	mu       sync.Mutex
+	gray     map[string]*llvmTestCounts
+}
+
+func newLLVMTestMode(t *testing.T, common testCommon) *llvmTestMode {
+	t.Helper()
+	platform := goos + "/" + goarch
+	switch platform {
+	case "darwin/arm64", "linux/amd64", "linux/arm64":
+	default:
+		t.Skipf("LLVM GoObj is not configured for %s", platform)
 	}
-	return tc.run()
+	if goos != runtime.GOOS || goarch != runtime.GOARCH {
+		t.Skip("LLVM execution tests do not support cross compilation")
+	}
+	configureLLVMTestToolchain(t)
+
+	policy := readLLVMTestPolicy(t, common.gorootTestDir)
+	if err := applyLLVMPlatformPolicy("codegen", platform, &policy.Codegen); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLLVMPlatformPolicy("runtime", platform, &policy.Runtime); err != nil {
+		t.Fatal(err)
+	}
+	codegenCandidates := llvmTestCandidates(t, common.gorootTestDir, []string{"codegen"}, "asmcheck")
+	runtimeCandidates := llvmTestCandidates(t, common.gorootTestDir, dirs, "run")
+	for name := range llvmTestCandidates(t, common.gorootTestDir, dirs, "runoutput") {
+		runtimeCandidates[name] = true
+	}
+	validateLLVMTestSet(t, common.gorootTestDir, "codegen", codegenCandidates, policy.Codegen, true)
+	validateLLVMTestSet(t, common.gorootTestDir, "runtime", runtimeCandidates, policy.Runtime, false)
+	logLLVMTestPolicy(t, "codegen", codegenCandidates, policy.Codegen)
+	logLLVMTestPolicy(t, "runtime", runtimeCandidates, policy.Runtime)
+	logLLVMBlacklist(t, "codegen", codegenCandidates, policy.Codegen)
+	logLLVMBlacklist(t, "runtime", runtimeCandidates, policy.Runtime)
+
+	mode := &llvmTestMode{
+		cases: make(map[string]llvmTestCase, len(codegenCandidates)+len(runtimeCandidates)),
+		gray: map[string]*llvmTestCounts{
+			"codegen": {},
+			"runtime": {},
+		},
+	}
+	for name := range codegenCandidates {
+		mode.cases[name] = llvmTestCase{suite: "codegen", class: classifyLLVMTest(t, policy.Codegen, name)}
+	}
+	for name := range runtimeCandidates {
+		mode.cases[name] = llvmTestCase{suite: "runtime", class: classifyLLVMTest(t, policy.Runtime, name)}
+	}
+	mode.toolexec = llvmToolexec(t, "default<O2>")
+	return mode
+}
+
+func (mode *llvmTestMode) recordResult(t *testing.T, tc llvmTestCase, runErr error) {
+	t.Helper()
+	if tc.class != llvmTestGray {
+		return
+	}
+	mode.mu.Lock()
+	counts := mode.gray[tc.suite]
+	switch {
+	case t.Skipped():
+		counts.skipped++
+	case runErr != nil:
+		counts.failed++
+	default:
+		counts.passed++
+	}
+	mode.mu.Unlock()
+
+	switch {
+	case t.Skipped():
+		t.Logf("LLVM %s graylist result: SKIP", tc.suite)
+	case runErr != nil:
+		t.Logf("LLVM %s graylist result: FAIL (allowed)", tc.suite)
+	default:
+		t.Logf("LLVM %s graylist result: PASS", tc.suite)
+	}
+}
+
+func (mode *llvmTestMode) logSummary(t *testing.T) {
+	t.Helper()
+	mode.mu.Lock()
+	defer mode.mu.Unlock()
+	for _, suite := range []string{"codegen", "runtime"} {
+		counts := mode.gray[suite]
+		t.Logf("LLVM %s graylist summary: %d passed, %d failed (allowed), %d skipped",
+			suite, counts.passed, counts.failed, counts.skipped)
+	}
+}
+
+func runLLVMInfrastructureTests(t *testing.T, common testCommon) {
+	t.Run("abi-differential", func(t *testing.T) {
+		runLLVMABIDifferentialTest(t, common.gorootTestDir)
+	})
+	t.Run("alloca-statepoint", func(t *testing.T) {
+		runLLVMAllocaStatepointTest(t, common.gorootTestDir)
+	})
+	t.Run("caller-state", func(t *testing.T) {
+		runLLVMCallerStateTest(t, common.gorootTestDir)
+	})
+	t.Run("writebarrier-helpers", runLLVMWriteBarrierHelperTest)
+	t.Run("compile-only-regressions", func(t *testing.T) {
+		for _, name := range []string{"cmp.go", "typeparam/issue47684c.go"} {
+			t.Run(name, func(t *testing.T) {
+				runLLVMCompileOnlyRegression(t, common.gorootTestDir, name)
+			})
+		}
+	})
+	t.Run("writebarrier-ir", runLLVMWriteBarrierIRTests)
 }
 
 func runLLVMCompileOnlyRegression(t *testing.T, gorootTestDir, name string) {
@@ -610,16 +582,11 @@ func sortedLLVMTests(t *testing.T, candidates map[string]bool, set llvmTestSet, 
 	return names
 }
 
-func runLLVMCodegenTest(t *testing.T, gorootTestDir, name string) error {
+func runLLVMCodegenTest(t *testing.T, source string) error {
 	t.Helper()
-	source := filepath.Join(gorootTestDir, filepath.FromSlash(name))
 	src, err := os.ReadFile(source)
 	if err != nil {
 		return err
-	}
-	header, _, _ := strings.Cut(string(src), "\npackage")
-	if ok, why := shouldTest(header, goos, goarch); !ok {
-		t.Skip(why)
 	}
 
 	archive := filepath.Join(t.TempDir(), "codegen.a")
@@ -757,54 +724,13 @@ func runLLVMWriteBarrierIRTests(t *testing.T) {
 	}
 }
 
-func (t test) runLLVMCase(tempDir string, flags, args []string, runcmd runCmd) error {
-	out, err := t.runLLVMProgram(tempDir, "test.exe", []string{t.goFileName()}, flags, args, runcmd)
-	if err != nil {
-		return err
+func (t test) appendLLVMGoFlags(cmd []string) []string {
+	if t.llvm == nil {
+		return cmd
 	}
-	return t.checkExpectedOutput(out)
-}
-
-func (t test) runLLVMRunoutputCase(tempDir string, args []string, runcmd runCmd) error {
-	// The arguments in a runoutput recipe are additional generator source
-	// files, just as they are for "go run file.go args..." in testdir's native
-	// path. They are not arguments to the generator executable.
-	generatorSources := append([]string{t.goFileName()}, args...)
-	out, err := t.runLLVMProgram(tempDir, "generator.exe", generatorSources, nil, nil, runcmd)
-	if err != nil {
-		return err
-	}
-	generated := filepath.Join(tempDir, "tmp__.go")
-	if err := os.WriteFile(generated, out, 0o666); err != nil {
-		return err
-	}
-	out, err = t.runLLVMProgram(tempDir, "generated.exe", []string{generated}, nil, nil, runcmd)
-	if err != nil {
-		return err
-	}
-	return t.checkExpectedOutput(out)
-}
-
-func (t test) runLLVMProgram(tempDir, executable string, sources, flags, args []string, runcmd runCmd) ([]byte, error) {
-	if goos != runtime.GOOS || goarch != runtime.GOARCH {
-		t.Skip("LLVM execution tests do not support cross compilation")
-	}
-	toolexec := llvmToolexec(t.T, "default<O2>")
-	exe := filepath.Join(tempDir, executable)
-	// GoObj DWARF emission is not implemented by the LLVM backend yet. Disable
-	// debug data explicitly so runtime qualification measures compile, link, and
-	// execution support instead of failing in the linker's DWARF writer.
-	cmd := []string{goTool, "build", t.goGcflags(), "-ldflags=-w", "-toolexec=" + toolexec, "-o", exe}
-	cmd = append(cmd, flags...)
-	cmd = append(cmd, sources...)
-	if _, err := runcmd(cmd...); err != nil {
-		return nil, err
-	}
-	out, err := runcmd(append([]string{exe}, args...)...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	// GoObj DWARF emission is not implemented by the LLVM backend yet. Keep the
+	// original testdir go run command and add only the backend selection flags.
+	return append(cmd, "-ldflags=-w", "-toolexec="+t.llvm.toolexec)
 }
 
 func llvmToolexec(t *testing.T, optPasses string) string {

@@ -441,6 +441,8 @@ GoALLC 不维护一套与 Go 仓库重复的测试源码。LLVM 测试由
   不再使用 platform blacklist；`platform_blacklist` 同样只保留超时/OOM；
 - runner 会拒绝拼错的白名单、无匹配项的灰/黑名单，以及未被三类之一分类的
   候选，并报告白、灰、黑三类文件数。
+- Linux CI 将策略统计、必过项失败、灰名单逐用例结果和黑名单未运行原因写入
+  GitHub Actions Job Summary；完整命令输出仍保留在 step 日志中。
 
 ### LLVM IR codegen 检查
 
@@ -470,14 +472,15 @@ FileCheck --check-prefix=LLVM test/codegen/example.go < package.a.ll
 ### LLVM runtime 检查
 
 runtime 白名单和灰名单都不增加新的 recipe，也不复制测试源码。runner 仍解析原文件的
-`// run` 参数、build constraint、超时和期望输出，但构建步骤改为用
-`-gcflags=-enablellvm` 选择命令行 `main` package，再通过 `cmd/llvmtoolexec`
-替换其对象：
+`// run` 参数、build constraint、超时和期望输出。LLVM 的 `TestLLVM` 薄入口复用
+原 `Test` 的 `test.run()`，只在原有 `go run` 命令上增加 `-toolexec` 和
+`-ldflags=-w`；`cmd/llvmtoolexec` 选择命令行 `main` package 并替换其对象：
 
 ```text
 原有 // run 用例
-  -> go build -gcflags=-enablellvm -toolexec="llvmtoolexec ..."
+  -> go run -toolexec="llvmtoolexec ..." <原 recipe 文件和参数>
   -> compile -enablellvm -llvmironly
+  -> opt -passes=default<O2>
   -> llc 生成 _go_.o
   -> cmd/link
   -> 运行并沿用原 testdir 输出检查
@@ -500,12 +503,13 @@ runtime 白名单和灰名单都不增加新的 recipe，也不复制测试源�
 定向运行完整 LLVM 策略（白名单和灰名单执行，黑名单跳过）：
 
 ```sh
-go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
+go test cmd/internal/testdir -run='^TestLLVM$' -v
 ```
 
-只运行一个 LLVM codegen、codegen-graylist、runtime 或 runtime-graylist 子测试时，
-可继续在 `-run` 中追加对应的 slash-separated subtest 名称。普通失败留在灰名单；
-只有确认会导致超时或 OOM 时才进入黑名单。
+`TestLLVM` 和原生 `Test` 共用 `testdir_test.go` 的目录扫描、recipe 解析和用例调度；
+LLVM 模式只从策略文件选择用例，并向原有 `go run` 命令增加 backend 参数。只运行
+一个 LLVM 用例时，可继续在 `-run` 中追加原 testdir 的 slash-separated 名称。
+普通失败留在灰名单；只有确认会导致超时或 OOM 时才进入黑名单。
 
 ## 当前范围与后续工作
 

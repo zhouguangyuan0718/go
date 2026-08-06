@@ -152,15 +152,28 @@ jobs:
               -run '^TestLLVMInitTaskOrder$' cmd/llvmtoolexec
 
       - name: Test LLVM policy (white required, gray advisory)
+        shell: bash
         env:
           GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
           GOALLC_FILECHECK: ${{ env.LLVM_ROOT }}/bin/FileCheck
         run: |
+          set -o pipefail
           ./bin/go test cmd/internal/testdir \
-            -run 'Test/LLVM' \
+            -run '^TestLLVM$' \
             -count=1 \
             -timeout=40m \
-            -v
+            -json \
+            2>&1 | tee "$RUNNER_TEMP/goallc-test-results.json" \
+              | jq --unbuffered -rj 'select(.Output != null) | .Output'
+
+      - name: Publish LLVM test summary
+        if: always()
+        env:
+          GOALLC_CI_ARCH: ${{ matrix.arch }}
+        run: |
+          .github/scripts/goallc-test-summary.py \
+            "$RUNNER_TEMP/goallc-test-results.json" \
+            "$GITHUB_STEP_SUMMARY"
 
       - name: Report ccache
         if: always()
