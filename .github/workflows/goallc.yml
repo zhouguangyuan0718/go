@@ -1,0 +1,155 @@
+name: GoALLC
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goallc-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_RELEASE: goallc-llvm23.1.0-v1
+  LLVM_ARCHIVE: goallc-llvm23.1.0-v1-linux-amd64.tar.zst
+  LLVM_REVISION: 407485ab2cd2545f66e84b5bbd1907cbcc0e6e4f
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      LLVM_ROOT: ${{ github.workspace }}/.goallc/llvm
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+
+    steps:
+      - name: Check out Go
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install bootstrap Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          cache: false
+
+      - name: Install LLVM runtime and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ccache \
+            libedit-dev \
+            libxml2-dev \
+            libzstd-dev \
+            ninja-build \
+            zlib1g-dev
+
+      - name: Restore ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: goallc-go-linux-amd64-${{ github.sha }}
+          restore-keys: |
+            goallc-go-linux-amd64-
+
+      - name: Download pinned LLVM payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/goallc/llvm-project/releases/download/$LLVM_RELEASE/$LLVM_ARCHIVE"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/$LLVM_ARCHIVE" "$url"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/$LLVM_ARCHIVE.sha256" "$url.sha256"
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum --check --strict "$LLVM_ARCHIVE.sha256"
+          )
+          mkdir -p "$LLVM_ROOT"
+          tar --zstd -xf "$RUNNER_TEMP/$LLVM_ARCHIVE" \
+            -C "$LLVM_ROOT" --strip-components=1
+
+      - name: Validate LLVM payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$("$LLVM_ROOT/bin/llvm-config" --prefix)" = "$LLVM_ROOT"
+          test "$("$LLVM_ROOT/bin/llvm-config" --version)" = 23.1.0git
+          test "$("$LLVM_ROOT/bin/llvm-config" --build-mode)" = Release
+          grep -Fx "llvm_revision=$LLVM_REVISION" "$LLVM_ROOT/share/goallc/build-manifest"
+          grep -Fx 'llvm_dirty=false' "$LLVM_ROOT/share/goallc/build-manifest"
+          grep -Fx 'build_type=Release' "$LLVM_ROOT/share/goallc/build-manifest"
+          for target in X86 AArch64; do
+            "$LLVM_ROOT/bin/llvm-config" --targets-built | tr ' ' '\n' | grep -Fx "$target"
+          done
+          for tool in FileCheck llc llvm-ar llvm-config opt; do
+            test -x "$LLVM_ROOT/bin/$tool"
+          done
+          test -f "$LLVM_ROOT/include/llvm-c/Core.h"
+          test -f "$LLVM_ROOT/include/llvm/Config/llvm-config.h"
+          test -f "$LLVM_ROOT/lib/cmake/llvm/LLVMConfig.cmake"
+          test -f "$LLVM_ROOT/lib/libLLVMCore.a"
+          find "$LLVM_ROOT/lib" -maxdepth 1 -name 'libLLVM.so*' -print -quit | grep .
+          if ldd "$LLVM_ROOT/bin/llc" | grep 'not found'; then
+            exit 1
+          fi
+          "$LLVM_ROOT/bin/llc" --version
+
+      - name: Build Go through make.bash
+        working-directory: src
+        env:
+          GOALLC_CCACHE: /usr/bin/ccache
+        run: |
+          ./make.bash \
+            -llvm-dir="$LLVM_ROOT" \
+            -llvm-version=23 \
+            -llvm-link=dynamic
+
+      - name: Test pass plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          plugin_build="$GITHUB_WORKSPACE/pkg/goallc-llvmplugin"
+          "$GITHUB_WORKSPACE/bin/go" build \
+            -o "$plugin_build/goallc-objview" cmd/objview
+          cmake -S "$GITHUB_WORKSPACE/src/cmd/llvmplugin" \
+            -B "$plugin_build" -G Ninja \
+            -DLLVM_DIR="$LLVM_ROOT/lib/cmake/llvm" \
+            -DCMAKE_INSTALL_PREFIX="$LLVM_ROOT" \
+            -DBUILD_TESTING=ON \
+            -DGOALLC_OBJVIEW_EXECUTABLE="$plugin_build/goallc-objview" \
+            -DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/ccache
+          cmake --build "$plugin_build" \
+            --target GoALLCStatepoints --parallel "$(nproc)"
+          ctest --test-dir "$plugin_build" \
+            --output-on-failure -j "$(nproc)"
+
+      - name: Test GoALLC infrastructure
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./bin/go test cmd/dist cmd/llvmtoolexec
+          GOALLC_LLC="$LLVM_ROOT/bin/llc" \
+          GOALLC_PASS_PLUGIN="$LLVM_ROOT/lib/GoALLCStatepoints.so" \
+            ./bin/go test -count=1 \
+              -run '^TestLLVMInitTaskOrder$' cmd/llvmtoolexec
+
+      - name: Test LLVM whitelist
+        env:
+          GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
+          GOALLC_FILECHECK: ${{ env.LLVM_ROOT }}/bin/FileCheck
+        run: |
+          ./bin/go test cmd/internal/testdir \
+            -run 'Test/LLVM' \
+            -count=1 \
+            -timeout=40m \
+            -v
+
+      - name: Report ccache
+        if: always()
+        run: ccache -s
