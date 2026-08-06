@@ -578,7 +578,7 @@ func logLLVMBlacklist(t *testing.T, name string, candidates map[string]bool, set
 				break
 			}
 		}
-		t.Logf("LLVM %s blacklist result: NOT RUN %s: %s", name, filename, reason)
+		t.Logf("LLVM %s blacklist result: NOT RUN test=%q reason=%q", name, filename, reason)
 	}
 }
 
