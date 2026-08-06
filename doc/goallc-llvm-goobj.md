@@ -431,9 +431,10 @@ GoALLC 不维护一套与 Go 仓库重复的测试源码。LLVM 测试由
   `opt -passes=default<O2>`，并用 `LLVM-OPT` prefix 检查优化后的 IR；
 - 白名单是当前必须通过的用例，任何失败都会使 CI 失败；
 - 灰名单是可以执行但尚未要求通过的用例，runner 会记录每个失败和汇总，
-  但不会因此使 CI 失败；验证稳定后通过把精确条目加入白名单来提升覆盖；
+  并为每个用例明确输出 `PASS`、`FAIL (allowed)` 或 `SKIP`，但不会因此使
+  CI 失败；验证稳定后通过把精确条目加入白名单来提升覆盖；
 - 黑名单完全不执行，只能用于已知会超时或耗尽内存的用例；runner 会校验
-  blacklist reason 明确包含 timeout 或 OOM；
+  blacklist reason 明确包含 timeout 或 OOM，并在日志中输出 `NOT RUN`；
 - 三类的匹配优先级为黑名单、精确白名单、灰名单。灰名单可以用 glob 覆盖
   尚未支持的范围，黑名单中的精确超时/OOM 条目仍能阻止执行；
 - `platform_graylist` 把公共白名单项在指定平台降为灰名单，普通编译或运行失败
