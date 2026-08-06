@@ -141,18 +141,17 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 		[]byte("@llvm.experimental.gc.relocate")), 4; got != want {
 		t.Fatalf("alloca relocate references=%d, want %d\n%s", got, want, rewrittenFunction)
 	}
-	// A potential StackObject has function-wide storage identity because stack
-	// growth adjusts every pointer word in every recorded object. The plugin
-	// therefore widens its LLVM storage lifetime and clears the whole alloca at
-	// entry. The original VarDef initialization remains a separate operation;
-	// GC activity still comes from the original lifetime markers.
+	// The original VarDef starts the alloca's source lifetime and completely
+	// initializes it before the first call where it is GC-live. Merely carrying
+	// the layout at every statepoint must not add an earlier initialization or
+	// widen the object's GC activity.
 	lifetimeStart := bytes.Index(rewrittenFunction, []byte("call void @llvm.lifetime.start"))
-	entryInitialize := bytes.Index(rewrittenFunction, []byte("call void @llvm.memset.inline"))
-	sourceInitialize := bytes.LastIndex(rewrittenFunction, []byte("call void @llvm.memset.inline"))
-	if lifetimeStart < 0 || entryInitialize < 0 || sourceInitialize < 0 ||
-		bytes.Count(rewrittenFunction, []byte("call void @llvm.memset.inline")) != 2 ||
-		lifetimeStart >= entryInitialize || entryInitialize >= sourceInitialize {
-		t.Fatalf("StackObject whole-function and source initialization are misordered\n%s", rewrittenFunction)
+	zeroInitialize := bytes.Index(rewrittenFunction, []byte("call void @llvm.memset.inline"))
+	if lifetimeStart < 0 || zeroInitialize < 0 ||
+		bytes.Count(rewrittenFunction, []byte("call void @llvm.memset.inline")) != 1 ||
+		bytes.Contains(rewrittenFunction, []byte("store ptr null")) ||
+		lifetimeStart >= zeroInitialize {
+		t.Fatalf("VarDef lifetime and source initialization are misordered or duplicated\n%s", rewrittenFunction)
 	}
 	runLLVMABICommand(t, rewrittenIR, opt, "-load-pass-plugin="+plugin,
 		"-passes=verify", "-disable-output", "-")

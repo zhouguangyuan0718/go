@@ -156,14 +156,8 @@ def check_rewritten_ir(ir):
     if "llvm.statepoint.fixed_stack_home" in ir:
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
-    entry_initializers = re.findall(
-        r"^\s*call void @llvm\.memset\.inline\.p0", ir, re.MULTILINE
-    )
-    if len(entry_initializers) != 8:
-        fail(
-            f"found {len(entry_initializers)} StackObject entry initializers, "
-            "want eight"
-        )
+    if re.search(r"\.gc\.leaf\..*\.init\.addr", ir):
+        fail("ordinary StackObject received plugin entry initialization")
 
     one = [record("slot", 8, 1, [1])]
     expect_records(ir, "pointer_slot", [one], [["i64 7"]])
@@ -270,13 +264,12 @@ def check_rewritten_ir(ir):
     statepoint_end = escaped.index("@llvm.experimental.gc.statepoint")
     if re.search(r"store ptr .*ptr %slot", escaped[statepoint_end:]):
         fail("callee-writable alloca is stored after the call")
-    entry_initialize = escaped.find("call void @llvm.memset")
     source_store = escaped.find("store ptr %pointer, ptr %slot")
-    if min(entry_initialize, source_store) < 0 or entry_initialize >= source_store:
-        fail("callee-writable StackObject was not initialized before its source store")
+    if source_store < 0 or "store ptr null, ptr %slot" in escaped:
+        fail("callee-writable StackObject source initialization changed")
 
     locals_only = function_body(ir, "alloca_multiple_calls")
-    if "call void @llvm.memset" in locals_only or "store ptr null" in locals_only:
+    if "store ptr null" in locals_only:
         fail("direct-only alloca received plugin initialization")
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir

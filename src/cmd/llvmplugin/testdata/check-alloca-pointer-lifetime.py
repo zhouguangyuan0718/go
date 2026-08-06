@@ -140,16 +140,15 @@ def main():
         fail("call-only stack-object address entered caller live-out")
     if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in stack_body:
         fail("stack object does not preserve its frame identity across stack coloring")
-    entry_initialize = stack_body.find("call void @llvm.memset")
     source_initialize = stack_body.find("store ptr null")
     first_call = stack_body.find("@llvm.experimental.gc.statepoint")
     lifetime_start = stack_body.find("call void @llvm.lifetime.start")
-    if min(lifetime_start, entry_initialize, first_call, source_initialize) < 0:
+    if min(first_call, lifetime_start, source_initialize) < 0:
         fail("stack object initialization sequence is incomplete")
     if stack_body.count("store ptr null") != 1:
-        fail("stack object source initialization changed")
-    if not lifetime_start < entry_initialize < first_call < source_initialize:
-        fail("stack object whole-function and source initialization are misordered")
+        fail("ordinary stack object was unnecessarily initialized at entry")
+    if not first_call < lifetime_start < source_initialize:
+        fail("stack object source initialization is misordered")
 
     loop_body = function_body(ir, "loop_reinitialized_pointer_alloca")
     if loop_body.count("@llvm.experimental.gc.statepoint") != 2:
