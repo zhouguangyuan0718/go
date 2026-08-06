@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+GRAY_RESULT = re.compile(
+    r"LLVM (codegen|runtime) graylist result: (PASS|FAIL \(allowed\)|SKIP)"
+)
+POLICY = re.compile(r"LLVM (codegen|runtime) policy: (.*)")
+GRAY_SUMMARY = re.compile(r"LLVM (codegen|runtime) graylist summary: (.*)")
+BLACK_RESULT = re.compile(
+    r'LLVM (codegen|runtime) blacklist result: NOT RUN test="([^"]+)" reason="([^"]+)"'
+)
+
+
+def markdown(value):
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def leaf_results(actions):
+    names = sorted(actions)
+    leaves = []
+    for name in names:
+        prefix = name + "/"
+        if not any(other.startswith(prefix) for other in names):
+            leaves.append((name, actions[name]))
+    return leaves
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit(f"usage: {sys.argv[0]} TEST-JSON SUMMARY")
+
+    report_path = Path(sys.argv[1])
+    summary_path = Path(sys.argv[2])
+    arch = os.environ.get("GOALLC_CI_ARCH", "unknown")
+
+    lines = [f"## GoALLC LLVM tests: linux/{markdown(arch)}", ""]
+    if not report_path.is_file():
+        lines.extend([
+            "⚠️ Test report was not produced; inspect the preceding workflow steps.",
+            "",
+        ])
+        summary_path.write_text("\n".join(lines), encoding="utf-8")
+        return
+
+    actions = {}
+    package_action = None
+    gray_results = {}
+    policies = {}
+    gray_summaries = {}
+    black_results = []
+
+    with report_path.open(encoding="utf-8") as report:
+        for raw_line in report:
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+
+            action = event.get("Action")
+            test = event.get("Test")
+            if test and action in {"pass", "fail", "skip"}:
+                actions[test] = action
+            elif not test and action in {"pass", "fail"}:
+                package_action = action
+
+            output = event.get("Output", "")
+            if test:
+                match = GRAY_RESULT.search(output)
+                if match:
+                    gray_results[test] = match.groups()
+            match = POLICY.search(output)
+            if match:
+                policies[match.group(1)] = match.group(2)
+            match = GRAY_SUMMARY.search(output)
+            if match:
+                gray_summaries[match.group(1)] = match.group(2)
+            match = BLACK_RESULT.search(output)
+            if match:
+                black_results.append(match.groups())
+
+    status = {
+        "pass": "✅ Test command passed",
+        "fail": "❌ Required test or infrastructure check failed",
+    }.get(package_action, "⚠️ Test run did not complete")
+    lines.extend([status, ""])
+
+    if policies:
+        lines.extend(["### Policy", "", "| Suite | Classification |", "| --- | --- |"])
+        for suite in ("codegen", "runtime"):
+            if suite in policies:
+                lines.append(f"| {suite} | {markdown(policies[suite])} |")
+        lines.append("")
+
+    required_actions = {
+        name: action
+        for name, action in actions.items()
+        if name.startswith("TestLLVM/") and name not in gray_results
+    }
+    required = leaf_results(required_actions)
+    required_counts = {
+        action: sum(1 for _, result in required if result == action)
+        for action in ("pass", "fail", "skip")
+    }
+    lines.extend([
+        "### Required tests",
+        "",
+        f"{required_counts['pass']} passed, {required_counts['fail']} failed, "
+        f"{required_counts['skip']} skipped.",
+        "",
+    ])
+    failed_required = [name for name, action in required if action == "fail"]
+    if failed_required:
+        lines.extend(["Failed required tests:", ""])
+        lines.extend(f"- `{markdown(name.removeprefix('TestLLVM/'))}`" for name in failed_required)
+        lines.append("")
+
+    if gray_summaries:
+        lines.extend(["### Graylist", ""])
+        for suite in ("codegen", "runtime"):
+            if suite in gray_summaries:
+                lines.append(f"- {suite}: {markdown(gray_summaries[suite])}")
+        lines.append("")
+
+    if gray_results:
+        lines.extend([
+            f"<details><summary>Graylist case results ({len(gray_results)})</summary>",
+            "",
+            "| Suite | Test | Result |",
+            "| --- | --- | --- |",
+        ])
+        for name, (suite, result) in sorted(gray_results.items()):
+            test_name = name.removeprefix("TestLLVM/")
+            lines.append(f"| {markdown(suite)} | `{markdown(test_name)}` | {markdown(result)} |")
+        lines.extend(["", "</details>", ""])
+
+    if black_results:
+        lines.extend([
+            f"<details><summary>Blacklisted cases not run ({len(black_results)})</summary>",
+            "",
+            "| Suite | Test | Reason |",
+            "| --- | --- | --- |",
+        ])
+        for suite, test, reason in sorted(set(black_results)):
+            lines.append(f"| {markdown(suite)} | `{markdown(test)}` | {markdown(reason)} |")
+        lines.extend(["", "</details>", ""])
+
+    summary_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
