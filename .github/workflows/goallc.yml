@@ -151,7 +151,7 @@ jobs:
             ./bin/go test -count=1 \
               -run '^TestLLVMInitTaskOrder$' cmd/llvmtoolexec
 
-      - name: Test LLVM whitelist
+      - name: Test LLVM policy (white required, gray advisory)
         env:
           GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
           GOALLC_FILECHECK: ${{ env.LLVM_ROOT }}/bin/FileCheck

@@ -280,7 +280,7 @@ LLVM 主题分支已经实现：
   调用 `llc`、追加唯一的 `_go_.o` 并进入正常 Go linker；
 - 当前 wrapper 通常只选择简单的 `main` package，不能把完整标准库切换到
   LLVM；
-- Go branch 已增加复用 `test/codegen` 和现有 `// run` 用例的黑白名单
+- Go branch 已增加复用 `test/codegen` 和现有 `// run` 用例的白/灰/黑名单
   回归机制，具体维护方式见
   [doc/goallc-llvm-goobj.md](doc/goallc-llvm-goobj.md#回归测试机制)。
 

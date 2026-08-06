@@ -163,7 +163,7 @@ Release asset 可重定位且 checksum 稳定，再在一个 Go PR 中同时更�
 
 ## LLVM 测试工具选择
 
-`cmd/internal/testdir` 的 LLVM 测试在开始运行白名单前只选择一次 payload，顺序为
+`cmd/internal/testdir` 的 LLVM 测试在开始运行测试策略前只选择一次 payload，顺序为
 显式的 `GOALLC_LLVM_DIR`、由 `GOALLC_LLC` 推导的根目录、`make.bash` 写入的
 `$GOROOT/pkg/goallc-llvm-payload`，最后才是兼容入口 `$GOROOT/llvm`。选定后，
 `llc`、`opt`、`FileCheck`、`llvm-config` 和 pass plugin 必须全部来自这个 payload；
@@ -171,7 +171,7 @@ Release asset 可重定位且 checksum 稳定，再在一个 Go PR 中同时更�
 
 测试启动日志会打印 Go、payload、LLVM 工具、plugin 和优化 pipeline 的绝对路径。
 `llvmtoolexec` 从当前 Go checkout 临时构建，避免复用 `$GOROOT/pkg/tool` 中的旧
-wrapper。运行白名单使用 `default<O2>`，并由 wrapper 按
+wrapper。白名单和灰名单的 runtime 用例都使用 `default<O2>`，并由 wrapper 按
 `command-line-arguments` 包选择 LLVM lowering；用例 recipe 自己的 `-gcflags`
 保持原样，不会覆盖或关闭 LLVM 编译。
 
@@ -220,8 +220,9 @@ GOALLC_PASS_PLUGIN="$PLUGIN" \
   "$GOROOT/bin/go" test -count=1 -run '^TestLLVMInitTaskOrder$' cmd/llvmtoolexec
 ```
 
-完整语言特性矩阵仍由 LLVM 白名单/黑名单测试负责；基础设施验证不把矩阵中已知
-未实现特性的失败误判成 payload 构建失败。
+完整语言特性矩阵仍由 LLVM 白/灰/黑名单测试负责。白名单失败会让 CI 失败；
+灰名单总是运行并报告结果，但失败不影响 CI；黑名单完全不运行，并且只允许记录
+已知会超时或耗尽内存的用例。
 
 ## Go action cache
 
