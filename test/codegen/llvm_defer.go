@@ -26,19 +26,25 @@ var llvmDeferSink int
 // LLVM-OPT-NEXT: {{.*}} = load volatile ptr, ptr [[RESULT_OPT]]
 
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmDeferStack(i64 %value)
+// LLVM: [[STACK_RESULT:%.*]] = alloca i64
+// LLVM: store volatile i64 0, ptr [[STACK_RESULT]]
 // LLVM: call goabiinternal void @runtime.deferprocStack
 // LLVM: callbr void @llvm.go.defer.edge()
 // LLVM-NEXT: to label %[[STACK_NORMAL:.*]] [label %[[STACK_RECOVER:.*]]]
+// LLVM: store volatile i64 7, ptr [[STACK_RESULT]]
 // LLVM: [[STACK_RECOVER]]:
 // LLVM: call goabiinternal void @runtime.deferreturn()
-// LLVM: load volatile i64
+// LLVM: load volatile i64, ptr [[STACK_RESULT]]
 // LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmDeferStack(i64 %value)
+// LLVM-OPT: [[STACK_OPT_RESULT:%.*]] = alloca i64
+// LLVM-OPT: store volatile i64 0, ptr [[STACK_OPT_RESULT]]
 // LLVM-OPT: call goabiinternal void @runtime.deferprocStack
 // LLVM-OPT: callbr void @llvm.go.defer.edge()
 // LLVM-OPT-NEXT: to label %{{.*}} [label %[[STACK_OPT_RECOVER:.*]]]
 // LLVM-OPT: [[STACK_OPT_RECOVER]]:
 // LLVM-OPT: call goabiinternal void @runtime.deferreturn()
-// LLVM-OPT: load volatile i64
+// LLVM-OPT: load volatile i64, ptr [[STACK_OPT_RESULT]]
+// LLVM-OPT: store volatile i64 7, ptr [[STACK_OPT_RESULT]]
 
 // LLVM-LABEL: define goabiinternal void @codegen.llvmDeferHeap(i64 %count)
 // LLVM: [[HEAP_NORMAL_RETURN:[A-Za-z0-9_.]+]]:
@@ -52,8 +58,6 @@ var llvmDeferSink int
 // LLVM: define goabiinternal void @codegen.llvmDeferHeap.deferwrap1({{.*}}) {{.*}}!goobj.func.info ![[WRAPPER_INFO:[0-9]+]]
 // LLVM: define goabiinternal {{.*}} @codegen.llvmRecover(){{.*}} #[[LLVM_NOINLINE]] gc "goallc"
 // LLVM: call goabiinternal {{.*}} @runtime.gorecover(
-// LLVM: attributes #[[LLVM_NOINLINE]] = { {{.*}}noinline
-// LLVM: ![[WRAPPER_INFO]] = !{i8 23, i8 0}
 // LLVM-OPT-LABEL: define goabiinternal void @codegen.llvmDeferHeap(i64 %count)
 // LLVM-OPT: [[HEAP_OPT_RECOVER:common.ret]]:
 // LLVM-OPT-NEXT: call goabiinternal void @runtime.deferreturn()
@@ -63,6 +67,21 @@ var llvmDeferSink int
 // LLVM-OPT: define goabiinternal void @codegen.llvmDeferHeap.deferwrap1({{.*}}) {{.*}}!goobj.func.info ![[WRAPPER_OPT_INFO:[0-9]+]]
 // LLVM-OPT: define goabiinternal {{.*}} @codegen.llvmRecover(){{.*}} #[[LLVM_NOINLINE]] gc "goallc"
 // LLVM-OPT: call goabiinternal {{.*}} @runtime.gorecover(
+
+// An unnamed result still has a recovery-visible home. If evaluating a return
+// expression panics, defer recovery must return the last committed value.
+// LLVM-LABEL: define goabiinternal i64 @codegen.llvmDeferUnnamedResult(i64 %value)
+// LLVM: [[UNNAMED_RESULT:%.*]] = alloca i64, align 8{{$}}
+// LLVM: store volatile i64 0, ptr [[UNNAMED_RESULT]]
+// LLVM: call goabiinternal void @runtime.deferreturn()
+// LLVM-NEXT: {{.*}} = load volatile i64, ptr [[UNNAMED_RESULT]]
+// LLVM: attributes #[[LLVM_NOINLINE]] = { {{.*}}noinline
+// LLVM: ![[WRAPPER_INFO]] = !{i8 23, i8 0}
+// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmDeferUnnamedResult(i64 %value)
+// LLVM-OPT: [[UNNAMED_OPT_RESULT:%.*]] = alloca i64, align 8{{$}}
+// LLVM-OPT: store volatile i64 0, ptr [[UNNAMED_OPT_RESULT]]
+// LLVM-OPT: call goabiinternal void @runtime.deferreturn()
+// LLVM-OPT-NEXT: {{.*}} = load volatile i64, ptr [[UNNAMED_OPT_RESULT]]
 // LLVM-OPT: attributes #[[LLVM_NOINLINE]] = { {{.*}}noinline
 // LLVM-OPT: ![[WRAPPER_OPT_INFO]] = !{i8 23, i8 0}
 
@@ -89,6 +108,11 @@ func llvmDeferPointerResult(pointer *int) (result *int) {
 	defer func() {}()
 	result = pointer
 	panic(llvmDeferSink)
+}
+
+func llvmDeferUnnamedResult(value int) int {
+	defer func() {}()
+	return value
 }
 
 func llvmRecover() any {

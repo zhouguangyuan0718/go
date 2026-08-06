@@ -22,7 +22,7 @@ type LLVMFuncContext struct {
 	ResultSlots      map[ID]llvm.Value
 	ItabMethods      map[ID]bool
 	ClosureCodeLoads map[ID]bool
-	DeferRecovery    map[ID]bool
+	DeferResults     map[llvmLocalKey]bool
 	F                *Func
 	LF               llvm.Value
 	ClosureContext   llvm.Value
@@ -664,10 +664,32 @@ func (lfc *LLVMFuncContext) llvmMemoryPointer(v *Value, arg int) llvm.Value {
 	return p
 }
 
+func (lfc *LLVMFuncContext) isDeferResultAddress(v *Value) bool {
+	for v != nil {
+		switch v.Op {
+		case OpLocalAddr:
+			_, key := llvmLocalName(v)
+			return lfc.DeferResults[key]
+		case OpOffPtr, OpAddPtr, OpPtrIndex, OpCopy:
+			if len(v.Args) == 0 {
+				return false
+			}
+			v = v.Args[0]
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 func (lfc *LLVMFuncContext) llvmZero(v *Value) llvm.Value {
 	size, align := llvmMemoryOpInfo(v)
 	dst := lfc.llvmMemoryPointer(v, 0)
 	length := lfc.llvmMemoryLength(v, size)
+	volatile := uint64(0)
+	if lfc.isDeferResultAddress(v.Args[0]) {
+		volatile = 1
+	}
 	sig := llvm.FunctionType(
 		GlobalCtxt.VoidType(),
 		[]llvm.Type{dst.Type(), GlobalCtxt.Int8Type(), length.Type(), GlobalCtxt.Int1Type()},
@@ -682,7 +704,7 @@ func (lfc *LLVMFuncContext) llvmZero(v *Value) llvm.Value {
 		dst,
 		llvm.ConstInt(GlobalCtxt.Int8Type(), 0, false),
 		length,
-		llvm.ConstInt(GlobalCtxt.Int1Type(), 0, false),
+		llvm.ConstInt(GlobalCtxt.Int1Type(), volatile, false),
 	}, "")
 	call.SetInstrParamAlignment(1, align)
 	return call
@@ -725,11 +747,15 @@ func (lfc *LLVMFuncContext) llvmMove(v *Value) llvm.Value {
 		name = "llvm.memmove.p0.p0.i32"
 	}
 	fn := getOrInsertLLVMIntrinsic(name, sig)
+	volatile := uint64(0)
+	if lfc.isDeferResultAddress(v.Args[0]) {
+		volatile = 1
+	}
 	call := lfc.b.CreateCall(sig, fn, []llvm.Value{
 		dst,
 		src,
 		length,
-		llvm.ConstInt(GlobalCtxt.Int1Type(), 0, false),
+		llvm.ConstInt(GlobalCtxt.Int1Type(), volatile, false),
 	}, "")
 	call.SetInstrParamAlignment(1, align)
 	call.SetInstrParamAlignment(2, align)
@@ -2030,7 +2056,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			v.Fatalf("%s address has non-pointer LLVM type", v.Op)
 		}
 		lVal = lfc.b.CreateLoad(typ, addr, v.String())
-		if v.Block != nil && lfc.DeferRecovery[v.Block.ID] {
+		// The runtime may resume at the first deferreturn call recorded for the
+		// function, which can be an ordinary exit rather than the fake recovery
+		// successor. Reload named results from their stack homes at every such
+		// exit so LLVM cannot replace the recovered value with its normal-path
+		// SSA value.
+		if lfc.isDeferResultAddress(v.Args[0]) {
 			lVal.SetVolatile(true)
 		}
 		if v.Op == OpDereference {
@@ -2102,6 +2133,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.emitNilCheckIntrinsic(v)
 	case OpStore:
 		lVal = lfc.b.CreateStore(arg1(), arg0())
+		if lfc.isDeferResultAddress(v.Args[0]) {
+			lVal.SetVolatile(true)
+		}
 	case OpZero:
 		lVal = lfc.llvmZero(v)
 	case OpMove:
@@ -2274,7 +2308,7 @@ func LLVMCompile(f *Func) {
 		ResultSlots:      map[ID]llvm.Value{},
 		ItabMethods:      map[ID]bool{},
 		ClosureCodeLoads: map[ID]bool{},
-		DeferRecovery:    map[ID]bool{},
+		DeferResults:     map[llvmLocalKey]bool{},
 		F:                f,
 		b:                GlobalCtxt.NewBuilder(),
 		ReturnType:       sig.ReturnType,
@@ -2332,11 +2366,6 @@ func LLVMCompile(f *Func) {
 			continue
 		}
 		FCtxt.BBs[BB.ID] = GlobalCtxt.AddBasicBlock(FCtxt.LF, BB.String())
-	}
-	for _, BB := range f.Blocks {
-		if BB.Kind == BlockDefer && len(BB.Succs) == 2 {
-			FCtxt.DeferRecovery[BB.Succs[1].Block().ID] = true
-		}
 	}
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
@@ -2400,6 +2429,10 @@ func LLVMCompile(f *Func) {
 			}
 			slot := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), v.String())
 			slot.SetAlignment(int(name.Type().Alignment()))
+			isDeferResult := frontendFunc != nil && frontendFunc.HasDefer() && name.Class == ir.PPARAMOUT
+			if isDeferResult {
+				FCtxt.DeferResults[key] = true
+			}
 			if name.Type().HasPointers() {
 				// Preserve the frontend address-taken decision as provenance only.
 				// The pre-codegen statepoint pass reclassifies the surviving alloca
@@ -2412,7 +2445,7 @@ func LLVMCompile(f *Func) {
 				slot.SetMetadata(GlobalCtxt.MDKindID(goSourceAddressTakenMD), GlobalCtxt.MDNode([]llvm.Metadata{
 					sourceAddressTaken.ConstantAsMetadata(),
 				}))
-				if frontendFunc != nil && frontendFunc.HasDefer() && name.Class == ir.PPARAMOUT {
+				if isDeferResult {
 					// Panic recovery resumes at a deferreturn path that is not a
 					// successor of the suspended call in LLVM's CFG. Keep pointer
 					// results in every caller stack map; the recovery block's
