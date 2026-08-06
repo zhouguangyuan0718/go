@@ -1754,17 +1754,35 @@ func configureGoallcLLVM() {
 	goallcLLVMDir = filepath.Clean(absDir)
 
 	for _, required := range []string{
-		pathf("%s/include/llvm-c", goallcLLVMDir),
-		pathf("%s/lib", goallcLLVMDir),
+		pathf("%s/include/llvm-c/Core.h", goallcLLVMDir),
+		pathf("%s/include/llvm/Config/llvm-config.h", goallcLLVMDir),
 		pathf("%s/lib/cmake/llvm/LLVMConfig.cmake", goallcLLVMDir),
-		pathf("%s/bin/llc", goallcLLVMDir),
-		pathf("%s/bin/llvm-config", goallcLLVMDir),
+		pathf("%s/lib/cmake/llvm/AddLLVM.cmake", goallcLLVMDir),
+		pathf("%s/lib/cmake/llvm/LLVMExports.cmake", goallcLLVMDir),
+		pathf("%s/lib/libLLVMCore.a", goallcLLVMDir),
 	} {
 		if _, err := os.Stat(required); err != nil {
 			fatalf("invalid LLVM payload %q: %v", goallcLLVMDir, err)
 		}
 	}
+	for _, required := range []string{
+		pathf("%s/bin/llc", goallcLLVMDir),
+		pathf("%s/bin/llvm-ar", goallcLLVMDir),
+		pathf("%s/bin/llvm-config", goallcLLVMDir),
+	} {
+		if err := requireExecutableFile(required); err != nil {
+			fatalf("invalid LLVM payload %q: %s: %v", goallcLLVMDir, required, err)
+		}
+	}
 	llvmConfig := pathf("%s/bin/llvm-config", goallcLLVMDir)
+	prefixOutput, err := exec.Command(llvmConfig, "--prefix").Output()
+	if err != nil {
+		fatalf("running %s --prefix: %v", llvmConfig, err)
+	}
+	prefix := strings.TrimSpace(string(prefixOutput))
+	if !sameGoallcLLVMDirectory(prefix, goallcLLVMDir) {
+		fatalf("invalid LLVM payload %q: llvm-config reports prefix %q; use a complete cmake --install tree instead of combining build-tree bin/lib directories with copied headers", goallcLLVMDir, prefix)
+	}
 	versionOutput, err := exec.Command(llvmConfig, "--version").Output()
 	if err != nil {
 		fatalf("running %s --version: %v", llvmConfig, err)
@@ -1796,6 +1814,22 @@ func configureGoallcLLVM() {
 		buildGoallcLLVMStaticArchive(bindingDir, llvmConfig, version)
 	}
 	writeGoallcLLVMPayloadConfig()
+}
+
+func sameGoallcLLVMDirectory(a, b string) bool {
+	resolve := func(path string) string {
+		path, err := filepath.Abs(path)
+		if err != nil {
+			return ""
+		}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		return filepath.Clean(path)
+	}
+	a = resolve(a)
+	b = resolve(b)
+	return a != "" && a == b
 }
 
 func configureGoallcLLVMPayloadLink(bindingDir string) {
