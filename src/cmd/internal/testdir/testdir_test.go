@@ -654,6 +654,13 @@ func (t test) run() error {
 		}
 		args = args[1:]
 	}
+	if t.llvm != nil {
+		// LLVM lowering and optimization are substantially heavier than the
+		// native compile path. Bound each recipe command to the CI per-case
+		// budget so a newly slow test fails promptly and can be reviewed for
+		// blacklisting. An explicit shorter timeout remains authoritative.
+		tim = llvmCaseTimeoutSeconds(tim)
+	}
 	if action == "errorcheck" {
 		found := false
 		for i, f := range flags {
