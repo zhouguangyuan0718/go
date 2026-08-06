@@ -65,10 +65,15 @@ func TestGoallcPluginInputID(t *testing.T) {
 		filepath.Join(source, "plugin.cpp"):                                "int plugin;",
 		filepath.Join(payload, "bin", "llc"):                               "llc-v1",
 		filepath.Join(payload, "bin", "llvm-config"):                       "llvm-config-v1",
+		filepath.Join(payload, "include", "llvm", "Config", "config.h"):    "llvm-config-header-v1",
+		filepath.Join(payload, "include", "llvm-c", "Core.h"):              "llvm-c-header-v1",
 		filepath.Join(payload, "lib", "cmake", "llvm", "LLVMConfig.cmake"): "llvm-config-cmake-v1",
 		filepath.Join(payload, "lib", "libLLVM.dylib"):                     "libllvm-v1",
 	}
 	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -76,14 +81,14 @@ func TestGoallcPluginInputID(t *testing.T) {
 	llc := filepath.Join(payload, "bin", "llc")
 	llvmConfig := filepath.Join(payload, "bin", "llvm-config")
 	library := filepath.Join(payload, "lib", "libLLVM.dylib")
-	want, err := goallcPluginInputID(source, llc, llvmConfig, library)
+	want, err := goallcPluginInputID(source, llc, llvmConfig, nil, library)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(llc, time.Now().Add(-time.Hour), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	got, err := goallcPluginInputID(source, llc, llvmConfig, library)
+	got, err := goallcPluginInputID(source, llc, llvmConfig, nil, library)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +98,7 @@ func TestGoallcPluginInputID(t *testing.T) {
 	if err := os.WriteFile(llc, []byte("llc-v2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := goallcPluginInputID(source, llc, llvmConfig, library)
+	changed, err := goallcPluginInputID(source, llc, llvmConfig, nil, library)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,11 +111,73 @@ func TestGoallcPluginInputID(t *testing.T) {
 	if err := os.WriteFile(library, []byte("libllvm-v2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	changed, err = goallcPluginInputID(source, llc, llvmConfig, library)
+	changed, err = goallcPluginInputID(source, llc, llvmConfig, nil, library)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if changed == want {
 		t.Fatal("libLLVM content change did not alter plugin input ID")
+	}
+	if err := os.WriteFile(library, []byte("libllvm-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	header := filepath.Join(payload, "include", "llvm", "Config", "config.h")
+	if err := os.WriteFile(header, []byte("llvm-config-header-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = goallcPluginInputID(source, llc, llvmConfig, nil, library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == want {
+		t.Fatal("LLVM header content change did not alter plugin input ID")
+	}
+	changed, err = goallcPluginInputID(source, llc, llvmConfig, []string{"-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"}, library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == want {
+		t.Fatal("CMake configuration change did not alter plugin input ID")
+	}
+}
+
+func TestGoallcDarwinDeploymentTarget(t *testing.T) {
+	payload := t.TempDir()
+	manifest := filepath.Join(payload, "share", "goallc", "build-manifest")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("format=1\nmacos_deployment_target=13.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACOSX_DEPLOYMENT_TARGET", "")
+	if got, err := goallcDarwinDeploymentTarget(payload); err != nil || got != "13.0" {
+		t.Fatalf("manifest target: got %q, %v", got, err)
+	}
+	t.Setenv("MACOSX_DEPLOYMENT_TARGET", "14.1")
+	if got, err := goallcDarwinDeploymentTarget(payload); err != nil || got != "14.1" {
+		t.Fatalf("environment target: got %q, %v", got, err)
+	}
+	t.Setenv("MACOSX_DEPLOYMENT_TARGET", "latest")
+	if _, err := goallcDarwinDeploymentTarget(payload); err == nil {
+		t.Fatal("invalid target was accepted")
+	}
+}
+
+func TestSameGoallcLLVMDirectory(t *testing.T) {
+	root := t.TempDir()
+	payload := filepath.Join(root, "payload")
+	if err := os.Mkdir(payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "payload-link")
+	if err := os.Symlink(payload, link); err != nil {
+		t.Fatal(err)
+	}
+	if !sameGoallcLLVMDirectory(payload, link) {
+		t.Fatal("symlink to the same payload was not accepted")
+	}
+	if sameGoallcLLVMDirectory(payload, filepath.Join(root, "missing")) {
+		t.Fatal("different payload directories were accepted")
 	}
 }

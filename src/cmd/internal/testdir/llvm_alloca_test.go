@@ -85,8 +85,9 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 	}
 
 	// LLVM compilation runs before native register allocation turns
-	// OpKeepAlive of a stack address into OpVarLive. Preserve the value use
-	// explicitly so statepoint liveness extends through the preceding calls.
+	// OpKeepAlive of a stack address into OpVarLive. Preserve the value in the
+	// go.keepalive operand bundle so statepoint liveness extends through the
+	// preceding calls.
 	keepAliveArchive := filepath.Join(dir, "keepalive.a")
 	keepAliveSource := filepath.Join(gorootTestDir, "fixedbugs", "issue30476.go")
 	runLLVMABICommand(t, nil, goTool, "tool", "compile",
@@ -101,7 +102,7 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 		`call goabiinternal void @runtime\.GC\(\).*` +
 		`call goabiinternal void @runtime\.GC\(\).*` +
 		`call goabiinternal void @runtime\.GC\(\).*` +
-		`call void \(\.\.\.\) @llvm\.fake\.use\(ptr %v[0-9]+\)`)
+		`call void @llvm\.donothing\(\) \[ "go\.keepalive"\(ptr %v[0-9]+\) \]`)
 	if !keepAlivePattern.Match(keepAliveFunction) {
 		t.Fatalf("OpKeepAlive is not preserved after the GC calls\n%s", keepAliveFunction)
 	}

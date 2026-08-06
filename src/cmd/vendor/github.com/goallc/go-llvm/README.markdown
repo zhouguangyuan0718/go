@@ -34,6 +34,9 @@ For example:
 
 The static command requires `libLLVMGoALLC.a` to have been assembled first.
 The GoALLC toolchain does this automatically for `-llvm-link=static`.
+The final link also consumes the system libraries reported by the selected
+LLVM build. On Darwin, zstd is resolved with `pkg-config libzstd`; the
+development package must be installed and discoverable through pkg-config.
 
 Do not select multiple version tags or multiple link-mode tags in one build.
 

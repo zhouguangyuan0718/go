@@ -347,19 +347,16 @@ home，而不是另建 locals spill。Args 和 Locals 表按完整 pair 一起�
 初始化的结果槽保持为空。StackObjects 仍未生成；追踪 alloca 地址也不能描述
 alloca 对象内部保存的指针字段。
 
-在构建 Go toolchain 前，使用同一个 LLVM payload 的 CMake config 构建、
-测试并安装插件：
+`make.bash` 会使用同一个 LLVM payload 的 CMake config 构建插件，并以新 inode
+原子安装。规范的 LLVM payload、plugin、Go 构建和验证流程见
+[goallc-build.md](goallc-build.md)：
 
 ```sh
-LLVM_PAYLOAD=/path/to/goallc-llvm
-PLUGIN_BUILD=/path/to/empty/plugin-build
-
-cmake -S "$GOROOT/src/cmd/llvmplugin" -B "$PLUGIN_BUILD" -G Ninja \
-  -DLLVM_DIR="$LLVM_PAYLOAD/lib/cmake/llvm" \
-  -DCMAKE_INSTALL_PREFIX="$LLVM_PAYLOAD"
-cmake --build "$PLUGIN_BUILD"
-ctest --test-dir "$PLUGIN_BUILD" --output-on-failure
-cmake --install "$PLUGIN_BUILD"
+cd "$GOROOT/src"
+./make.bash \
+  -llvm-dir=/path/to/goallc-llvm \
+  -llvm-version=23 \
+  -llvm-link=dynamic
 ```
 
 安装结果为 Darwin 上的
@@ -429,13 +426,21 @@ GoALLC 不维护一套与 Go 仓库重复的测试源码。LLVM 测试由
 
 - codegen 候选是 `test/codegen` 下 recipe 为 `// asmcheck` 的文件；
 - runtime 候选是 testdir 原本扫描目录中 recipe 为 `// run` 的文件；
-- `test/llvm_tests.json` 分别维护 codegen 和 runtime 的白名单与黑名单；
+- `test/llvm_tests.json` 分别维护 codegen 和 runtime 的白名单、灰名单与黑名单；
 - codegen source 出现 `// LLVM-OPT` directive 时，runner 还会执行
   `opt -passes=default<O2>`，并用 `LLVM-OPT` prefix 检查优化后的 IR；
-- 白名单是当前必须通过的用例；黑名单支持 glob，用于记录尚未覆盖的范围；
-  精确白名单优先于宽泛黑名单；
-- runner 会拒绝拼错的白名单、无匹配项的黑名单，以及未被任一名单分类的
-  候选，并报告当前白名单文件数和候选文件总数。
+- 白名单是当前必须通过的用例，任何失败都会使 CI 失败；
+- 灰名单是可以执行但尚未要求通过的用例，runner 会记录每个失败和汇总，
+  并为每个用例明确输出 `PASS`、`FAIL (allowed)` 或 `SKIP`，但不会因此使
+  CI 失败；验证稳定后通过把精确条目加入白名单来提升覆盖；
+- 黑名单完全不执行，只能用于已知会超时或耗尽内存的用例；runner 会校验
+  blacklist reason 明确包含 timeout 或 OOM，并在日志中输出 `NOT RUN`；
+- 三类的匹配优先级为黑名单、精确白名单、灰名单。灰名单可以用 glob 覆盖
+  尚未支持的范围，黑名单中的精确超时/OOM 条目仍能阻止执行；
+- `platform_graylist` 把公共白名单项在指定平台降为灰名单，普通编译或运行失败
+  不再使用 platform blacklist；`platform_blacklist` 同样只保留超时/OOM；
+- runner 会拒绝拼错的白名单、无匹配项的灰/黑名单，以及未被三类之一分类的
+  候选，并报告白、灰、黑三类文件数。
 
 ### LLVM IR codegen 检查
 
@@ -464,7 +469,7 @@ FileCheck --check-prefix=LLVM test/codegen/example.go < package.a.ll
 
 ### LLVM runtime 检查
 
-runtime 白名单不增加新的 recipe，也不复制测试源码。runner 仍解析原文件的
+runtime 白名单和灰名单都不增加新的 recipe，也不复制测试源码。runner 仍解析原文件的
 `// run` 参数、build constraint、超时和期望输出，但构建步骤改为用
 `-gcflags=-enablellvm` 选择命令行 `main` package，再通过 `cmd/llvmtoolexec`
 替换其对象：
@@ -487,19 +492,20 @@ runtime 白名单不增加新的 recipe，也不复制测试源码。runner 仍�
 
 1. 先确认整个现有测试文件都能由当前 LLVM lowering 处理；
 2. codegen 文件在源码中增加针对 LLVM IR 的 FileCheck 指令；
-3. 在 `test/llvm_tests.json` 中增加精确白名单项和简短能力说明；
-4. runtime 文件只需加入白名单，不修改其原有 `// run` recipe；
+3. 新候选默认由灰名单 glob 执行；修复后在 `test/llvm_tests.json` 中增加精确
+   白名单项和简短能力说明；
+4. runtime 文件从灰名单提升到白名单时，不修改其原有 `// run` recipe；
 5. 运行 LLVM 定向测试，并同时运行对应的原生 asmcheck/run 测试。
 
-定向运行全部 LLVM 白名单：
+定向运行完整 LLVM 策略（白名单和灰名单执行，黑名单跳过）：
 
 ```sh
 go test cmd/internal/testdir -run='^Test$/^LLVM$' -v
 ```
 
-只运行一个 LLVM codegen 或 runtime 子测试时，可继续在 `-run` 中追加
-对应的 slash-separated subtest 名称。黑名单用于明确尚未覆盖的范围，不应
-把实际失败的用例加入白名单后再按 expected failure 处理。
+只运行一个 LLVM codegen、codegen-graylist、runtime 或 runtime-graylist 子测试时，
+可继续在 `-run` 中追加对应的 slash-separated subtest 名称。普通失败留在灰名单；
+只有确认会导致超时或 OOM 时才进入黑名单。
 
 ## 当前范围与后续工作
 
