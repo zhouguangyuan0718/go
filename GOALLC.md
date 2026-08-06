@@ -467,10 +467,10 @@ GOALLC_CCACHE=/path/to/ccache \
 不要再用源码头文件与 build tree 的 `bin`/`lib` 拼接 payload。开发测试所需的
 `FileCheck` 通过 `LLVM_INSTALL_UTILS=ON` 一并安装。
 
-Linux amd64 CI 不从源码重复构建 LLVM；它固定下载 llvm-project Release
-`goallc-llvm23.1.0-v1` 的 payload，并校验 archive SHA-256、LLVM revision、
-relocatable prefix 和完整安装布局后再运行 `make.bash`。发布与升级约定见上述
-构建文档。
+Linux amd64 和 arm64 CI 不从源码重复构建 LLVM；它们固定下载 llvm-project
+Release `goallc-llvm23.1.0-v2` 中与 runner 架构匹配的 payload，并校验 archive
+SHA-256、LLVM revision、relocatable prefix 和完整安装布局后再运行
+`make.bash`。发布与升级约定见上述构建文档。
 
 默认目录和模式可用环境变量覆盖：
 

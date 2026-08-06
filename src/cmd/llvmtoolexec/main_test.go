@@ -699,6 +699,7 @@ func TestLLVMInitTaskOrder(t *testing.T) {
 		t, goTool, "build",
 		"-toolexec="+toolexec,
 		"-gcflags=cmd/llvmtoolexec/testdata/inittask=-enablellvm",
+		"-ldflags=-w",
 		"-o", executable,
 		"./src/cmd/llvmtoolexec/testdata/inittask",
 	)

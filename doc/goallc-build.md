@@ -142,12 +142,13 @@ manifest 本身不作为编译缓存身份。
 
 GoALLC LLVM payload 发布在
 [`goallc/llvm-project` Releases](https://github.com/goallc/llvm-project/releases)。
-当前 Linux amd64 CI 固定使用：
+当前 Linux amd64 和 arm64 CI 固定使用：
 
 ```text
-tag:      goallc-llvm23.1.0-v1
-revision: 407485ab2cd2545f66e84b5bbd1907cbcc0e6e4f
-asset:    goallc-llvm23.1.0-v1-linux-amd64.tar.zst
+tag:          goallc-llvm23.1.0-v2
+revision:     632f85a1ea4bc0d2ba302aaa7133fe5fbf592545
+amd64 asset: goallc-llvm23.1.0-v2-linux-amd64.tar.zst
+arm64 asset: goallc-llvm23.1.0-v2-linux-arm64.tar.zst
 ```
 
 发布 tag 由 llvm-project 的 `.github/workflows/goallc-release.yml` 构建；归档和

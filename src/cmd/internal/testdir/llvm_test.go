@@ -41,7 +41,7 @@ type llvmTestPolicy struct {
 func runLLVMTests(t *testing.T, common testCommon) {
 	t.Run("LLVM", func(t *testing.T) {
 		switch runtime.GOOS + "/" + runtime.GOARCH {
-		case "darwin/arm64", "linux/amd64":
+		case "darwin/arm64", "linux/amd64", "linux/arm64":
 		default:
 			t.Skipf("LLVM GoObj is not configured for %s/%s", runtime.GOOS, runtime.GOARCH)
 		}
