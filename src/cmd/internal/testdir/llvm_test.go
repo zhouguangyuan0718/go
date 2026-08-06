@@ -24,6 +24,33 @@ import (
 
 const llvmTestToolexecEnv = "GOALLC_TEST_TOOLEXEC"
 
+const llvmDefaultCaseTimeoutSeconds = 60
+
+const llvmBlacklistReasonRequirement = "timeout, OOM, unsupported defer/recover, or slow CI case"
+
+func llvmCaseTimeoutSeconds(recipeTimeout int) int {
+	if recipeTimeout == 0 || recipeTimeout > llvmDefaultCaseTimeoutSeconds {
+		return llvmDefaultCaseTimeoutSeconds
+	}
+	return recipeTimeout
+}
+
+func TestLLVMCaseTimeoutSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		recipeTimeout int
+		want          int
+	}{
+		{0, 60},
+		{30, 30},
+		{60, 60},
+		{600, 60},
+	} {
+		if got := llvmCaseTimeoutSeconds(tc.recipeTimeout); got != tc.want {
+			t.Errorf("llvmCaseTimeoutSeconds(%d) = %d, want %d", tc.recipeTimeout, got, tc.want)
+		}
+	}
+}
+
 type llvmTestSet struct {
 	Whitelist         map[string]string            `json:"whitelist"`
 	Graylist          map[string]string            `json:"graylist"`
@@ -178,7 +205,7 @@ func runLLVMCompileOnlyRegression(t *testing.T, gorootTestDir, name string) {
 	exe := filepath.Join(t.TempDir(), "test.exe")
 	cmd := exec.Command(goTool, "build",
 		"-gcflags=all="+os.Getenv("GO_GCFLAGS"),
-		"-gcflags=-enablellvm",
+		"-gcflags=-enablellvm -llvmironly",
 		"-ldflags=-w",
 		"-toolexec="+toolexec,
 		"-o", exe,
@@ -274,7 +301,7 @@ func applyLLVMPlatformPolicy(name, platform string, set *llvmTestSet) error {
 				return fmt.Errorf("LLVM %s platform blacklist entry %q for %s has no reason", name, filename, target)
 			}
 			if !validLLVMBlacklistReason(reason) {
-				return fmt.Errorf("LLVM %s platform blacklist entry %q for %s is not a timeout or OOM", name, filename, target)
+				return fmt.Errorf("LLVM %s platform blacklist entry %q for %s is not a %s", name, filename, target, llvmBlacklistReasonRequirement)
 			}
 		}
 	}
@@ -359,7 +386,7 @@ func TestApplyLLVMPlatformPolicy(t *testing.T) {
 				Whitelist:         map[string]string{"test.go": "test"},
 				PlatformBlacklist: map[string]map[string]string{"linux/amd64": {"test.go": "ordinary failure"}},
 			},
-			want: "is not a timeout or OOM",
+			want: "is not a timeout, OOM, unsupported defer/recover, or slow CI case",
 		},
 	}
 	for _, tc := range tests {
@@ -477,7 +504,7 @@ func validateLLVMTestSet(t *testing.T, gorootTestDir, name string, candidates ma
 				failed = true
 			}
 			if entries.class == "blacklist" && !validLLVMBlacklistReason(reason) {
-				t.Errorf("LLVM %s blacklist pattern %q is not a timeout or OOM", name, pattern)
+				t.Errorf("LLVM %s blacklist pattern %q is not a %s", name, pattern, llvmBlacklistReasonRequirement)
 				failed = true
 			}
 			matched := false
@@ -509,7 +536,27 @@ func validLLVMBlacklistReason(reason string) bool {
 	reason = strings.ToLower(reason)
 	return strings.Contains(reason, "timeout") ||
 		strings.Contains(reason, "out of memory") ||
-		strings.Contains(reason, "oom")
+		strings.Contains(reason, "oom") ||
+		strings.Contains(reason, "slow") ||
+		strings.Contains(reason, "defer") ||
+		strings.Contains(reason, "recover")
+}
+
+func TestValidLLVMBlacklistReason(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   bool
+	}{
+		{"timeout: does not terminate", true},
+		{"OOM during LLVM code generation", true},
+		{"slow: exceeds the one-minute CI budget", true},
+		{"unsupported defer/recover execution", true},
+		{"ordinary lowering failure", false},
+	} {
+		if got := validLLVMBlacklistReason(tc.reason); got != tc.want {
+			t.Errorf("validLLVMBlacklistReason(%q) = %v, want %v", tc.reason, got, tc.want)
+		}
+	}
 }
 
 func classifyLLVMTest(t *testing.T, set llvmTestSet, filename string) llvmTestClass {
@@ -729,8 +776,32 @@ func (t test) appendLLVMGoFlags(cmd []string) []string {
 		return cmd
 	}
 	// GoObj DWARF emission is not implemented by the LLVM backend yet. Keep the
-	// original testdir go run command and add only the backend selection flags.
-	return append(cmd, "-ldflags=-w", "-toolexec="+t.llvm.toolexec)
+	// original testdir go run command and select its entry package through the
+	// same package-pattern mechanism as ordinary gcflags.
+	gcflags := strings.TrimSpace(os.Getenv("GO_GCFLAGS"))
+	if gcflags != "" {
+		gcflags += " "
+	}
+	gcflags += "-enablellvm -llvmironly"
+	return append(cmd,
+		"-ldflags=-w",
+		"-gcflags=command-line-arguments="+gcflags,
+		"-toolexec="+t.llvm.toolexec)
+}
+
+func TestAppendLLVMGoFlags(t *testing.T) {
+	t.Setenv("GO_GCFLAGS", "-N")
+	test := test{llvm: &llvmTestMode{toolexec: "llvm-wrapper"}}
+	got := test.appendLLVMGoFlags([]string{"go", "run", "-gcflags=all=-N"})
+	want := []string{
+		"go", "run", "-gcflags=all=-N",
+		"-ldflags=-w",
+		"-gcflags=command-line-arguments=-N -enablellvm -llvmironly",
+		"-toolexec=llvm-wrapper",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("LLVM go command = %q, want %q", got, want)
+	}
 }
 
 func llvmToolexec(t *testing.T, optPasses string) string {
@@ -743,7 +814,6 @@ func llvmToolexec(t *testing.T, optPasses string) string {
 		wrapper,
 		"-llc=" + llc,
 		"-pass-plugin=" + plugin,
-		"-llvm-package=command-line-arguments",
 	}
 	if optPasses != "" {
 		opt := llvmToolPath(t, "opt", "GOALLC_OPT")
