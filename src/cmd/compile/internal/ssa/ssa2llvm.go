@@ -2672,6 +2672,8 @@ func goObjTargetTriple() string {
 	switch buildcfg.GOOS + "/" + buildcfg.GOARCH {
 	case "darwin/arm64":
 		return "aarch64-apple-darwin-goobj"
+	case "linux/arm64":
+		return "aarch64-unknown-linux-goobj"
 	case "linux/amd64":
 		return "x86_64-unknown-linux-goobj"
 	default:

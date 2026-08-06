@@ -320,7 +320,21 @@ The type-derived entry map conservatively marks those words for now. A later
 change should give non-GC address words a distinct IR representation or a
 signature-level GC-shape attribute.
 
-Build, test, and install it into the LLVM payload that contains `llc`:
+The normal GoALLC build does not require a separate plugin install step.
+`make.bash -llvm-dir=...` builds this directory against that payload's CMake
+package and atomically installs the module. Build Go through its normal entry
+point; `doc/goallc-build.md` documents how to prepare the LLVM payload first:
+
+```sh
+cd "$GOROOT/src"
+./make.bash \
+  -llvm-dir=/path/to/goallc-llvm \
+  -llvm-version=23 \
+  -llvm-link=dynamic
+```
+
+For standalone plugin development, build, test, and install it into the LLVM
+payload that contains `llc`:
 
 ```sh
 LLVM_PAYLOAD=/path/to/goallc-llvm
