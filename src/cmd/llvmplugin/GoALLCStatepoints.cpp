@@ -1390,6 +1390,16 @@ Error rewriteFunction(Function &F) {
       Record.AllocaAddresses.remove(Address);
   }
   protectStackObjectsFromColoring(PointerAllocas);
+  for (const PointerAllocaRecord &Alloca : PointerAllocas) {
+    // FUNCDATA_StackObjects is function-wide, and stack growth adjusts every
+    // pointer word in every recorded object even when the source variable is
+    // not GC-live at that call. Keep the storage lifetime function-wide and
+    // initialize the whole object at entry. The activity computed above still
+    // comes from the original VarDef lifetime markers, so this does not make
+    // the object GC-live outside its source lifetime.
+    if (Alloca.NeedsStackObject)
+      WholeLifetimeAllocas.insert(Alloca.Alloca);
+  }
   if (Error Err =
           promoteAllocasToWholeFunctionLifetime(F, WholeLifetimeAllocas))
     return Err;
