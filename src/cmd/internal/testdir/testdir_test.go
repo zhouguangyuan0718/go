@@ -79,6 +79,16 @@ var (
 // Each .go file test case in GOROOT/test is registered as a subtest with
 // a full name like "Test/fixedbugs/bug000.go" ('/'-separated relative path).
 func Test(t *testing.T) {
+	runTestDir(t, false)
+}
+
+// TestLLVM runs the same testdir recipes and orchestration as Test while using
+// the LLVM backend for the cases selected by test/llvm_tests.json.
+func TestLLVM(t *testing.T) {
+	runTestDir(t, true)
+}
+
+func runTestDir(t *testing.T, useLLVM bool) {
 	if *target != "" {
 		// When -target is set, propagate it to GOOS/GOARCH in our environment
 		// so that all commands run with the target GOOS/GOARCH.
@@ -140,13 +150,38 @@ func Test(t *testing.T) {
 		}
 	}
 
+	var llvmMode *llvmTestMode
+	if useLLVM {
+		llvmMode = newLLVMTestMode(t, common)
+		t.Cleanup(func() { llvmMode.logSummary(t) })
+	}
+
 	for _, dir := range dirs {
 		for _, goFile := range goFiles(t, dir) {
-			test := test{testCommon: common, dir: dir, goFile: goFile}
-			t.Run(path.Join(dir, goFile), func(t *testing.T) {
+			name := path.Join(dir, goFile)
+			var llvmCase llvmTestCase
+			if llvmMode != nil {
+				var ok bool
+				llvmCase, ok = llvmMode.cases[name]
+				if !ok || llvmCase.class == llvmTestBlack {
+					continue
+				}
+			}
+			test := test{testCommon: common, dir: dir, goFile: goFile, llvm: llvmMode, llvmCase: llvmCase}
+			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				test.T = t
-				testError := test.run()
+				var testError error
+				if llvmMode != nil {
+					t.Cleanup(func() { llvmMode.recordResult(t, llvmCase, testError) })
+				}
+				testError = test.run()
+				if llvmMode != nil && llvmCase.class == llvmTestGray {
+					if testError != nil {
+						t.Logf("LLVM graylist failure detail: %v", testError)
+					}
+					return
+				}
 				wantError := test.expectFail() && !*force
 				if testError != nil {
 					if wantError {
@@ -160,7 +195,9 @@ func Test(t *testing.T) {
 			})
 		}
 	}
-	runLLVMTests(t, common)
+	if llvmMode != nil {
+		runLLVMInfrastructureTests(t, common)
+	}
 }
 
 func shardMatch(name string) bool {
@@ -279,7 +316,8 @@ type test struct {
 	// dir and goFile identify the test case.
 	// For example, "fixedbugs", "bug000.go".
 	dir, goFile string
-	llvm        bool
+	llvm        *llvmTestMode
+	llvmCase    llvmTestCase
 }
 
 // expectFail reports whether the (overall) test recipe is
@@ -727,6 +765,9 @@ func (t test) run() error {
 		panic("unreachable")
 
 	case "asmcheck":
+		if t.llvm != nil {
+			return runLLVMCodegenTest(t.T, long)
+		}
 		// Compile Go file and match the generated assembly
 		// against a set of regexps in comments.
 		ops := t.wantedAsmOpcodes(long)
@@ -1058,17 +1099,13 @@ func (t test) run() error {
 		return t.checkExpectedOutput(out)
 
 	case "run":
-		if t.llvm {
-			runInDir = ""
-			return t.runLLVMCase(tempDir, flags, args, runcmd)
-		}
 		// Run Go file if no special go command flags are provided;
 		// otherwise build an executable and run it.
 		// Verify the output.
 		runInDir = ""
 		var out []byte
 		var err error
-		if len(flags)+len(args) == 0 && t.goGcflagsIsEmpty() && !*linkshared && goarch == runtime.GOARCH && goos == runtime.GOOS && goexp == goExperiment && godebug == goDebug {
+		if t.llvm == nil && len(flags)+len(args) == 0 && t.goGcflagsIsEmpty() && !*linkshared && goarch == runtime.GOARCH && goos == runtime.GOOS && goexp == goExperiment && godebug == goDebug {
 			// If we're not using special go command flags,
 			// skip all the go command machinery.
 			// This avoids any time the go command would
@@ -1091,6 +1128,7 @@ func (t test) run() error {
 				cmd = append(cmd, "-linkshared")
 			}
 			cmd = append(cmd, flags...)
+			cmd = t.appendLLVMGoFlags(cmd)
 			cmd = append(cmd, t.goFileName())
 			out, err = runcmd(append(cmd, args...)...)
 		}
@@ -1107,13 +1145,11 @@ func (t test) run() error {
 			<-t.runoutputGate
 		}()
 		runInDir = ""
-		if t.llvm {
-			return t.runLLVMRunoutputCase(tempDir, args, runcmd)
-		}
 		cmd := []string{goTool, "run", t.goGcflags()}
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
 		}
+		cmd = t.appendLLVMGoFlags(cmd)
 		cmd = append(cmd, t.goFileName())
 		out, err := runcmd(append(cmd, args...)...)
 		if err != nil {
@@ -1127,6 +1163,7 @@ func (t test) run() error {
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
 		}
+		cmd = t.appendLLVMGoFlags(cmd)
 		cmd = append(cmd, tfile)
 		out, err = runcmd(cmd...)
 		if err != nil {
