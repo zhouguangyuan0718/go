@@ -933,8 +933,11 @@ Error promoteAllocasToWholeFunctionLifetime(
     Builder.CreateLifetimeStart(Alloca);
     uint64_t ByteSize = AllocationSize->getFixedValue();
     if (ByteSize != 0)
-      Builder.CreateMemSet(Alloca, Builder.getInt8(0),
-                           Builder.getInt64(ByteSize), Alloca->getAlign());
+      // GoObj has no ambient libc memset symbol. Force code generation to
+      // expand the initialization instead of selecting an external libcall.
+      Builder.CreateMemSetInline(Alloca, Alloca->getAlign(),
+                                 Builder.getInt8(0),
+                                 Builder.getInt64(ByteSize));
     Alloca->setMetadata(
         StackColoringNoMergeMD,
         MDNode::get(Alloca->getContext(), ArrayRef<Metadata *>()));

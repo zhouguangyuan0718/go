@@ -147,9 +147,10 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 	// entry. The original VarDef initialization remains a separate operation;
 	// GC activity still comes from the original lifetime markers.
 	lifetimeStart := bytes.Index(rewrittenFunction, []byte("call void @llvm.lifetime.start"))
-	entryInitialize := bytes.Index(rewrittenFunction, []byte("call void @llvm.memset.p0"))
-	sourceInitialize := bytes.Index(rewrittenFunction, []byte("call void @llvm.memset.inline"))
+	entryInitialize := bytes.Index(rewrittenFunction, []byte("call void @llvm.memset.inline"))
+	sourceInitialize := bytes.LastIndex(rewrittenFunction, []byte("call void @llvm.memset.inline"))
 	if lifetimeStart < 0 || entryInitialize < 0 || sourceInitialize < 0 ||
+		bytes.Count(rewrittenFunction, []byte("call void @llvm.memset.inline")) != 2 ||
 		lifetimeStart >= entryInitialize || entryInitialize >= sourceInitialize {
 		t.Fatalf("StackObject whole-function and source initialization are misordered\n%s", rewrittenFunction)
 	}

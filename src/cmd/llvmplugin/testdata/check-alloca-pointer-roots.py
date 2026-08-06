@@ -157,7 +157,7 @@ def check_rewritten_ir(ir):
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
     entry_initializers = re.findall(
-        r"^\s*call void @llvm\.memset\.p0", ir, re.MULTILINE
+        r"^\s*call void @llvm\.memset\.inline\.p0", ir, re.MULTILINE
     )
     if len(entry_initializers) != 8:
         fail(
