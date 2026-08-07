@@ -23,6 +23,7 @@ type LLVMFuncContext struct {
 	ItabMethods      map[ID]bool
 	ClosureCodeLoads map[ID]bool
 	DeferResults     map[llvmLocalKey]bool
+	DeferResultLives map[ID]bool
 	F                *Func
 	LF               llvm.Value
 	ClosureContext   llvm.Value
@@ -63,6 +64,7 @@ const goStackGrowthStatepointAttr = "go-stack-growth-statepoint"
 const goAsyncUnsafeAttr = "go-async-unsafe"
 const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
+const goDeferResultLiveBundle = "go.defer.result.live"
 const goSourceAddressTakenMD = "goallc.source_addrtaken"
 const goDeferResultMD = "goallc.defer_result"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
@@ -302,6 +304,59 @@ func (lfc *LLVMFuncContext) llvmKeepAlive(value llvm.Value) {
 	bundle := llvm.NewOperandBundle("go.keepalive", []llvm.Value{value})
 	lfc.b.CreateCallWithOperandBundles(fn.GlobalValueType(), fn, nil, []llvm.OperandBundle{bundle}, "")
 	bundle.Dispose()
+}
+
+func llvmDeferResultLive(value llvm.Value, before llvm.Value) {
+	b := GlobalCtxt.NewBuilder()
+	defer b.Dispose()
+	b.SetInsertPointBefore(before)
+	fn := getLLVMIntrinsicDeclaration("llvm.donothing")
+	bundle := llvm.NewOperandBundle(goDeferResultLiveBundle, []llvm.Value{value})
+	b.CreateCallWithOperandBundles(fn.GlobalValueType(), fn, nil, []llvm.OperandBundle{bundle}, "")
+	bundle.Dispose()
+}
+
+func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
+	for _, bb := range lfc.F.Blocks {
+		for _, v := range bb.Values {
+			if !lfc.DeferResultLives[v.ID] {
+				continue
+			}
+			value, ok := lfc.Vs[v.ID]
+			if !ok || value.IsNil() || value.Type().TypeKind() != llvm.PointerTypeKind {
+				continue
+			}
+			if !value.IsAConstant().IsNil() {
+				// A constant pointer does not need a stack-map location.
+				continue
+			}
+
+			instruction := value.IsAInstruction()
+			if !instruction.IsNil() {
+				before := llvm.NextInstruction(instruction)
+				if !instruction.IsAPHINode().IsNil() {
+					before = instruction.InstructionParent().FirstInstruction()
+					for !before.IsNil() && !before.IsAPHINode().IsNil() {
+						before = llvm.NextInstruction(before)
+					}
+				}
+				if before.IsNil() {
+					v.Fatalf("named defer result has no insertion point after its LLVM definition")
+				}
+				llvmDeferResultLive(value, before)
+				continue
+			}
+
+			if value.IsAArgument().IsNil() {
+				v.Fatalf("named defer result has unsupported LLVM value kind")
+			}
+			before := lfc.BBs[lfc.F.Entry.ID].FirstInstruction()
+			if before.IsNil() {
+				v.Fatalf("named defer result argument has no entry insertion point")
+			}
+			llvmDeferResultLive(value, before)
+		}
+	}
 }
 
 func (lfc *LLVMFuncContext) llvmUnaryIntrinsic(v *Value, name string) llvm.Value {
@@ -2309,6 +2364,7 @@ func LLVMCompile(f *Func) {
 		ItabMethods:      map[ID]bool{},
 		ClosureCodeLoads: map[ID]bool{},
 		DeferResults:     map[llvmLocalKey]bool{},
+		DeferResultLives: map[ID]bool{},
 		F:                f,
 		b:                GlobalCtxt.NewBuilder(),
 		ReturnType:       sig.ReturnType,
@@ -2332,6 +2388,22 @@ func LLVMCompile(f *Func) {
 	// of the frame selected by the Go frontend. Likewise, inlining a function
 	// containing recover would change the frame checked by runtime.gorecover.
 	frontendFunc := f.Frontend().Func()
+	if frontendFunc != nil && frontendFunc.HasDefer() {
+		for slot, values := range f.NamedValues {
+			// Heap-escaped output parameters are represented by a synthetic
+			// PAUTO named &result. IsOutputParamHeapAddr retains the semantic
+			// connection after the address becomes a mallocgc result rather than
+			// an OpLocalAddr.
+			if slot.N == nil || (slot.N.Class != ir.PPARAMOUT && !slot.N.IsOutputParamHeapAddr()) {
+				continue
+			}
+			for _, value := range values {
+				if value.Type != nil && value.Type.IsPtr() {
+					FCtxt.DeferResultLives[value.ID] = true
+				}
+			}
+		}
+	}
 	frontendNoInline := frontendFunc != nil && (frontendFunc.Pragma&ir.Noinline != 0 || frontendFunc.HasDefer())
 	if frontendNoInline || llvmFuncCalls(f, "runtime.gorecover") {
 		FCtxt.LF.AddFunctionAttr(llvmNoInlineAttribute())
@@ -2562,6 +2634,7 @@ func LLVMCompile(f *Func) {
 		BB := postorder[i]
 		FCtxt.CompileBlock(BB, storeOrder(BB.Values, sset, storeNumber))
 	}
+	FCtxt.emitDeferResultLiveMarkers()
 	FCtxt.FinishPhi()
 	FCtxt.expandNilCheckIntrinsics()
 	FCtxt.MappingName()
