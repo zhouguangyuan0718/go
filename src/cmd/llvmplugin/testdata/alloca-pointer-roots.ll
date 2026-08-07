@@ -26,9 +26,9 @@ entry:
 define goabiinternal ptr @nested_whole_aggregate(
     ptr %first, ptr %second, ptr %third) "go-stack-growth-statepoint" gc "goallc" {
 entry:
-  ; Source provenance says address-taken, but the optimized use graph contains
-  ; only direct memory operations, so this must still use fixed homes.
-  %slot = alloca %nested, align 8, !goallc.source_addrtaken !1
+  ; The optimized use graph contains only direct memory operations, so this
+  ; must use fixed homes and remain eligible for SROA.
+  %slot = alloca %nested, align 8
   %value.0 = insertvalue %nested zeroinitializer, ptr %first, 0
   %value.1 = insertvalue %nested %value.0, ptr %second, 2, 0, 1
   %value.2 = insertvalue %nested %value.1, ptr %third, 2, 1, 1
@@ -130,9 +130,8 @@ entry:
 define goabiinternal ptr @alloca_address_passed_to_callee(
     ptr %pointer) "go-stack-growth-statepoint" gc "goallc" {
 entry:
-  ; The structural call use is authoritative even if source provenance says
-  ; the address was not taken.
-  %slot = alloca ptr, align 8, !goallc.source_addrtaken !2
+  ; The structural call use makes the address observable.
+  %slot = alloca ptr, align 8
   store ptr %pointer, ptr %slot, align 8
   call goabiinternal void @mutate_pointer_slot(ptr %slot)
   %result = load ptr, ptr %slot, align 8
@@ -240,5 +239,3 @@ entry:
 ], section "llvm.metadata"
 
 !0 = !{}
-!1 = !{i1 true}
-!2 = !{i1 false}

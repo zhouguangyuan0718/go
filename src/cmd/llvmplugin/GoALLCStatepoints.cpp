@@ -39,7 +39,6 @@ namespace {
 constexpr StringLiteral GoALLCGCName = "goallc";
 constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
-constexpr StringLiteral GoSourceAddressTakenMD = "goallc.source_addrtaken";
 constexpr StringLiteral GoDeferResultMD = "goallc.defer_result";
 constexpr StringLiteral GoObjMarkerRelocMD = "goobj.marker_reloc";
 constexpr StringLiteral StackColoringNoMergeMD = "llvm.stackcoloring.no_merge";
@@ -650,23 +649,6 @@ std::string allocaLeafName(AllocaInst &Alloca, const PointerAllocaLeaf &Leaf) {
   return Name;
 }
 
-Expected<bool> sourceMarkedAddressTaken(AllocaInst &Alloca) {
-  MDNode *MD = Alloca.getMetadata(GoSourceAddressTakenMD);
-  if (!MD)
-    return false;
-  if (MD->getNumOperands() != 1)
-    return createStringError(
-        std::errc::invalid_argument,
-        "GoALLC source address-taken metadata has invalid arity");
-  auto *CAM = dyn_cast<ConstantAsMetadata>(MD->getOperand(0));
-  auto *CI = CAM ? dyn_cast<ConstantInt>(CAM->getValue()) : nullptr;
-  if (!CI || !CI->getType()->isIntegerTy(1))
-    return createStringError(
-        std::errc::invalid_argument,
-        "GoALLC source address-taken metadata is not an i1 constant");
-  return CI->isOne();
-}
-
 Expected<bool> deferResultAlloca(AllocaInst &Alloca) {
   MDNode *MD = Alloca.getMetadata(GoDeferResultMD);
   if (!MD)
@@ -1008,16 +990,9 @@ Error collectPointerAllocas(
             "GoALLC statepoint alloca pointer slots overlap");
       BitmapWords[Bit / 64] |= Mask;
     }
-    Expected<bool> SourceAddressTaken = sourceMarkedAddressTaken(*Alloca);
-    if (!SourceAddressTaken)
-      return SourceAddressTaken.takeError();
     Expected<bool> DeferResult = deferResultAlloca(*Alloca);
     if (!DeferResult)
       return DeferResult.takeError();
-    // Consume the marker after the optimized use graph has been classified.
-    // In particular, a source Addrtaken alloca can be downgraded when all
-    // observable address uses disappeared during optimization.
-    Alloca->setMetadata(GoSourceAddressTakenMD, nullptr);
     Alloca->setMetadata(GoDeferResultMD, nullptr);
     bool NeedsStackObject = allocaNeedsStackObject(*Alloca);
     PointerAllocas.push_back({Alloca, NeedsStackObject, *DeferResult, ByteSize,
