@@ -367,6 +367,37 @@ func (lfc *LLVMFuncContext) llvmUnaryIntrinsic(v *Value, name string) llvm.Value
 	return lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String())
 }
 
+func (lfc *LLVMFuncContext) llvmSaturatingFloatToInt(v *Value, signed bool) llvm.Value {
+	// Go leaves an out-of-range conversion implementation-specific, but it must
+	// still produce an integer value. LLVM's plain fptosi/fptoui produce poison
+	// instead, so give the LLVM backend the defined saturating behavior used by
+	// Go's conversion stress tests and by the native arm64 instructions.
+	x := lfc.GenLV(v.Args[0])
+	resultType := getLLVMType(v.Type)
+	if resultType.TypeKind() != llvm.IntegerTypeKind {
+		v.Fatalf("%s has a non-integer LLVM result", v.Op)
+	}
+
+	sourceSuffix := ""
+	switch x.Type().TypeKind() {
+	case llvm.FloatTypeKind:
+		sourceSuffix = "f32"
+	case llvm.DoubleTypeKind:
+		sourceSuffix = "f64"
+	default:
+		v.Fatalf("%s has a non-floating-point LLVM operand", v.Op)
+	}
+
+	name := "llvm.fptoui.sat"
+	if signed {
+		name = "llvm.fptosi.sat"
+	}
+	name += fmt.Sprintf(".i%d.%s", resultType.IntTypeWidth(), sourceSuffix)
+	sig := llvm.FunctionType(resultType, []llvm.Type{x.Type()}, false)
+	fn := getOrInsertLLVMIntrinsic(name, sig)
+	return lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String())
+}
+
 func (lfc *LLVMFuncContext) llvmBinaryIntrinsic(v *Value, name string) llvm.Value {
 	x, y := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1])
 	want := getLLVMType(v.Type)
@@ -1924,9 +1955,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpCvt32Uto32F, OpCvt32Uto64F, OpCvt64Uto32F, OpCvt64Uto64F:
 		lVal = lfc.b.CreateUIToFP(arg0(), getLLVMType(v.Type), v.String())
 	case OpCvt32Fto32, OpCvt32Fto64, OpCvt64Fto32, OpCvt64Fto64:
-		lVal = lfc.b.CreateFPToSI(arg0(), getLLVMType(v.Type), v.String())
+		lVal = lfc.llvmSaturatingFloatToInt(v, true)
 	case OpCvt32Fto32U, OpCvt32Fto64U, OpCvt64Fto32U, OpCvt64Fto64U:
-		lVal = lfc.b.CreateFPToUI(arg0(), getLLVMType(v.Type), v.String())
+		lVal = lfc.llvmSaturatingFloatToInt(v, false)
 	case OpCvt32Fto64F, OpCvt64Fto32F:
 		lVal = lfc.b.CreateFPCast(arg0(), getLLVMType(v.Type), v.String())
 	case OpRound32F, OpRound64F:
