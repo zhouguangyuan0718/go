@@ -523,6 +523,111 @@ func (test) goGcflagsIsEmpty() bool {
 	return "" == os.Getenv("GO_GCFLAGS")
 }
 
+// appendBuildFlag adds extra flags to the effective unpatterned per-package
+// build flag. Existing unpatterned flags are updated in place. An all= rule is
+// retained for dependencies and followed by an unpatterned rule for the package
+// named on the command line.
+func appendBuildFlag(flags []string, name, initial string, extra ...string) []string {
+	effective := strings.TrimSpace(initial)
+	short, long := "-"+name, "--"+name
+	target := -1
+	targetPrefix := ""
+	for i := 0; i < len(flags); i++ {
+		var spec, prefix string
+		switch {
+		case flags[i] == short || flags[i] == long:
+			if i+1 >= len(flags) {
+				continue
+			}
+			i++
+			spec = flags[i]
+		case strings.HasPrefix(flags[i], short+"="):
+			spec = strings.TrimPrefix(flags[i], short+"=")
+			prefix = short + "="
+		case strings.HasPrefix(flags[i], long+"="):
+			spec = strings.TrimPrefix(flags[i], long+"=")
+			prefix = long + "="
+		default:
+			continue
+		}
+
+		spec = strings.TrimSpace(spec)
+		if spec == "" || strings.HasPrefix(spec, "-") {
+			effective = spec
+			target = i
+			targetPrefix = prefix
+			continue
+		}
+		pattern, value, ok := strings.Cut(spec, "=")
+		if !ok {
+			continue // Let the go command diagnose malformed flags.
+		}
+		if strings.TrimSpace(pattern) == "all" {
+			effective = strings.TrimSpace(value)
+			target = -1
+			targetPrefix = ""
+		}
+	}
+	if effective != "" {
+		effective += " "
+	}
+	effective += strings.Join(extra, " ")
+	if target >= 0 {
+		flags[target] = targetPrefix + effective
+		return flags
+	}
+	return append(flags, short+"="+effective)
+}
+
+func TestAppendBuildFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		flag    string
+		initial string
+		flags   []string
+		extra   []string
+		want    []string
+	}{
+		{
+			name:    "all rule remains for dependencies",
+			flag:    "gcflags",
+			initial: "-N",
+			flags:   []string{"-race", "-gcflags=all=-d=checkptr=0"},
+			extra:   []string{"-enablellvm", "-llvmironly"},
+			want:    []string{"-race", "-gcflags=all=-d=checkptr=0", "-gcflags=-d=checkptr=0 -enablellvm -llvmironly"},
+		},
+		{
+			name:  "update separate unpatterned argument",
+			flag:  "gcflags",
+			flags: []string{"-gcflags", "-l=4"},
+			extra: []string{"-enablellvm", "-llvmironly"},
+			want:  []string{"-gcflags", "-l=4 -enablellvm -llvmironly"},
+		},
+		{
+			name:    "preserve dependency rule",
+			flag:    "gcflags",
+			flags:   []string{"-gcflags=runtime=-l"},
+			initial: "-N",
+			extra:   []string{"-enablellvm", "-llvmironly"},
+			want:    []string{"-gcflags=runtime=-l", "-gcflags=-N -enablellvm -llvmironly"},
+		},
+		{
+			name:  "update unpatterned ldflags",
+			flag:  "ldflags",
+			flags: []string{"-ldflags=-s"},
+			extra: []string{"-w"},
+			want:  []string{"-ldflags=-s -w"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := appendBuildFlag(tc.flags, tc.flag, tc.initial, tc.extra...)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("appendBuildFlag(%q, %q, %q, %q) = %q, want %q", tc.flags, tc.flag, tc.initial, tc.extra, got, tc.want)
+			}
+		})
+	}
+}
+
 var errTimeout = errors.New("command exceeded time limit")
 
 // run runs the test case.
@@ -660,6 +765,11 @@ func (t test) run() error {
 		// budget so a newly slow test fails promptly and can be reviewed for
 		// blacklisting. An explicit shorter timeout remains authoritative.
 		tim = llvmCaseTimeoutSeconds(tim)
+		if action == "run" || action == "runoutput" {
+			flags = appendBuildFlag(flags, "gcflags", os.Getenv("GO_GCFLAGS"), "-enablellvm", "-llvmironly")
+			flags = appendBuildFlag(flags, "ldflags", "", "-w")
+			flags = append(flags, "-toolexec="+t.llvm.toolexec)
+		}
 	}
 	if action == "errorcheck" {
 		found := false
@@ -1135,7 +1245,6 @@ func (t test) run() error {
 				cmd = append(cmd, "-linkshared")
 			}
 			cmd = append(cmd, flags...)
-			cmd = t.appendLLVMGoFlags(cmd)
 			cmd = append(cmd, t.goFileName())
 			out, err = runcmd(append(cmd, args...)...)
 		}
@@ -1156,7 +1265,7 @@ func (t test) run() error {
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
 		}
-		cmd = t.appendLLVMGoFlags(cmd)
+		cmd = append(cmd, flags...)
 		cmd = append(cmd, t.goFileName())
 		out, err := runcmd(append(cmd, args...)...)
 		if err != nil {
@@ -1170,7 +1279,7 @@ func (t test) run() error {
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
 		}
-		cmd = t.appendLLVMGoFlags(cmd)
+		cmd = append(cmd, flags...)
 		cmd = append(cmd, tfile)
 		out, err = runcmd(cmd...)
 		if err != nil {

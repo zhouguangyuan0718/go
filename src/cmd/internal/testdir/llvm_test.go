@@ -771,39 +771,6 @@ func runLLVMWriteBarrierIRTests(t *testing.T) {
 	}
 }
 
-func (t test) appendLLVMGoFlags(cmd []string) []string {
-	if t.llvm == nil {
-		return cmd
-	}
-	// GoObj DWARF emission is not implemented by the LLVM backend yet. Keep the
-	// original testdir go run command and select its entry package through the
-	// same package-pattern mechanism as ordinary gcflags.
-	gcflags := strings.TrimSpace(os.Getenv("GO_GCFLAGS"))
-	if gcflags != "" {
-		gcflags += " "
-	}
-	gcflags += "-enablellvm -llvmironly"
-	return append(cmd,
-		"-ldflags=-w",
-		"-gcflags=command-line-arguments="+gcflags,
-		"-toolexec="+t.llvm.toolexec)
-}
-
-func TestAppendLLVMGoFlags(t *testing.T) {
-	t.Setenv("GO_GCFLAGS", "-N")
-	test := test{llvm: &llvmTestMode{toolexec: "llvm-wrapper"}}
-	got := test.appendLLVMGoFlags([]string{"go", "run", "-gcflags=all=-N"})
-	want := []string{
-		"go", "run", "-gcflags=all=-N",
-		"-ldflags=-w",
-		"-gcflags=command-line-arguments=-N -enablellvm -llvmironly",
-		"-toolexec=llvm-wrapper",
-	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("LLVM go command = %q, want %q", got, want)
-	}
-}
-
 func llvmToolexec(t *testing.T, optPasses string) string {
 	t.Helper()
 	wrapper := llvmToolexecPath(t)
