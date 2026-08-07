@@ -41,7 +41,6 @@ constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
 constexpr StringLiteral GoSourceAddressTakenMD = "goallc.source_addrtaken";
 constexpr StringLiteral GoDeferResultMD = "goallc.defer_result";
-constexpr StringLiteral GoDeferResultLiveBundle = "go.defer.result.live";
 constexpr StringLiteral GoObjMarkerRelocMD = "goobj.marker_reloc";
 constexpr StringLiteral StackColoringNoMergeMD = "llvm.stackcoloring.no_merge";
 
@@ -291,32 +290,6 @@ bool isLeafCall(const CallBase &Call) {
   if (const Function *Callee = Call.getCalledFunction())
     return Callee->isIntrinsic() || Callee->hasFnAttribute(GCLeafAttr);
   return false;
-}
-
-Error collectDeferResultLives(Function &F, ValueSet &Lives) {
-  SmallVector<CallInst *, 8> Markers;
-  for (Instruction &I : instructions(F)) {
-    auto *Call = dyn_cast<CallInst>(&I);
-    if (!Call || !Call->getOperandBundle(GoDeferResultLiveBundle))
-      continue;
-    Function *Callee = Call->getCalledFunction();
-    std::optional<OperandBundleUse> Bundle =
-        Call->getOperandBundle(GoDeferResultLiveBundle);
-    if (!Callee || Callee->getIntrinsicID() != Intrinsic::donothing ||
-        Call->arg_size() != 0 || Call->getNumOperandBundles() != 1 ||
-        Bundle->Inputs.size() != 1 ||
-        !Bundle->Inputs.front()->getType()->isPointerTy())
-      return createStringError(
-          std::errc::invalid_argument,
-          "malformed GoALLC named defer result liveness marker");
-    Value *Live = Bundle->Inputs.front().get();
-    if (!isa<Constant>(Live))
-      Lives.insert(Live);
-    Markers.push_back(Call);
-  }
-  for (CallInst *Marker : Markers)
-    Marker->eraseFromParent();
-  return Error::success();
 }
 
 uint64_t stableStatepointID(StringRef FunctionName, uint64_t CallOrdinal) {
@@ -1360,10 +1333,6 @@ Error rewriteFunction(Function &F) {
   if (Error Err = scalarizeLivePointerAggregates(F))
     return Err;
 
-  ValueSet DeferResultLives;
-  if (Error Err = collectDeferResultLives(F, DeferResultLives))
-    return Err;
-
   LivenessData Data = computeLiveness(F, LivenessKind::ScalarPointers);
   LivenessData AddressData = computeLiveness(F, LivenessKind::AllocaAddresses);
   SmallVector<SafepointRecord, 8> Records;
@@ -1383,19 +1352,6 @@ Error rewriteFunction(Function &F) {
          liveAtCall(*OrdinaryCall, Data, LivenessKind::ScalarPointers),
          liveAtCall(*OrdinaryCall, AddressData,
                     LivenessKind::AllocaAddresses)});
-  }
-  for (SafepointRecord &Record : Records) {
-    for (Value *Live : DeferResultLives) {
-      if (isa<Argument>(Live)) {
-        Record.Live.insert(Live);
-        continue;
-      }
-      auto *Definition = cast<Instruction>(Live);
-      // A call result is not available at the statepoint for the call that
-      // defines it. Recovery liveness begins immediately after its definition.
-      if (Definition != Record.Call && DT.dominates(Definition, Record.Call))
-        Record.Live.insert(Live);
-    }
   }
   for (const SafepointRecord &Record : Records)
     if (Error Err = validateSafepoint(Record))

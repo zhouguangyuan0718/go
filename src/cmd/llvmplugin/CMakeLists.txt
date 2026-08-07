@@ -83,18 +83,6 @@ if(BUILD_TESTING)
   )
 
   add_test(
-    NAME GoALLCStatepoints.DeferResultLive
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-defer-result-live.py"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/defer-result-live.ll"
-  )
-
-  add_test(
     NAME GoALLCStatepoints.DeferEdge
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"

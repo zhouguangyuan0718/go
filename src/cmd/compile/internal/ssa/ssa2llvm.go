@@ -23,7 +23,6 @@ type LLVMFuncContext struct {
 	ItabMethods      map[ID]bool
 	ClosureCodeLoads map[ID]bool
 	DeferResults     map[llvmLocalKey]bool
-	DeferResultLives map[ID]bool
 	DeferResultHomes map[llvmLocalKey]llvmStackSlot
 	DeferResultKeys  map[ID]llvmLocalKey
 	F                *Func
@@ -66,7 +65,6 @@ const goStackGrowthStatepointAttr = "go-stack-growth-statepoint"
 const goAsyncUnsafeAttr = "go-async-unsafe"
 const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
-const goDeferResultLiveBundle = "go.defer.result.live"
 const goSourceAddressTakenMD = "goallc.source_addrtaken"
 const goDeferResultMD = "goallc.defer_result"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
@@ -308,16 +306,6 @@ func (lfc *LLVMFuncContext) llvmKeepAlive(value llvm.Value) {
 	bundle.Dispose()
 }
 
-func llvmDeferResultLive(value llvm.Value, before llvm.Value) {
-	b := GlobalCtxt.NewBuilder()
-	defer b.Dispose()
-	b.SetInsertPointBefore(before)
-	fn := getLLVMIntrinsicDeclaration("llvm.donothing")
-	bundle := llvm.NewOperandBundle(goDeferResultLiveBundle, []llvm.Value{value})
-	b.CreateCallWithOperandBundles(fn.GlobalValueType(), fn, nil, []llvm.OperandBundle{bundle}, "")
-	bundle.Dispose()
-}
-
 func llvmStoreDeferResultHome(value llvm.Value, home llvmStackSlot, before llvm.Value) {
 	b := GlobalCtxt.NewBuilder()
 	defer b.Dispose()
@@ -326,12 +314,11 @@ func llvmStoreDeferResultHome(value llvm.Value, home llvmStackSlot, before llvm.
 	store.SetAlignment(int(home.Type.Alignment()))
 }
 
-func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
+func (lfc *LLVMFuncContext) emitDeferResultHomeStores() {
 	for _, bb := range lfc.F.Blocks {
 		for _, v := range bb.Values {
-			live := lfc.DeferResultLives[v.ID]
 			key, hasHome := lfc.DeferResultKeys[v.ID]
-			if !live && !hasHome {
+			if !hasHome {
 				continue
 			}
 			value, ok := lfc.Vs[v.ID]
@@ -339,22 +326,14 @@ func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 				continue
 			}
 			if !value.IsAConstant().IsNil() {
-				if hasHome {
-					v.Fatalf("heap output parameter address unexpectedly lowered to an LLVM constant")
-				}
-				// A constant pointer does not need a stack-map location.
-				continue
+				v.Fatalf("heap output parameter address unexpectedly lowered to an LLVM constant")
 			}
-			home := llvmStackSlot{}
-			if hasHome {
-				var ok bool
-				home, ok = lfc.DeferResultHomes[key]
-				if !ok {
-					v.Fatalf("named defer result has no LLVM memory home")
-				}
-				if value.Type() != getLLVMType(home.Type) {
-					v.Fatalf("named defer result home changes LLVM representation")
-				}
+			home, ok := lfc.DeferResultHomes[key]
+			if !ok {
+				v.Fatalf("named defer result has no LLVM memory home")
+			}
+			if value.Type() != getLLVMType(home.Type) {
+				v.Fatalf("named defer result home changes LLVM representation")
 			}
 
 			instruction := value.IsAInstruction()
@@ -369,11 +348,7 @@ func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 				if before.IsNil() {
 					v.Fatalf("named defer result has no insertion point after its LLVM definition")
 				}
-				if hasHome {
-					llvmStoreDeferResultHome(value, home, before)
-				} else {
-					llvmDeferResultLive(value, before)
-				}
+				llvmStoreDeferResultHome(value, home, before)
 				continue
 			}
 
@@ -384,11 +359,7 @@ func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 			if before.IsNil() {
 				v.Fatalf("named defer result argument has no entry insertion point")
 			}
-			if hasHome {
-				llvmStoreDeferResultHome(value, home, before)
-			} else {
-				llvmDeferResultLive(value, before)
-			}
+			llvmStoreDeferResultHome(value, home, before)
 		}
 	}
 }
@@ -2413,7 +2384,6 @@ func LLVMCompile(f *Func) {
 		ItabMethods:      map[ID]bool{},
 		ClosureCodeLoads: map[ID]bool{},
 		DeferResults:     map[llvmLocalKey]bool{},
-		DeferResultLives: map[ID]bool{},
 		DeferResultHomes: map[llvmLocalKey]llvmStackSlot{},
 		DeferResultKeys:  map[ID]llvmLocalKey{},
 		F:                f,
@@ -2445,22 +2415,18 @@ func LLVMCompile(f *Func) {
 			// PAUTO named &result. IsOutputParamHeapAddr retains the semantic
 			// connection after the address becomes a mallocgc result rather than
 			// an OpLocalAddr.
-			if slot.N == nil || (slot.N.Class != ir.PPARAMOUT && !slot.N.IsOutputParamHeapAddr()) {
+			if slot.N == nil || !slot.N.IsOutputParamHeapAddr() {
 				continue
 			}
 			for _, value := range f.NamedValues[*slot] {
 				if value.Type != nil && value.Type.IsPtr() {
-					if slot.N.IsOutputParamHeapAddr() {
-						// Zero-sized escaped results use a constant zerobase
-						// address, which remains available on the recovery path
-						// without either GC liveness or a stable stack home.
-						if value.Op == OpAddr || value.Op == OpConstNil {
-							continue
-						}
-						FCtxt.DeferResultKeys[value.ID] = llvmLocalKeyForName(slot.N)
-					} else {
-						FCtxt.DeferResultLives[value.ID] = true
+					// Zero-sized escaped results use a constant zerobase
+					// address, which remains available on the recovery path
+					// without either GC liveness or a stable stack home.
+					if value.Op == OpAddr || value.Op == OpConstNil {
+						continue
 					}
+					FCtxt.DeferResultKeys[value.ID] = llvmLocalKeyForName(slot.N)
 				}
 			}
 		}
@@ -2733,7 +2699,7 @@ func LLVMCompile(f *Func) {
 		BB := postorder[i]
 		FCtxt.CompileBlock(BB, storeOrder(BB.Values, sset, storeNumber))
 	}
-	FCtxt.emitDeferResultLiveMarkers()
+	FCtxt.emitDeferResultHomeStores()
 	FCtxt.FinishPhi()
 	FCtxt.expandNilCheckIntrinsics()
 	FCtxt.MappingName()
