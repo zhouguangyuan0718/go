@@ -23,7 +23,6 @@ type LLVMFuncContext struct {
 	ItabMethods      map[ID]bool
 	ClosureCodeLoads map[ID]bool
 	DeferResults     map[llvmLocalKey]bool
-	DeferResultHomes map[llvmLocalKey]llvmStackSlot
 	DeferResultKeys  map[ID]llvmLocalKey
 	F                *Func
 	LF               llvm.Value
@@ -322,13 +321,16 @@ func (lfc *LLVMFuncContext) emitDeferResultHomeStores() {
 				continue
 			}
 			value, ok := lfc.Vs[v.ID]
-			if !ok || value.IsNil() || value.Type().TypeKind() != llvm.PointerTypeKind {
-				continue
+			if !ok || value.IsNil() {
+				v.Fatalf("named defer result address has no LLVM value")
+			}
+			if value.Type().TypeKind() != llvm.PointerTypeKind {
+				v.Fatalf("named defer result address has non-pointer LLVM type")
 			}
 			if !value.IsAConstant().IsNil() {
 				v.Fatalf("heap output parameter address unexpectedly lowered to an LLVM constant")
 			}
-			home, ok := lfc.DeferResultHomes[key]
+			home, ok := lfc.Locals[key]
 			if !ok {
 				v.Fatalf("named defer result has no LLVM memory home")
 			}
@@ -337,27 +339,18 @@ func (lfc *LLVMFuncContext) emitDeferResultHomeStores() {
 			}
 
 			instruction := value.IsAInstruction()
-			if !instruction.IsNil() {
-				before := llvm.NextInstruction(instruction)
-				if !instruction.IsAPHINode().IsNil() {
-					before = instruction.InstructionParent().FirstInstruction()
-					for !before.IsNil() && !before.IsAPHINode().IsNil() {
-						before = llvm.NextInstruction(before)
-					}
-				}
-				if before.IsNil() {
-					v.Fatalf("named defer result has no insertion point after its LLVM definition")
-				}
-				llvmStoreDeferResultHome(value, home, before)
-				continue
-			}
-
-			if value.IsAArgument().IsNil() {
+			if instruction.IsNil() {
 				v.Fatalf("named defer result has unsupported LLVM value kind")
 			}
-			before := lfc.BBs[lfc.F.Entry.ID].FirstInstruction()
+			before := llvm.NextInstruction(instruction)
+			if !instruction.IsAPHINode().IsNil() {
+				before = instruction.InstructionParent().FirstInstruction()
+				for !before.IsNil() && !before.IsAPHINode().IsNil() {
+					before = llvm.NextInstruction(before)
+				}
+			}
 			if before.IsNil() {
-				v.Fatalf("named defer result argument has no entry insertion point")
+				v.Fatalf("named defer result has no insertion point after its LLVM definition")
 			}
 			llvmStoreDeferResultHome(value, home, before)
 		}
@@ -1669,8 +1662,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpVarDef:
 		lVal = arg0()
 		if name, ok := v.Aux.(*ir.Name); ok {
-			if slot, ok := lfc.Locals[llvmLocalKeyForName(name)]; ok {
-				if slot.Type.HasPointers() {
+			key := llvmLocalKeyForName(name)
+			if slot, ok := lfc.Locals[key]; ok {
+				if slot.Type.HasPointers() && !lfc.DeferResults[key] {
 					lfc.llvmLifetimeStart(slot)
 				}
 			}
@@ -2114,7 +2108,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		addr := arg0()
 		if v.Op == OpDereference {
 			if key, ok := lfc.DeferResultKeys[v.Args[0].ID]; ok {
-				home, ok := lfc.DeferResultHomes[key]
+				home, ok := lfc.Locals[key]
 				if !ok {
 					v.Fatalf("named defer result has no LLVM memory home")
 				}
@@ -2384,7 +2378,6 @@ func LLVMCompile(f *Func) {
 		ItabMethods:      map[ID]bool{},
 		ClosureCodeLoads: map[ID]bool{},
 		DeferResults:     map[llvmLocalKey]bool{},
-		DeferResultHomes: map[llvmLocalKey]llvmStackSlot{},
 		DeferResultKeys:  map[ID]llvmLocalKey{},
 		F:                f,
 		b:                GlobalCtxt.NewBuilder(),
@@ -2423,7 +2416,7 @@ func LLVMCompile(f *Func) {
 					// Zero-sized escaped results use a constant zerobase
 					// address, which remains available on the recovery path
 					// without either GC liveness or a stable stack home.
-					if value.Op == OpAddr || value.Op == OpConstNil {
+					if value.Op == OpAddr {
 						continue
 					}
 					FCtxt.DeferResultKeys[value.ID] = llvmLocalKeyForName(slot.N)
@@ -2509,6 +2502,50 @@ func LLVMCompile(f *Func) {
 	// cannot become dynamic allocas (which Go stack growth cannot support).
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
 	emitGoObjFunctionMarkerRelocs(FCtxt.b, f.OwnAux.Fn)
+	isDeferResultLocal := func(name *ir.Name) bool {
+		return frontendFunc != nil && frontendFunc.HasDefer() &&
+			(name.Class == ir.PPARAMOUT || name.IsOutputParamHeapAddr())
+	}
+	preallocateLocal := func(name *ir.Name, llvmName string) (llvmStackSlot, bool) {
+		key := llvmLocalKeyForName(name)
+		if slot, ok := FCtxt.Locals[key]; ok {
+			if !types.Identical(slot.Type, name.Type()) {
+				f.fe.Fatalf(name.Pos(), "conflicting Go types for local stack slot %v", name)
+			}
+			return slot, false
+		}
+		if name.Type().Alignment() <= 0 {
+			f.fe.Fatalf(name.Pos(), "invalid alignment %d for local stack slot %v", name.Type().Alignment(), name)
+		}
+		value := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), llvmName)
+		value.SetAlignment(int(name.Type().Alignment()))
+		isDeferResult := isDeferResultLocal(name)
+		if isDeferResult {
+			// Defer recovery can resume without following the suspended call's
+			// ordinary LLVM edge, so the result slot is live for the whole function.
+			FCtxt.DeferResults[key] = true
+		}
+		if name.Type().HasPointers() {
+			// Metadata absence already means that the source address did not escape.
+			// Preserve the positive source decision while letting the statepoint pass
+			// classify every surviving alloca from its optimized LLVM use graph.
+			if name.Addrtaken() {
+				value.SetMetadata(GlobalCtxt.MDKindID(goSourceAddressTakenMD), GlobalCtxt.MDNode([]llvm.Metadata{
+					llvm.ConstInt(GlobalCtxt.Int1Type(), 1, false).ConstantAsMetadata(),
+				}))
+			}
+			if isDeferResult {
+				value.SetMetadata(GlobalCtxt.MDKindID(goDeferResultMD), GlobalCtxt.MDNode(nil))
+			}
+		}
+		slot := llvmStackSlot{Value: value, Type: name.Type()}
+		FCtxt.Locals[key] = slot
+		return slot, true
+	}
+	// Escape analysis names the pointer to a heap-backed result &result. SSA can
+	// keep that pointer only in a register, but panic recovery needs the same
+	// stable, whole-function local-slot semantics as an ordinary named result.
+	// Materialize &result even when no OpLocalAddr survived SSA optimization.
 	for _, named := range f.Names {
 		if frontendFunc == nil || !frontendFunc.HasDefer() || named.N == nil || !named.N.IsOutputParamHeapAddr() {
 			continue
@@ -2524,28 +2561,18 @@ func LLVMCompile(f *Func) {
 			continue
 		}
 		name := named.N
-		key := llvmLocalKeyForName(name)
-		if _, ok := FCtxt.DeferResultHomes[key]; ok {
-			continue
-		}
 		if !name.Type().IsPtr() {
 			f.fe.Fatalf(name.Pos(), "heap output parameter address %v has non-pointer type %v", name, name.Type())
 		}
-		if name.Type().Alignment() <= 0 {
-			f.fe.Fatalf(name.Pos(), "invalid alignment %d for heap output parameter address %v", name.Type().Alignment(), name)
+		home, created := preallocateLocal(name, name.Sym().Name+".defer.home")
+		if !created {
+			continue
 		}
-		home := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), name.Sym().Name+".defer.home")
-		home.SetAlignment(int(name.Type().Alignment()))
-		home.SetMetadata(GlobalCtxt.MDKindID(goSourceAddressTakenMD), GlobalCtxt.MDNode([]llvm.Metadata{
-			llvm.ConstInt(GlobalCtxt.Int1Type(), 0, false).ConstantAsMetadata(),
-		}))
-		home.SetMetadata(GlobalCtxt.MDKindID(goDeferResultMD), GlobalCtxt.MDNode(nil))
 		// This pointer home is live at every safepoint. Initialize it before
 		// mallocgc can suspend and expose the frame to the stack scanner.
-		init := FCtxt.b.CreateStore(llvm.ConstNull(getLLVMType(name.Type())), home)
+		init := FCtxt.b.CreateStore(llvm.ConstNull(getLLVMType(name.Type())), home.Value)
 		init.SetAlignment(int(name.Type().Alignment()))
 		init.SetVolatile(true)
-		FCtxt.DeferResultHomes[key] = llvmStackSlot{Value: home, Type: name.Type()}
 	}
 	var parameterHomes []*Value
 	var parameterLifetimeSlots []llvmStackSlot
@@ -2555,42 +2582,10 @@ func LLVMCompile(f *Func) {
 				continue
 			}
 			name, key := llvmLocalName(v)
-			if slot, ok := FCtxt.Locals[key]; ok {
-				if !types.Identical(slot.Type, name.Type()) {
-					v.Fatalf("conflicting Go types for local stack slot %v", name)
-				}
+			_, created := preallocateLocal(name, v.String())
+			if !created {
 				continue
 			}
-			if name.Type().Alignment() <= 0 {
-				v.Fatalf("invalid alignment %d for local stack slot %v", name.Type().Alignment(), name)
-			}
-			slot := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), v.String())
-			slot.SetAlignment(int(name.Type().Alignment()))
-			isDeferResult := frontendFunc != nil && frontendFunc.HasDefer() && name.Class == ir.PPARAMOUT
-			if isDeferResult {
-				FCtxt.DeferResults[key] = true
-			}
-			if name.Type().HasPointers() {
-				// Preserve the frontend address-taken decision as provenance only.
-				// The pre-codegen statepoint pass reclassifies the surviving alloca
-				// from its optimized LLVM use graph, so this metadata neither keeps
-				// the alloca alive nor irrevocably makes it a Go stack object.
-				sourceAddressTaken := llvm.ConstInt(GlobalCtxt.Int1Type(), 0, false)
-				if name.Addrtaken() {
-					sourceAddressTaken = llvm.ConstInt(GlobalCtxt.Int1Type(), 1, false)
-				}
-				slot.SetMetadata(GlobalCtxt.MDKindID(goSourceAddressTakenMD), GlobalCtxt.MDNode([]llvm.Metadata{
-					sourceAddressTaken.ConstantAsMetadata(),
-				}))
-				if isDeferResult {
-					// Panic recovery resumes at a deferreturn path that is not a
-					// successor of the suspended call in LLVM's CFG. Keep pointer
-					// results in every caller stack map; the recovery block's
-					// volatile reload keeps this alloca as its stable memory home.
-					slot.SetMetadata(GlobalCtxt.MDKindID(goDeferResultMD), GlobalCtxt.MDNode(nil))
-				}
-			}
-			FCtxt.Locals[key] = llvmStackSlot{Value: slot, Type: name.Type()}
 			if name.Class == ir.PPARAM {
 				parameterHomes = append(parameterHomes, v)
 				if name.Type().HasPointers() {
