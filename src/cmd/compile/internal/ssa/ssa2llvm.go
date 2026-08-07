@@ -24,6 +24,8 @@ type LLVMFuncContext struct {
 	ClosureCodeLoads map[ID]bool
 	DeferResults     map[llvmLocalKey]bool
 	DeferResultLives map[ID]bool
+	DeferResultHomes map[llvmLocalKey]llvmStackSlot
+	DeferResultKeys  map[ID]llvmLocalKey
 	F                *Func
 	LF               llvm.Value
 	ClosureContext   llvm.Value
@@ -316,10 +318,20 @@ func llvmDeferResultLive(value llvm.Value, before llvm.Value) {
 	bundle.Dispose()
 }
 
+func llvmStoreDeferResultHome(value llvm.Value, home llvmStackSlot, before llvm.Value) {
+	b := GlobalCtxt.NewBuilder()
+	defer b.Dispose()
+	b.SetInsertPointBefore(before)
+	store := b.CreateStore(value, home.Value)
+	store.SetAlignment(int(home.Type.Alignment()))
+}
+
 func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 	for _, bb := range lfc.F.Blocks {
 		for _, v := range bb.Values {
-			if !lfc.DeferResultLives[v.ID] {
+			live := lfc.DeferResultLives[v.ID]
+			key, hasHome := lfc.DeferResultKeys[v.ID]
+			if !live && !hasHome {
 				continue
 			}
 			value, ok := lfc.Vs[v.ID]
@@ -327,8 +339,22 @@ func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 				continue
 			}
 			if !value.IsAConstant().IsNil() {
+				if hasHome {
+					v.Fatalf("heap output parameter address unexpectedly lowered to an LLVM constant")
+				}
 				// A constant pointer does not need a stack-map location.
 				continue
+			}
+			home := llvmStackSlot{}
+			if hasHome {
+				var ok bool
+				home, ok = lfc.DeferResultHomes[key]
+				if !ok {
+					v.Fatalf("named defer result has no LLVM memory home")
+				}
+				if value.Type() != getLLVMType(home.Type) {
+					v.Fatalf("named defer result home changes LLVM representation")
+				}
 			}
 
 			instruction := value.IsAInstruction()
@@ -343,7 +369,11 @@ func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 				if before.IsNil() {
 					v.Fatalf("named defer result has no insertion point after its LLVM definition")
 				}
-				llvmDeferResultLive(value, before)
+				if hasHome {
+					llvmStoreDeferResultHome(value, home, before)
+				} else {
+					llvmDeferResultLive(value, before)
+				}
 				continue
 			}
 
@@ -354,7 +384,11 @@ func (lfc *LLVMFuncContext) emitDeferResultLiveMarkers() {
 			if before.IsNil() {
 				v.Fatalf("named defer result argument has no entry insertion point")
 			}
-			llvmDeferResultLive(value, before)
+			if hasHome {
+				llvmStoreDeferResultHome(value, home, before)
+			} else {
+				llvmDeferResultLive(value, before)
+			}
 		}
 	}
 }
@@ -2107,6 +2141,21 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			typ = GlobalCtxt.PointerType(0)
 		}
 		addr := arg0()
+		if v.Op == OpDereference {
+			if key, ok := lfc.DeferResultKeys[v.Args[0].ID]; ok {
+				home, ok := lfc.DeferResultHomes[key]
+				if !ok {
+					v.Fatalf("named defer result has no LLVM memory home")
+				}
+				// Panic recovery resumes at this dereference without following
+				// the normal LLVM edge from the suspended call. Reload the heap
+				// result address from its stable stack home instead of relying on
+				// an SSA register value that the recovery transfer bypassed.
+				addr = lfc.b.CreateLoad(getLLVMType(home.Type), home.Value, v.String()+".defer.addr")
+				addr.SetAlignment(int(home.Type.Alignment()))
+				addr.SetVolatile(true)
+			}
+		}
 		if addr.Type().TypeKind() != llvm.PointerTypeKind {
 			v.Fatalf("%s address has non-pointer LLVM type", v.Op)
 		}
@@ -2365,6 +2414,8 @@ func LLVMCompile(f *Func) {
 		ClosureCodeLoads: map[ID]bool{},
 		DeferResults:     map[llvmLocalKey]bool{},
 		DeferResultLives: map[ID]bool{},
+		DeferResultHomes: map[llvmLocalKey]llvmStackSlot{},
+		DeferResultKeys:  map[ID]llvmLocalKey{},
 		F:                f,
 		b:                GlobalCtxt.NewBuilder(),
 		ReturnType:       sig.ReturnType,
@@ -2389,7 +2440,7 @@ func LLVMCompile(f *Func) {
 	// containing recover would change the frame checked by runtime.gorecover.
 	frontendFunc := f.Frontend().Func()
 	if frontendFunc != nil && frontendFunc.HasDefer() {
-		for slot, values := range f.NamedValues {
+		for _, slot := range f.Names {
 			// Heap-escaped output parameters are represented by a synthetic
 			// PAUTO named &result. IsOutputParamHeapAddr retains the semantic
 			// connection after the address becomes a mallocgc result rather than
@@ -2397,9 +2448,19 @@ func LLVMCompile(f *Func) {
 			if slot.N == nil || (slot.N.Class != ir.PPARAMOUT && !slot.N.IsOutputParamHeapAddr()) {
 				continue
 			}
-			for _, value := range values {
+			for _, value := range f.NamedValues[*slot] {
 				if value.Type != nil && value.Type.IsPtr() {
-					FCtxt.DeferResultLives[value.ID] = true
+					if slot.N.IsOutputParamHeapAddr() {
+						// Zero-sized escaped results use a constant zerobase
+						// address, which remains available on the recovery path
+						// without either GC liveness or a stable stack home.
+						if value.Op == OpAddr || value.Op == OpConstNil {
+							continue
+						}
+						FCtxt.DeferResultKeys[value.ID] = llvmLocalKeyForName(slot.N)
+					} else {
+						FCtxt.DeferResultLives[value.ID] = true
+					}
 				}
 			}
 		}
@@ -2482,6 +2543,44 @@ func LLVMCompile(f *Func) {
 	// cannot become dynamic allocas (which Go stack growth cannot support).
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
 	emitGoObjFunctionMarkerRelocs(FCtxt.b, f.OwnAux.Fn)
+	for _, named := range f.Names {
+		if frontendFunc == nil || !frontendFunc.HasDefer() || named.N == nil || !named.N.IsOutputParamHeapAddr() {
+			continue
+		}
+		needed := false
+		for _, value := range f.NamedValues[*named] {
+			if _, ok := FCtxt.DeferResultKeys[value.ID]; ok {
+				needed = true
+				break
+			}
+		}
+		if !needed {
+			continue
+		}
+		name := named.N
+		key := llvmLocalKeyForName(name)
+		if _, ok := FCtxt.DeferResultHomes[key]; ok {
+			continue
+		}
+		if !name.Type().IsPtr() {
+			f.fe.Fatalf(name.Pos(), "heap output parameter address %v has non-pointer type %v", name, name.Type())
+		}
+		if name.Type().Alignment() <= 0 {
+			f.fe.Fatalf(name.Pos(), "invalid alignment %d for heap output parameter address %v", name.Type().Alignment(), name)
+		}
+		home := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), name.Sym().Name+".defer.home")
+		home.SetAlignment(int(name.Type().Alignment()))
+		home.SetMetadata(GlobalCtxt.MDKindID(goSourceAddressTakenMD), GlobalCtxt.MDNode([]llvm.Metadata{
+			llvm.ConstInt(GlobalCtxt.Int1Type(), 0, false).ConstantAsMetadata(),
+		}))
+		home.SetMetadata(GlobalCtxt.MDKindID(goDeferResultMD), GlobalCtxt.MDNode(nil))
+		// This pointer home is live at every safepoint. Initialize it before
+		// mallocgc can suspend and expose the frame to the stack scanner.
+		init := FCtxt.b.CreateStore(llvm.ConstNull(getLLVMType(name.Type())), home)
+		init.SetAlignment(int(name.Type().Alignment()))
+		init.SetVolatile(true)
+		FCtxt.DeferResultHomes[key] = llvmStackSlot{Value: home, Type: name.Type()}
+	}
 	var parameterHomes []*Value
 	var parameterLifetimeSlots []llvmStackSlot
 	for _, BB := range f.Blocks {
