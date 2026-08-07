@@ -90,6 +90,7 @@
   },
   "runtime": {
     "whitelist": {
+      "64bit.go": "generated 64-bit arithmetic regression qualified through LLVM O2 generation, compile, link, and execution",
       "bom.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
       "chan/select5.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
       "crlf.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
@@ -99,6 +100,7 @@
       "fixedbugs/issue5162.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
       "fixedbugs/issue7316.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
       "fixedbugs/issue7867.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
+      "fixedbugs/issue9604b.go": "generated conversion regression qualified through byte-identical LLVM O2 generation, compile, link, and execution on Linux/amd64",
       "mergemul.go": "generated upstream regression repeatedly qualified through LLVM compile, link, and execution",
       "reflectmethod4.go": "dynamic reflect.Value.Method calls retain exported methods through GoObj linking and execution",
       "reflectmethod5.go": "reflected method values with zero-sized receivers cross statepoints without consuming ABI registers",
@@ -1158,8 +1160,6 @@
       "zerodivide.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution"
     },
     "graylist": {
-      "64bit.go": "LLVM runoutput generator produces a generated program that crashes during the integer test table",
-      "fixedbugs/issue9604b.go": "LLVM runoutput generator fails at runtime before completing the generated conversion checks",
       "fixedbugs/issue73916.go": "recover needs frontend pcinline metadata to count the inlined deferred function as a logical frame",
       "fixedbugs/issue73916b.go": "recover needs frontend pcinline metadata to count nested inlined logical frames",
       "fixedbugs/issue73917.go": "recover needs frontend pcinline metadata through an inlined value-method wrapper",
@@ -1180,6 +1180,7 @@
       "convinline.go": "slow: exceeds the one-minute LLVM CI per-case budget",
       "fixedbugs/issue29312.go": "slow: exceeds the one-minute LLVM CI per-case budget",
       "index0.go": "OOM: LLVM code generation exceeded 14 GB before completion",
+      "rangegen.go": "slow: the corrected generator emits a 6.4 MB entry package whose LLVM O2 compilation exceeds the one-minute per-case budget",
       "rotate1.go": "slow: exceeds the one-minute LLVM CI per-case budget",
       "rotate2.go": "slow: exceeds the one-minute LLVM CI per-case budget",
       "rotate3.go": "slow: exceeds the one-minute LLVM CI per-case budget"
@@ -1216,6 +1217,9 @@
       }
     },
     "platform_blacklist": {
+      "darwin/arm64": {
+        "fixedbugs/issue9604b.go": "slow: #108 fixes byte-identical generation, but LLVM O2 compilation of the generated entry still exceeds the one-minute per-case budget on Darwin/arm64"
+      },
       "linux/amd64": {
         "fixedbugs/issue20780b.go": "timeout: exceeds the one-minute LLVM CI per-case budget on Linux/amd64"
       }
