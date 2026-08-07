@@ -396,12 +396,10 @@ def main():
         )
         if len(re.findall(r'"deopt"\(', optimized_rewritten)) != 13:
             fail("default<O2> did not preserve stack-object records")
-        if "goallc.source_addrtaken" in optimized_rewritten:
-            fail("source address-taken provenance escaped final classification")
         if "alloca %nested" in function_body(
             optimized_rewritten, "nested_whole_aggregate"
         ):
-            fail("source address-taken provenance prevented SROA")
+            fail("fixed-home classification prevented SROA")
 
         machine_ir = run(
             [

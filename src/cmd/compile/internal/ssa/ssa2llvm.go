@@ -64,7 +64,6 @@ const goStackGrowthStatepointAttr = "go-stack-growth-statepoint"
 const goAsyncUnsafeAttr = "go-async-unsafe"
 const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
-const goSourceAddressTakenMD = "goallc.source_addrtaken"
 const goDeferResultMD = "goallc.defer_result"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolNameMD = "goobj.symbol.name"
@@ -2526,14 +2525,6 @@ func LLVMCompile(f *Func) {
 			FCtxt.DeferResults[key] = true
 		}
 		if name.Type().HasPointers() {
-			// Metadata absence already means that the source address did not escape.
-			// Preserve the positive source decision while letting the statepoint pass
-			// classify every surviving alloca from its optimized LLVM use graph.
-			if name.Addrtaken() {
-				value.SetMetadata(GlobalCtxt.MDKindID(goSourceAddressTakenMD), GlobalCtxt.MDNode([]llvm.Metadata{
-					llvm.ConstInt(GlobalCtxt.Int1Type(), 1, false).ConstantAsMetadata(),
-				}))
-			}
 			if isDeferResult {
 				value.SetMetadata(GlobalCtxt.MDKindID(goDeferResultMD), GlobalCtxt.MDNode(nil))
 			}
