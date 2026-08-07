@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  LLVM_RELEASE: goallc-llvm23.1.0-v2
-  LLVM_REVISION: 632f85a1ea4bc0d2ba302aaa7133fe5fbf592545
+  LLVM_RELEASE: goallc-llvm23.1.0-v3
+  LLVM_REVISION: 49ba9dea28e60d30d8768d2c2604893b250403a8
 
 jobs:
   linux:
@@ -32,7 +32,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-22.04-arm
     env:
-      LLVM_ARCHIVE: goallc-llvm23.1.0-v2-linux-${{ matrix.arch }}.tar.zst
+      LLVM_ARCHIVE: goallc-llvm23.1.0-v3-linux-${{ matrix.arch }}.tar.zst
       LLVM_ROOT: ${{ github.workspace }}/.goallc/llvm
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
