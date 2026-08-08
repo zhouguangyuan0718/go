@@ -2611,14 +2611,31 @@ func LLVMCompile(f *Func) {
 	// cannot become dynamic allocas (which Go stack growth cannot support).
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.Prologue)
 	emitGoObjFunctionMarkerRelocs(FCtxt.b, f.OwnAux.Fn)
-	var openDeferSlots llvm.Value
 	if len(f.OpenDeferSlots) != 0 {
 		openDeferSlotsType := llvm.ArrayType(GlobalCtxt.PointerType(0), len(f.OpenDeferSlots))
-		openDeferSlots = FCtxt.b.CreateAlloca(openDeferSlotsType, "open.defer.slots")
+		openDeferSlots := FCtxt.b.CreateAlloca(openDeferSlotsType, "open.defer.slots")
 		openDeferSlots.SetAlignment(types.PtrSize)
 		openDeferSlots.SetMetadata(GlobalCtxt.MDKindID(goOpenDeferSlotsMD), GlobalCtxt.MDNode([]llvm.Metadata{
 			llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(len(f.OpenDeferSlots)), false).ConstantAsMetadata(),
 		}))
+		for i, name := range f.OpenDeferSlots {
+			key := llvmLocalKeyForName(name)
+			if index := FCtxt.OpenDeferSlots[key]; index != i+1 {
+				f.fe.Fatalf(name.Pos(), "open-coded defer stack slot %v has index %d, want %d", name, index, i+1)
+			}
+			if name.Type().Size() != int64(types.PtrSize) {
+				f.fe.Fatalf(name.Pos(), "invalid open-coded defer stack slot %v", name)
+			}
+			if _, exists := FCtxt.Locals[key]; exists {
+				f.fe.Fatalf(name.Pos(), "duplicate open-coded defer stack slot %v", name)
+			}
+			offset := llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(i)*uint64(types.PtrSize), false)
+			value := FCtxt.b.CreateGEP(
+				GlobalCtxt.Int8Type(), openDeferSlots, []llvm.Value{offset},
+				fmt.Sprintf("open.defer.slot%d", i),
+			)
+			FCtxt.Locals[key] = llvmStackSlot{Value: value, Type: name.Type()}
+		}
 	}
 	isDeferResultLocal := func(name *ir.Name) bool {
 		return frontendFunc != nil && frontendFunc.HasDefer() &&
@@ -2635,17 +2652,11 @@ func LLVMCompile(f *Func) {
 		if name.Type().Alignment() <= 0 {
 			f.fe.Fatalf(name.Pos(), "invalid alignment %d for local stack slot %v", name.Type().Alignment(), name)
 		}
-		var value llvm.Value
-		if index := FCtxt.OpenDeferSlots[key]; index != 0 {
-			if openDeferSlots.IsNil() || name.Type().Size() != int64(types.PtrSize) {
-				f.fe.Fatalf(name.Pos(), "invalid open-coded defer stack slot %v", name)
-			}
-			offset := llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(index-1)*uint64(types.PtrSize), false)
-			value = FCtxt.b.CreateGEP(GlobalCtxt.Int8Type(), openDeferSlots, []llvm.Value{offset}, llvmName)
-		} else {
-			value = FCtxt.b.CreateAlloca(getLLVMType(name.Type()), llvmName)
-			value.SetAlignment(int(name.Type().Alignment()))
+		if FCtxt.OpenDeferSlots[key] != 0 {
+			f.fe.Fatalf(name.Pos(), "open-coded defer stack slot %v was not preallocated", name)
 		}
+		value := FCtxt.b.CreateAlloca(getLLVMType(name.Type()), llvmName)
+		value.SetAlignment(int(name.Type().Alignment()))
 		if FCtxt.HasOpenDeferBits && key == FCtxt.OpenDeferBits {
 			value.SetMetadata(GlobalCtxt.MDKindID(goOpenDeferBitsMD), GlobalCtxt.MDNode(nil))
 		}
@@ -2655,7 +2666,7 @@ func LLVMCompile(f *Func) {
 			// ordinary LLVM edge, so the result slot is live for the whole function.
 			FCtxt.DeferResults[key] = true
 		}
-		if name.Type().HasPointers() && FCtxt.OpenDeferSlots[key] == 0 {
+		if name.Type().HasPointers() {
 			if isDeferResult {
 				value.SetMetadata(GlobalCtxt.MDKindID(goDeferResultMD), GlobalCtxt.MDNode(nil))
 			}

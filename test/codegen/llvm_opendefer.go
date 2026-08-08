@@ -8,9 +8,9 @@ package codegen
 
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmOpenDeferTwo(i64 %value)
 // LLVM: [[SLOTS:%.*]] = alloca [2 x ptr], align 8, !goallc.open_defer_slots ![[SLOTS_MD:[0-9]+]]
-// LLVM: [[BITS:%.*]] = alloca i8, {{.*}}!goallc.open_defer_bits
 // LLVM: [[SLOT0:%.*]] = getelementptr i8, ptr [[SLOTS]], i64 0
 // LLVM: [[SLOT1:%.*]] = getelementptr i8, ptr [[SLOTS]], i64 8
+// LLVM: [[BITS:%.*]] = alloca i8, {{.*}}!goallc.open_defer_bits
 // LLVM: callbr void @llvm.go.defer.edge()
 // LLVM-NEXT: to label %{{.*}} [label %[[RECOVERY:[A-Za-z0-9_.]+]]]
 // LLVM: store volatile ptr {{.*}}, ptr [[SLOT0]]
@@ -20,8 +20,8 @@ package codegen
 // LLVM: ![[SLOTS_MD]] = !{i32 2}
 // LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmOpenDeferTwo(i64 %value)
 // LLVM-OPT: [[SLOTS_OPT:%.*]] = alloca [2 x ptr], align 8, !goallc.open_defer_slots ![[SLOTS_OPT_MD:[0-9]+]]
-// LLVM-OPT: [[BITS_OPT:%.*]] = alloca i8, {{.*}}!goallc.open_defer_bits
 // LLVM-OPT: [[SLOT1_OPT:%.*]] = getelementptr {{.*}}i8, ptr [[SLOTS_OPT]], i64 8
+// LLVM-OPT: [[BITS_OPT:%.*]] = alloca i8, {{.*}}!goallc.open_defer_bits
 // LLVM-OPT: callbr void @llvm.go.defer.edge()
 // LLVM-OPT-NEXT: to label %{{.*}} [label %[[RECOVERY_OPT:[A-Za-z0-9_.]+]]]
 // LLVM-OPT: store volatile ptr {{.*}}, ptr [[SLOTS_OPT]]
