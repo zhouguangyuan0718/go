@@ -59,11 +59,12 @@ The current SSA value and CFG rewrite support matrix is:
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
 | Loops and irreducible CFG | Supported | Relocation definitions are propagated through backedge and multi-entry PHIs without a shape-specific algorithm. |
-| Fixed struct/array SSA aggregates | Supported | Pointer leaves are scalarized before liveness and reconstructed from the current relocated SSA leaves. |
+| Fixed struct/array SSA aggregates | Supported | Pointer and fixed pointer-vector leaves are extracted before liveness and reconstructed from the current relocated SSA leaves. |
+| Fixed-width pointer-vector SSA values | Supported | The vector remains one `gc-live` operand and one same-typed `gc.relocate`; it is not split into lanes. Pointer vectors in allocas remain unsupported. |
 | Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
 | Aggregate load results and store operands | Supported | First-class SSA values use aggregate normalization. Pointer leaves in surviving fixed allocas remain memory roots described by the alloca deopt layout protocol. |
 | Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Go `VarDef` emits `llvm.lifetime.start`; parameter homes and addressed result homes have explicit starts at their initialization sites. The statepoint pass uses starts as backward liveness kills and real address uses as gens, so the last use supplies the implicit end. Active contents contribute callsite `LocalsPointerMaps`; address-observable objects additionally get function-wide `FUNCDATA_StackObjects` and one entry initialization because stack growth adjusts them even while source-dead. Locals-only storage is not initialized by the plugin, and no lifetime ends are emitted. |
-| Fixed and scalable vectors | Unsupported | Vector lane and scalable-count semantics require a separate design; fails closed. |
+| Scalable vectors | Unsupported | The generic LLVM statepoint rewrite assumes a fixed vector width when constructing relocates; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
 | `invoke`, `callbr`, non-deopt operand bundles, unsupported parameter attributes, and `musttail` | Unsupported | One ordinary deopt bundle is preserved before the alloca suffix. `nest`, `captures`, and `readonly` parameter attributes are preserved; other shapes fail closed. |
 
@@ -101,12 +102,14 @@ This normalization has four invariants:
 4. Post-safepoint reconstruction uses the current SSA definition produced by
    `gc.relocate` and the whole-function relocation PHIs.
 
-Nested fixed structs and arrays are enumerated by leaf index path. Extracting
-after an aggregate `freeze` preserves its correlated choice; rebuilding all
-explicit leaves preserves `undef` and `poison` field semantics. LLVM struct
-padding is not a first-class leaf. LLVM 23 permits an aggregate `gc.result`, so
-an aggregate call result is projected first and its pointer leaves become roots
-at later safepoints.
+Nested fixed structs and arrays are enumerated by leaf index path. A fixed-width
+pointer vector is one leaf: LLVM's statepoint verifier and rewrite preserve its
+type in `gc-live` and `gc.relocate`, so there is no lane-wise scalarization.
+Extracting after an aggregate `freeze` preserves its correlated choice;
+rebuilding all explicit leaves preserves `undef` and `poison` field semantics.
+LLVM struct padding is not a first-class leaf. LLVM 23 permits an aggregate
+`gc.result`, so an aggregate call result is projected first and its pointer
+leaves become roots at later safepoints.
 
 An aggregate loaded from memory can be normalized as an independent SSA value
 and an aggregate store can consume a rebuilt value. For each surviving fixed
