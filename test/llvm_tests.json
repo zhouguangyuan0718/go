@@ -1200,6 +1200,7 @@
         "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls",
         "reflectmethod2.go": "Linux/amd64 stack growth reports an invalid pointer in the reflected-method frame",
         "reflectmethod6.go": "Linux/amd64 stack growth reports an invalid pointer in the reflected-method frame",
+        "stackobj2.go": "Linux/amd64 stack growth scans an uninitialized pointer slot in main.makelist",
         "fixedbugs/issue15281.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",
         "fixedbugs/issue24488.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",
         "fixedbugs/issue24491b.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",

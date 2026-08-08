@@ -196,11 +196,13 @@ def main():
     if "call void @llvm.lifetime.end" in aggregate_body:
         fail("promoted alloca retained a lifetime end")
     lifetime_start = aggregate_body.find("call void @llvm.lifetime.start")
-    entry_initialize = aggregate_body.find("call void @llvm.memset")
+    entry_initialize = aggregate_body.find("call void @llvm.memset.inline")
     first_call = aggregate_body.find("@llvm.experimental.gc.statepoint")
     source_initialize = aggregate_body.find("store ptr null")
     if min(lifetime_start, entry_initialize, first_call, source_initialize) < 0:
         fail("promoted alloca initialization sequence is incomplete")
+    if re.search(r"call void @llvm\.memset\.p\d", aggregate_body):
+        fail("promoted alloca initialization may not use hosted memset")
     if not lifetime_start < entry_initialize < first_call < source_initialize:
         fail("promoted alloca was not initialized before its widened live range")
     if "%slice.cap.leaf.0 = extractvalue" not in aggregate_body:
