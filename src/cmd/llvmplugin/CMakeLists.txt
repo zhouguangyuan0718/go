@@ -298,6 +298,17 @@ if(BUILD_TESTING)
   )
 
   add_test(
+    NAME GoALLCStatepoints.DerivedPointerRematerialization
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-derived-pointer-rematerialization.py"
+      --llc "${GOALLC_LLC_EXECUTABLE}"
+      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
+      --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/derived-pointer-rematerialization.ll"
+  )
+
+  add_test(
     NAME GoALLCStatepoints.GoObj
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
