@@ -273,7 +273,16 @@ bool isTrackedValue(const Value *V, LivenessKind Kind) {
   case LivenessKind::ScalarPointers:
     return Ty->isPointerTy() && !isStaticAllocaAddress(V);
   case LivenessKind::AllocaAddresses:
-    return Ty->isPointerTy() && !isa<AllocaInst>(V) && isStaticAllocaAddress(V);
+    // Direct memory operations retain their FrameIndex identity through
+    // SelectionDAG and must not enter relocation SSA. Under register pressure,
+    // a relocated address PHI can be spilled into an ordinary non-root slot;
+    // that cached address then points at the old Go stack after growth.
+    // canonicalizeDirectAllocaAddresses rebuilds every first-class use at its
+    // use point, so only those local values need address liveness here.
+    return Ty->isPointerTy() && !isa<AllocaInst>(V) &&
+           isStaticAllocaAddress(V) &&
+           llvm::any_of(V->uses(),
+                        [](const Use &U) { return !isDirectFrameAddressUse(U); });
   }
   llvm_unreachable("unknown GoALLC liveness kind");
 }

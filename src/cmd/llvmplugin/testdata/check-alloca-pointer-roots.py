@@ -169,11 +169,17 @@ def check_rewritten_ir(ir):
     expect_records(ir, "alloca_call_skip", [one])
     expect_records(ir, "alloca_multiple_calls", [one, one])
     expect_records(ir, "alloca_loop", [one])
-    expect_records(
+    direct_gep = expect_records(
         ir,
         "alloca_gep_address_across_call",
         [[record("slot", 16, 2, [0x2])]],
     )
+    if (
+        "%result = load ptr, ptr %field" not in direct_gep
+        or "%field.remat" in direct_gep
+        or "%field.relocated.merge" in direct_gep
+    ):
+        fail("direct derived alloca address entered relocation SSA")
     direct_address = expect_records(
         ir, "alloca_direct_address_across_calls", [one] * 3
     )
