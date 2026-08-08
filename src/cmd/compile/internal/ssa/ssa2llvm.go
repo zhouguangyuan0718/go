@@ -24,7 +24,8 @@ type LLVMFuncContext struct {
 	ClosureCodeLoads  map[ID]bool
 	DeferResults      map[llvmLocalKey]bool
 	DeferResultKeys   map[ID]llvmLocalKey
-	OpenDeferBits     map[llvmLocalKey]bool
+	OpenDeferBits     llvmLocalKey
+	HasOpenDeferBits  bool
 	OpenDeferSlots    map[llvmLocalKey]int
 	F                 *Func
 	LF                llvm.Value
@@ -745,7 +746,8 @@ func (lfc *LLVMFuncContext) isOpenDeferAddress(v *Value) bool {
 		switch v.Op {
 		case OpLocalAddr:
 			_, key := llvmLocalName(v)
-			return lfc.OpenDeferBits[key] || lfc.OpenDeferSlots[key] != 0
+			return (lfc.HasOpenDeferBits && key == lfc.OpenDeferBits) ||
+				lfc.OpenDeferSlots[key] != 0
 		case OpOffPtr, OpAddPtr, OpPtrIndex, OpCopy:
 			if len(v.Args) == 0 {
 				return false
@@ -2465,7 +2467,6 @@ func LLVMCompile(f *Func) {
 		ClosureCodeLoads: map[ID]bool{},
 		DeferResults:     map[llvmLocalKey]bool{},
 		DeferResultKeys:  map[ID]llvmLocalKey{},
-		OpenDeferBits:    map[llvmLocalKey]bool{},
 		OpenDeferSlots:   map[llvmLocalKey]int{},
 		F:                f,
 		b:                GlobalCtxt.NewBuilder(),
@@ -2520,7 +2521,8 @@ func LLVMCompile(f *Func) {
 		if len(f.OpenDeferSlots) == 0 {
 			f.fe.Fatalf(f.Entry.Pos, "open-coded defer has no function slots")
 		}
-		FCtxt.OpenDeferBits[llvmLocalKeyForName(f.OpenDeferBits)] = true
+		FCtxt.OpenDeferBits = llvmLocalKeyForName(f.OpenDeferBits)
+		FCtxt.HasOpenDeferBits = true
 		for i, slot := range f.OpenDeferSlots {
 			// Store index+1 so map lookup also distinguishes slot zero from absence.
 			FCtxt.OpenDeferSlots[llvmLocalKeyForName(slot)] = i + 1
@@ -2644,7 +2646,7 @@ func LLVMCompile(f *Func) {
 			value = FCtxt.b.CreateAlloca(getLLVMType(name.Type()), llvmName)
 			value.SetAlignment(int(name.Type().Alignment()))
 		}
-		if FCtxt.OpenDeferBits[key] {
+		if FCtxt.HasOpenDeferBits && key == FCtxt.OpenDeferBits {
 			value.SetMetadata(GlobalCtxt.MDKindID(goOpenDeferBitsMD), GlobalCtxt.MDNode(nil))
 		}
 		isDeferResult := isDeferResultLocal(name)
