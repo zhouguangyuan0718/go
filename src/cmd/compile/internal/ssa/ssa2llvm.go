@@ -70,6 +70,7 @@ const goStackGrowthStatepointAttr = "go-stack-growth-statepoint"
 const goAsyncUnsafeAttr = "go-async-unsafe"
 const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
+const goPointerAddressObservation = "__goallc$pointer.address"
 const goDeferResultMD = "goallc.defer_result"
 const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
@@ -718,7 +719,7 @@ func (lfc *LLVMFuncContext) callerSP(v *Value) llvm.Value {
 	if want.TypeKind() != llvm.IntegerTypeKind || want.IntTypeWidth() != int(lfc.F.Config.PtrSize*8) {
 		v.Fatalf("GetCallerSP has incompatible LLVM result type")
 	}
-	return lfc.b.CreatePtrToInt(sp, want, v.String())
+	return lfc.observePointerAddress(sp, want, v.String())
 }
 
 func (lfc *LLVMFuncContext) stackAddress(v *Value) llvm.Value {
@@ -730,7 +731,17 @@ func (lfc *LLVMFuncContext) stackAddress(v *Value) llvm.Value {
 	if want.TypeKind() != llvm.IntegerTypeKind || want.IntTypeWidth() != int(lfc.F.Config.PtrSize*8) {
 		v.Fatalf("SP has incompatible LLVM result type")
 	}
-	return lfc.b.CreatePtrToInt(sp, want, v.String())
+	return lfc.observePointerAddress(sp, want, v.String())
+}
+
+func (lfc *LLVMFuncContext) observePointerAddress(pointer llvm.Value, resultType llvm.Type, name string) llvm.Value {
+	// Go stack pointers can change when a call grows the goroutine stack. Keep
+	// the physical-address observation opaque through LLVM optimization; the
+	// statepoint plugin lowers it to ptrtoint immediately before it computes
+	// pointer liveness and relocation SSA.
+	sig := llvm.FunctionType(resultType, []llvm.Type{pointer.Type()}, false)
+	fn := getOrInsertLLVMIntrinsic(goPointerAddressObservation, sig)
+	return lfc.b.CreateCall(sig, fn, []llvm.Value{pointer}, name)
 }
 
 func (lfc *LLVMFuncContext) cgoUnsafeArgAddress(name *ir.Name, llvmName string) llvm.Value {
@@ -2087,7 +2098,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		case lVal.Type().TypeKind() == llvm.PointerTypeKind &&
 			want.TypeKind() == llvm.IntegerTypeKind &&
 			want.IntTypeWidth() == types.PtrSize*8:
-			lVal = lfc.b.CreatePtrToInt(lVal, want, v.String()+".coerce")
+			lVal = lfc.observePointerAddress(lVal, want, v.String()+".coerce")
 		case lVal.Type().TypeKind() == llvm.IntegerTypeKind &&
 			lVal.Type().IntTypeWidth() == types.PtrSize*8 &&
 			want.TypeKind() == llvm.PointerTypeKind:

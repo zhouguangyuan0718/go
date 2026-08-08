@@ -39,6 +39,8 @@ namespace {
 
 constexpr StringLiteral GoALLCGCName = "goallc";
 constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
+constexpr StringLiteral GoPointerAddressObservation =
+    "__goallc$pointer.address";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
 constexpr StringLiteral GoDeferResultMD = "goallc.defer_result";
 constexpr StringLiteral GoOpenDeferBitsMD = "goallc.open_defer_bits";
@@ -1793,9 +1795,52 @@ Error materializeFunctionMarkerRelocs(Module &M) {
   return Error::success();
 }
 
+Error lowerPointerAddressObservations(Module &M) {
+  Function *Observer = M.getFunction(GoPointerAddressObservation);
+  if (!Observer)
+    return Error::success();
+  if (!Observer->isDeclaration())
+    return createStringError(
+        std::errc::invalid_argument,
+        "GoALLC pointer-address observation must be a declaration");
+
+  SmallVector<CallInst *, 8> Calls;
+  for (User *U : Observer->users()) {
+    auto *Call = dyn_cast<CallInst>(U);
+    if (!Call || Call->getCalledFunction() != Observer ||
+        Call->arg_size() != 1 ||
+        !Call->getArgOperand(0)->getType()->isPointerTy() ||
+        !Call->getType()->isIntegerTy())
+      return createStringError(
+          std::errc::invalid_argument,
+          "GoALLC pointer-address observation has an invalid use");
+    unsigned AddressSpace =
+        cast<PointerType>(Call->getArgOperand(0)->getType())->getAddressSpace();
+    if (Call->getType()->getIntegerBitWidth() !=
+        M.getDataLayout().getPointerSizeInBits(AddressSpace))
+      return createStringError(
+          std::errc::invalid_argument,
+          "GoALLC pointer-address observation has an invalid result width");
+    Calls.push_back(Call);
+  }
+
+  for (CallInst *Call : Calls) {
+    IRBuilder<> Builder(Call);
+    Builder.SetCurrentDebugLocation(Call->getDebugLoc());
+    Value *Address = Builder.CreatePtrToInt(
+        Call->getArgOperand(0), Call->getType(), Call->getName() + ".lowered");
+    Call->replaceAllUsesWith(Address);
+    Call->eraseFromParent();
+  }
+  Observer->eraseFromParent();
+  return Error::success();
+}
+
 } // namespace
 
 Error goallc::rewriteStatepoints(Module &M, TargetMachine &) {
+  if (Error Err = lowerPointerAddressObservations(M))
+    return Err;
   if (Error Err = materializeFunctionMarkerRelocs(M))
     return Err;
   for (Function &F : M) {
