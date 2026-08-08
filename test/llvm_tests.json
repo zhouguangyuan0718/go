@@ -1157,6 +1157,12 @@
       "typeparam/metrics.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution",
       "typeparam/settable.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution",
       "unsafebuiltins.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution",
+      "abi/open_defer_1.go": "open-coded defer registration and return repeatedly pass LLVM O2 compile, GoObj link, and execution on both CI architectures",
+      "chan/doubleselect.go": "double select execution repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
+      "fixedbugs/issue19658.go": "closure and interface regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
+      "fixedbugs/issue26411.go": "runtime regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
+      "fixedbugs/issue28688.go": "soft-float copy regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
+      "fixedbugs/issue78081.go": "runtime regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "zerodivide.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution"
     },
     "graylist": {
@@ -1164,7 +1170,6 @@
       "fixedbugs/issue73916b.go": "recover needs frontend pcinline metadata to count nested inlined logical frames",
       "fixedbugs/issue73917.go": "recover needs frontend pcinline metadata through an inlined value-method wrapper",
       "fixedbugs/issue73920.go": "recover needs frontend pcinline metadata through an inlined pointer-method wrapper",
-      "fixedbugs/issue28688.go": "soft-float Copy changes between integer and floating-point LLVM carriers",
       "fixedbugs/issue34968.go": "cgo checkptr fails with malformed LLVM GoObj or linker symbol metadata",
       "inline_caller.go": "LLVM GoObj does not yet emit source line metadata for runtime.Caller",
       "inline_callers.go": "LLVM GoObj does not yet emit logical inline frames for runtime.Callers",
@@ -1190,7 +1195,6 @@
         "abi/method_wrapper.go": "x86 GoObj traceback does not yet unwind the panic path through the method wrapper",
         "fixedbugs/issue23522.go": "x86 dynamic SSE4.1 floor selection lowers the guarded LLVM intrinsic to an unavailable external libcall",
         "fixedbugs/issue43570.go": "x86 GoObj panic traceback still reports an unknown caller PC",
-        "fixedbugs/issue45045.go": "x86 statepoint liveness does not yet retain the second map key through GC",
         "fixedbugs/issue51101.go": "x86 large-frame recursion still reaches morestack below the current stack bound",
         "fixedbugs/issue56990.go": "Linux/amd64 stack growth intermittently reports an invalid pointer in main.Foo",
         "fixedbugs/issue68322.go": "x86 dynamic SSE4.1 truncation lowers the guarded LLVM intrinsic to an unavailable external libcall",
@@ -1199,7 +1203,6 @@
         "reflectmethod2.go": "Linux/amd64 stack growth reports an invalid pointer in the reflected-method frame",
         "reflectmethod6.go": "Linux/amd64 stack growth reports an invalid pointer in the reflected-method frame",
         "stackobj2.go": "Linux/amd64 stack growth scans an uninitialized pointer slot in main.makelist",
-        "fixedbugs/issue15281.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",
         "fixedbugs/issue24488.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",
         "fixedbugs/issue24491b.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",
         "fixedbugs/issue44823.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified",
@@ -1209,9 +1212,7 @@
       },
       "linux/arm64": {
         "chan/select2.go": "Linux/arm64 channel-select execution deadlocks",
-        "fixedbugs/issue15281.go": "Linux/arm64 allocation placement differs from the test expectations",
         "fixedbugs/issue2615.go": "Linux/arm64 llc rejects the generated GoObj frame prologue and epilogue",
-        "fixedbugs/issue45045.go": "Linux/arm64 map-key liveness execution deadlocks",
         "fixedbugs/issue5373.go": "Linux/arm64 llc rejects the generated GoObj frame prologue and epilogue",
         "fixedbugs/issue56990.go": "Linux/arm64 stack growth reports an invalid pointer in the frame"
       }
