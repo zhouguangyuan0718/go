@@ -486,6 +486,25 @@ func (lfc *LLVMFuncContext) unsignedMul64HiLo(v *Value) llvm.Value {
 	return lfc.buildPureTuple(v, high, low)
 }
 
+func (lfc *LLVMFuncContext) unsignedDiv128By64(v *Value) llvm.Value {
+	hi, lo, divisor := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
+	i64 := GlobalCtxt.Int64Type()
+	if hi.Type() != i64 || lo.Type() != i64 || divisor.Type() != i64 {
+		v.Fatalf("%s requires three i64 operands", v.Op)
+	}
+	if lfc.F.Config.arch != "amd64" {
+		v.Fatalf("%s is unsupported for LLVM target %s", v.Op, lfc.F.Config.arch)
+	}
+
+	resultType := getLLVMType(v.Type)
+	sig := llvm.FunctionType(resultType, []llvm.Type{i64, i64, i64}, false)
+	// Keep the exact 128-by-64 operation visible to the X86 backend. A generic
+	// i128 udiv would instead legalize to the hosted __udivti3 compiler-runtime
+	// call, which GoObj deliberately does not provide.
+	fn := getOrInsertLLVMIntrinsic("llvm.x86.go.udivrem.i128.i64", sig)
+	return lfc.b.CreateCall(sig, fn, []llvm.Value{hi, lo, divisor}, v.String())
+}
+
 func llvmTupleFieldCount(typ *types.Type) int {
 	switch typ.Kind() {
 	case types.TTUPLE:
@@ -1852,6 +1871,8 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.integerDiv(v, true, false)
 	case OpDiv64u, OpDiv32u, OpDiv16u, OpDiv8u:
 		lVal = lfc.integerDiv(v, false, false)
+	case OpDiv128u:
+		lVal = lfc.unsignedDiv128By64(v)
 	case OpMod64, OpMod32, OpMod16, OpMod8:
 		lVal = lfc.integerDiv(v, true, true)
 	case OpMod64u, OpMod32u, OpMod16u, OpMod8u:
