@@ -1201,6 +1201,9 @@
         "gcgort.go": "x86 GoObj pcsp and traceback metadata do not yet unwind all generated goroutine wrappers during stack growth",
         "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls",
         "stackobj2.go": "Linux/amd64 stack growth scans an uninitialized pointer slot in main.makelist"
+      },
+      "linux/arm64": {
+        "fixedbugs/issue56990.go": "Linux/arm64 stack growth reports an invalid derived pointer in the main.Foo frame"
       }
     },
     "platform_blacklist": {
