@@ -924,8 +924,12 @@ Error promoteAllocasToWholeFunctionLifetime(
     Builder.CreateLifetimeStart(Alloca);
     uint64_t ByteSize = AllocationSize->getFixedValue();
     if (ByteSize != 0)
-      Builder.CreateMemSet(Alloca, Builder.getInt8(0),
-                           Builder.getInt64(ByteSize), Alloca->getAlign());
+      // GoObj has no hosted memset fallback. Keep this fixed-size entry
+      // initialization inline so lowering cannot split later allocas away
+      // from the entry block while expanding an unavailable libcall.
+      Builder.CreateMemSetInline(Alloca, Alloca->getAlign(),
+                                 Builder.getInt8(0),
+                                 Builder.getInt64(ByteSize));
     Alloca->setMetadata(
         StackColoringNoMergeMD,
         MDNode::get(Alloca->getContext(), ArrayRef<Metadata *>()));
