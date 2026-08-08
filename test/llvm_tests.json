@@ -1002,7 +1002,7 @@
       "typeparam/issue51303.go": "generic interface method calls repeatedly qualified through LLVM compile, GoObj link, and execution",
       "typeparam/slices.go": "generic slice operations repeatedly qualified through LLVM compile, GoObj link, and execution",
       "typeparam/stringer.go": "generic Stringer method calls repeatedly qualified through LLVM compile, GoObj link, and execution",
-      "fixedbugs/issue15281.go": "Darwin/arm64 blacklist probe qualified through LLVM compile, GoObj link, and execution",
+      "fixedbugs/issue15281.go": "upstream regression passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue24488.go": "upstream regression passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue24491b.go": "upstream regression passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue44823.go": "upstream regression passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
