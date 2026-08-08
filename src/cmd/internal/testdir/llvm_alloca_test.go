@@ -32,8 +32,8 @@ var llvmAllocaChecks = map[string]llvmAllocaArchitectureChecks{
 	"linux/amd64": {
 		betweenCallsPattern:  `(?s)\bcallq\s+p\.mutateLocal\n(.*?)\bcallq\s+p\.safepoint`,
 		restoredStorePattern: `(?m)^\s*mov[a-z]*\s+[^,\n]+,\s*-[0-9]+\(%rbp\)`,
-		goallcLocals:         96,
-		goallcPointerBits:    []int{6, 8, 9, 10},
+		goallcLocals:         88,
+		goallcPointerBits:    []int{5, 7, 8, 9},
 	},
 }
 
