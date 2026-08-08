@@ -1187,7 +1187,6 @@
     "platform_graylist": {
       "linux/amd64": {
         "abi/method_wrapper.go": "x86 GoObj traceback does not yet unwind the panic path through the method wrapper",
-        "append.go": "Linux/amd64 statepoint lowering rejects vectors inside live pointer aggregates",
         "fixedbugs/issue23522.go": "x86 dynamic SSE4.1 floor selection lowers the guarded LLVM intrinsic to an unavailable external libcall",
         "fixedbugs/issue43570.go": "x86 GoObj panic traceback still reports an unknown caller PC",
         "fixedbugs/issue45045.go": "x86 statepoint liveness does not yet retain the second map key through GC",
@@ -1195,7 +1194,6 @@
         "fixedbugs/issue56990.go": "Linux/amd64 stack growth intermittently reports an invalid pointer in main.Foo",
         "fixedbugs/issue68322.go": "x86 dynamic SSE4.1 truncation lowers the guarded LLVM intrinsic to an unavailable external libcall",
         "gcgort.go": "x86 GoObj pcsp and traceback metadata do not yet unwind all generated goroutine wrappers during stack growth",
-        "genmeth1.go": "Linux/amd64 statepoint lowering rejects vectors inside live pointer aggregates",
         "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls",
         "reflectmethod2.go": "Linux/amd64 stack growth reports an invalid pointer in the reflected-method frame",
         "reflectmethod6.go": "Linux/amd64 stack growth reports an invalid pointer in the reflected-method frame",
@@ -1209,14 +1207,12 @@
         "typeparam/list2.go": "qualified on Darwin/arm64 only; Linux/amd64 runtime not yet verified"
       },
       "linux/arm64": {
-        "append.go": "Linux/arm64 statepoint lowering rejects vectors inside live pointer aggregates",
         "chan/select2.go": "Linux/arm64 channel-select execution deadlocks",
         "fixedbugs/issue15281.go": "Linux/arm64 allocation placement differs from the test expectations",
         "fixedbugs/issue2615.go": "Linux/arm64 llc rejects the generated GoObj frame prologue and epilogue",
         "fixedbugs/issue45045.go": "Linux/arm64 map-key liveness execution deadlocks",
         "fixedbugs/issue5373.go": "Linux/arm64 llc rejects the generated GoObj frame prologue and epilogue",
-        "fixedbugs/issue56990.go": "Linux/arm64 stack growth reports an invalid pointer in the frame",
-        "genmeth1.go": "Linux/arm64 statepoint lowering rejects vectors inside live pointer aggregates"
+        "fixedbugs/issue56990.go": "Linux/arm64 stack growth reports an invalid pointer in the frame"
       }
     },
     "platform_blacklist": {
