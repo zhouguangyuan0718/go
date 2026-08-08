@@ -1310,6 +1310,18 @@ func (lfc *LLVMFuncContext) reshapeLLVMValue(v *Value, value llvm.Value, from, t
 	if value.Type() == want {
 		return value
 	}
+	// The soft-float pass represents every float32/float64 SSA value with the
+	// same-width uint32/uint64 bit pattern. Function ABI types remain the Go
+	// source types, so calls and entries must reinterpret the carrier without a
+	// numeric conversion.
+	if lfc.F.Config.SoftFloat && from != nil && to != nil && from.Size() == to.Size() &&
+		((from.IsFloat() && to.IsInteger()) || (from.IsInteger() && to.IsFloat())) {
+		fromKind, toKind := value.Type().TypeKind(), want.TypeKind()
+		if (fromKind == llvm.FloatTypeKind || fromKind == llvm.DoubleTypeKind || fromKind == llvm.IntegerTypeKind) &&
+			(toKind == llvm.FloatTypeKind || toKind == llvm.DoubleTypeKind || toKind == llvm.IntegerTypeKind) {
+			return lfc.b.CreateBitCast(value, want, name)
+		}
+	}
 	if from == nil || to == nil || !types.Identical(from, to) || types.IdenticalStrict(from, to) || (!from.HasShape() && !to.HasShape()) {
 		v.Fatalf("cannot reshape LLVM value from Go type %v to %v", from, to)
 	}
