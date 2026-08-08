@@ -3,12 +3,14 @@ target triple = "x86_64-unknown-linux-goobj"
 %pair = type { ptr, i64 }
 %triple = type { i64, ptr, ptr }
 %nested = type { i64, [2 x { ptr, i32 }] }
+%vector_pair = type { <2 x ptr>, i64 }
 
 declare goabiinternal void @safepoint()
 declare goabiinternal void @consume_pair(%pair)
 declare goabiinternal %pair @make_pair(ptr, i64)
 declare goabiinternal void @leaf_consume_pair(%pair) #0
 declare goabiinternal void @leaf_consume_nested(%nested) #0
+declare goabiinternal void @leaf_consume_vector_pair(%vector_pair) #0
 
 define goabiinternal ptr @pair_across_call(%pair %value) "go-stack-growth-statepoint" gc "goallc" {
 entry:
@@ -32,6 +34,26 @@ entry:
   call goabiinternal void @safepoint()
   call goabiinternal void @leaf_consume_nested(%nested %value)
   ret void
+}
+
+define goabiinternal ptr @fixed_vector_across_call(ptr %source) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %value = load <2 x ptr>, ptr %source, align 8
+  call goabiinternal void @safepoint()
+  %result = extractelement <2 x ptr> %value, i32 1
+  ret ptr %result
+}
+
+define goabiinternal ptr @nested_fixed_vector_across_call(ptr %source, i64 %number) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %vector.value = load <2 x ptr>, ptr %source, align 8
+  %with_vector = insertvalue %vector_pair poison, <2 x ptr> %vector.value, 0
+  %value = insertvalue %vector_pair %with_vector, i64 %number, 1
+  call goabiinternal void @safepoint()
+  call goabiinternal void @leaf_consume_vector_pair(%vector_pair %value)
+  %vector = extractvalue %vector_pair %value, 0
+  %result = extractelement <2 x ptr> %vector, i32 1
+  ret ptr %result
 }
 
 define goabiinternal ptr @insertvalue_across_call(ptr %pointer, i64 %number) "go-stack-growth-statepoint" gc "goallc" {
