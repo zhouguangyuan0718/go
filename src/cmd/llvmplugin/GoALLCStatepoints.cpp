@@ -42,7 +42,6 @@ constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
 constexpr StringLiteral GoDeferResultMD = "goallc.defer_result";
 constexpr StringLiteral GoOpenDeferBitsMD = "goallc.open_defer_bits";
 constexpr StringLiteral GoOpenDeferSlotsMD = "goallc.open_defer_slots";
-constexpr StringLiteral GoOpenCodedDeferAttr = "go-open-coded-defer";
 constexpr StringLiteral GoObjMarkerRelocMD = "goobj.marker_reloc";
 constexpr StringLiteral StackColoringNoMergeMD = "llvm.stackcoloring.no_merge";
 
@@ -671,7 +670,6 @@ Expected<bool> deferResultAlloca(AllocaInst &Alloca) {
 
 Expected<std::optional<OpenDeferInfo>> collectOpenDeferInfo(Function &F) {
   const DataLayout &DL = F.getDataLayout();
-  bool HasAttribute = F.hasFnAttribute(GoOpenCodedDeferAttr);
   OpenDeferInfo Info;
 
   for (Instruction &I : instructions(F)) {
@@ -682,10 +680,6 @@ Expected<std::optional<OpenDeferInfo>> collectOpenDeferInfo(Function &F) {
     MDNode *SlotsMD = Alloca->getMetadata(GoOpenDeferSlotsMD);
     if (!BitsMD && !SlotsMD)
       continue;
-    if (!HasAttribute)
-      return createStringError(
-          std::errc::invalid_argument,
-          "GoALLC open-defer alloca metadata requires the function attribute");
     if (!Alloca->isStaticAlloca() || Alloca->getParent() != &F.getEntryBlock())
       return createStringError(
           std::errc::not_supported,
@@ -716,11 +710,8 @@ Expected<std::optional<OpenDeferInfo>> collectOpenDeferInfo(Function &F) {
     }
   }
 
-  if (!HasAttribute) {
-    if (Info.Bits || Info.Slots)
-      llvm_unreachable("metadata without open-defer attribute was accepted");
+  if (!Info.Bits && !Info.Slots)
     return std::optional<OpenDeferInfo>();
-  }
   if (!Info.Bits || !Info.Slots)
     return createStringError(
         std::errc::invalid_argument,

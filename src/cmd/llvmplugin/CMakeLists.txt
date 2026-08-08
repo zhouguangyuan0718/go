@@ -132,6 +132,19 @@ if(BUILD_TESTING)
   )
 
   add_test(
+    NAME GoALLCStatepoints.OpenDeferIncompleteFails
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
+      --llc "${GOALLC_LLC_EXECUTABLE}"
+      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
+      --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer-incomplete.ll"
+      --contains
+        "GoALLC open-coded defer function is missing frame state metadata"
+  )
+
+  add_test(
     NAME GoALLCStatepoints.FunctionMarkerInline
     COMMAND
       "${Python3_EXECUTABLE}"

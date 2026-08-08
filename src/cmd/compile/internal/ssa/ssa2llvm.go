@@ -71,7 +71,6 @@ const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
 const goDeferResultMD = "goallc.defer_result"
 const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
-const goOpenCodedDeferAttr = "go-open-coded-defer"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolNameMD = "goobj.symbol.name"
 const llvmFramePointerAttr = "frame-pointer"
@@ -2526,7 +2525,6 @@ func LLVMCompile(f *Func) {
 			// Store index+1 so map lookup also distinguishes slot zero from absence.
 			FCtxt.OpenDeferSlots[llvmLocalKeyForName(slot)] = i + 1
 		}
-		FCtxt.LF.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goOpenCodedDeferAttr, ""))
 	}
 	setGoObjFunctionFlags(FCtxt.LF, f.OwnAux.Fn)
 	setGoObjFunctionInfo(FCtxt.LF, f.OwnAux.Fn)

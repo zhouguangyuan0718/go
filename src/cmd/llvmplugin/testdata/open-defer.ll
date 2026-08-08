@@ -19,7 +19,7 @@ entry:
   ret ptr %result
 }
 
-attributes #0 = { "go-open-coded-defer" "go-stack-growth-statepoint" }
+attributes #0 = { "go-stack-growth-statepoint" }
 
 !0 = !{}
 !1 = !{i32 2}
