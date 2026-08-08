@@ -476,16 +476,18 @@ if(BUILD_TESTING)
   )
 
   add_test(
-    NAME GoALLCStatepoints.AggregateFixedVectorFails
+    NAME GoALLCStatepoints.AggregateFixedVectorRewrite
     COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-vector-unsupported.ll"
-      --contains
-      "do not support vectors inside live pointer aggregates"
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-fixed-vector.ll"
+  )
+  set_tests_properties(GoALLCStatepoints.AggregateFixedVectorRewrite PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "call coldcc <2 x ptr> @llvm\\.experimental\\.gc\\.relocate\\.v2p0"
   )
 
   add_test(
@@ -498,7 +500,7 @@ if(BUILD_TESTING)
       --input
         "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-scalable-vector-unsupported.ll"
       --contains
-      "do not support vectors inside live pointer aggregates"
+      "do not support scalable vectors inside live pointer aggregates"
   )
 
   set(GOALLC_ALLOCA_POINTER_ROOTS_EXTRA_ARGS)

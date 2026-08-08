@@ -56,15 +56,23 @@ def main():
         fail("rewritten IR has no gc-live bundle")
     for line in live_lines:
         bundle = line.split('"gc-live"', 1)[1]
-        if any(marker in bundle for marker in ("{", "[", "<")):
+        if any(marker in bundle for marker in ("{", "[", "<vscale")):
             fail(f"aggregate survived in gc-live: {line.strip()}")
-        if not re.search(r'"gc-live"\(ptr ', line):
-            fail(f"gc-live contains a non-scalar-pointer operand: {line.strip()}")
+        if not re.search(r'"gc-live"\((?:ptr|<\d+ x ptr>) ', line):
+            fail(f"gc-live contains a non-relocatable operand: {line.strip()}")
 
     required = {
         "two-pointer aggregate leaves":
             r'gc-live"\(ptr %value\.leaf\.1, ptr %value\.leaf\.2\)',
         "nested array leaf extraction": r"extractvalue %nested %value, 1, 1, 0",
+        "whole fixed pointer vector root":
+            r'"gc-live"\(<2 x ptr> %value\)',
+        "whole fixed pointer vector relocation":
+            r"call coldcc <2 x ptr> @llvm\.experimental\.gc\.relocate\.v2p0",
+        "nested fixed pointer vector extraction":
+            r"%value\.leaf\.0 = extractvalue %vector_pair %value, 0",
+        "nested fixed pointer vector reconstruction":
+            r"insertvalue %vector_pair .*<2 x ptr> %value\.leaf\.0\.relocated, 0",
         "relocated leaf reconstruction":
             r"insertvalue %pair .*%value\.leaf\.0\.relocated",
         "aggregate phi scalarization": r"%value\.leaf\.0 = extractvalue %pair %value, 0",

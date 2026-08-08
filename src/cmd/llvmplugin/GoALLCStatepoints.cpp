@@ -124,7 +124,7 @@ struct OpenDeferInfo {
 
 enum class LivenessKind {
   PointerAggregates,
-  ScalarPointers,
+  RelocatablePointers,
   AllocaAddresses,
 };
 
@@ -142,6 +142,13 @@ bool containsPointer(Type *Ty) {
   if (auto *VT = dyn_cast<VectorType>(Ty))
     return containsPointer(VT->getElementType());
   return false;
+}
+
+bool isRelocatablePointerType(Type *Ty) {
+  if (Ty->isPointerTy())
+    return true;
+  auto *VT = dyn_cast<FixedVectorType>(Ty);
+  return VT && VT->getElementType()->isPointerTy();
 }
 
 const AllocaInst *rematerializableAllocaBase(const Value *V) {
@@ -278,9 +285,9 @@ bool isTrackedValue(const Value *V, LivenessKind Kind) {
   Type *Ty = V->getType();
   switch (Kind) {
   case LivenessKind::PointerAggregates:
-    return !Ty->isPointerTy() && containsPointer(Ty);
-  case LivenessKind::ScalarPointers:
-    return Ty->isPointerTy() && !isStaticAllocaAddress(V);
+    return !isRelocatablePointerType(Ty) && containsPointer(Ty);
+  case LivenessKind::RelocatablePointers:
+    return isRelocatablePointerType(Ty) && !isStaticAllocaAddress(V);
   case LivenessKind::AllocaAddresses:
     // Direct memory operations retain their FrameIndex identity through
     // SelectionDAG and must not enter relocation SSA. Under register pressure,
@@ -427,11 +434,15 @@ Error enumerateAggregateLeaves(Type *Ty, SmallVectorImpl<unsigned> &Path,
     }
     return Error::success();
   }
+  if (isa<FixedVectorType>(Ty)) {
+    Leaves.push_back({SmallVector<unsigned, 4>(ArrayRef<unsigned>(Path))});
+    return Error::success();
+  }
   if (Ty->isVectorTy())
-    return createStringError(
-        std::errc::not_supported,
-        "GoALLC statepoints do not support vectors inside live pointer "
-        "aggregates");
+    return createStringError(std::errc::not_supported,
+                             "GoALLC statepoints do not support scalable "
+                             "vectors inside live pointer "
+                             "aggregates");
   if (!Ty->isIntegerTy() && !Ty->isFloatingPointTy() && !Ty->isPointerTy())
     return createStringError(
         std::errc::not_supported,
@@ -1126,7 +1137,7 @@ Error validateSafepoint(const SafepointRecord &Record) {
     }
   }
   for (Value *V : Record.Live) {
-    if (!V->getType()->isPointerTy())
+    if (!isRelocatablePointerType(V->getType()))
       return createStringError(
           std::errc::not_supported,
           "GoALLC statepoints do not yet support live pointer aggregates");
@@ -1424,7 +1435,7 @@ Error rewriteFunction(Function &F) {
   if (Error Err = scalarizeLivePointerAggregates(F))
     return Err;
 
-  LivenessData Data = computeLiveness(F, LivenessKind::ScalarPointers);
+  LivenessData Data = computeLiveness(F, LivenessKind::RelocatablePointers);
   LivenessData AddressData = computeLiveness(F, LivenessKind::AllocaAddresses);
   SmallVector<SafepointRecord, 8> Records;
   uint64_t CallOrdinal = 0;
@@ -1440,7 +1451,7 @@ Error rewriteFunction(Function &F) {
           "GoALLC statepoints do not yet support invoke or callbr");
     Records.push_back(
         {OrdinaryCall, stableStatepointID(F.getName(), CallOrdinal++),
-         liveAtCall(*OrdinaryCall, Data, LivenessKind::ScalarPointers),
+         liveAtCall(*OrdinaryCall, Data, LivenessKind::RelocatablePointers),
          liveAtCall(*OrdinaryCall, AddressData,
                     LivenessKind::AllocaAddresses)});
   }
