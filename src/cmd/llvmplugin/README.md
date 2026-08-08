@@ -40,22 +40,21 @@ Raw static `alloca` values are native frame identities, not Go heap pointers.
 Pointer-containing allocas are explicit `gc-live` values while their storage
 is active so the adjacent alloca ptrmap describes their contents. Direct
 loads, stores, lifetime markers, and address derivations retain that identity.
-An observable use of the alloca address itself is first split onto a zero-offset
-GEP. When that or another GEP/cast-derived stack address is live across a call,
-only its base alloca enters `gc-live`; after `gc.relocate`, the pass rebuilds
-the derived address in IR and relocation SSA routes later uses to it. Go
-SelectionDAG lowering recomputes the relocated alloca from its current
-FrameIndex after the statepoint without a spill/reload. PHI/select values which
-cannot be rebuilt from one alloca remain ordinary scalar roots. Pointer values
-loaded from the allocation remain ordinary tracked roots.
+An observable use of the alloca address itself is rebuilt immediately before
+that first-class use. Direct loads and stores keep their original derived
+address and SelectionDAG lowers it from the current FrameIndex; putting such an
+address through whole-function relocation SSA could spill a cached pre-growth
+stack address into an ordinary non-root slot. PHI/select values which cannot be
+rebuilt from one alloca remain ordinary scalar roots. Pointer values loaded
+from the allocation remain ordinary tracked roots.
 
 The current SSA value and CFG rewrite support matrix is:
 
 | Value or control-flow shape | Status | Current contract |
 | --- | --- | --- |
 | Pointer arguments | AArch64 GoObj qualified; SelectionDAG home reuse also tested on X86 | Values live after a call use caller statepoints; exact stack inputs stay in their fixed ABI homes, while register inputs and transformed values use normal statepoint spills. Call-only arguments are described by the callee's type-derived entry map. |
-| Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. Observable direct uses are split onto a zero-offset GEP; GEP/cast chains are rebuilt from the alloca relocate. Direct memory uses stay on the FrameIndex, and pointers loaded from memory remain tracked. |
-| `select`, GEP, and pointer casts | Supported | Fixed-allocation GEP/no-op cast chains use base-allocation relocation and IR rematerialization. Merged or non-stack pointer values remain ordinary scalar roots. |
+| Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. First-class GEP/cast uses are rebuilt immediately at the use; direct memory uses stay on the FrameIndex and never enter relocation SSA. Pointers loaded from memory remain tracked. |
+| `select`, GEP, and pointer casts | Supported | Fixed-allocation GEP/no-op cast chains stay as direct FrameIndex uses or are rebuilt immediately at first-class uses. Merged or non-stack pointer values remain ordinary scalar roots. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
