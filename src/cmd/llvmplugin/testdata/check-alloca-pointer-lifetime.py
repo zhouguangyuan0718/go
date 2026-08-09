@@ -169,6 +169,16 @@ def main():
     if loop_body.count("call void @llvm.memset.inline") != 1:
         fail("loop alloca is not zeroed after its lifetime start")
 
+    preinitialized_body = function_body(ir, "preinitialized_pointer_alloca")
+    if preinitialized_body.count("call void @llvm.lifetime.start") != 1:
+        fail("preinitialized alloca lost its source lifetime start")
+    if preinitialized_body.count("call void @llvm.memset.inline") != 1:
+        fail("preinitialized alloca received a duplicate GC zero")
+    source_zero = preinitialized_body.find("call void @llvm.memset.inline")
+    safepoint = preinitialized_body.find("@llvm.experimental.gc.statepoint")
+    if source_zero < 0 or safepoint < 0 or source_zero > safepoint:
+        fail("preinitialized alloca zero does not precede its safepoint")
+
     phi_body = function_body(ir, "phi_edge_pointer_alloca")
     if phi_body.count("@llvm.experimental.gc.statepoint") != 1:
         fail("PHI-edge lifetime function does not contain one statepoint")

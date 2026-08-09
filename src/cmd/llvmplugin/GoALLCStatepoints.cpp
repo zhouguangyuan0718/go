@@ -1004,15 +1004,42 @@ void protectStackObjectsFromColoring(
 // Re-establish the Go zero-value invariant after the ordinary optimization
 // pipeline. LLVM can remove source-level zero stores when no LLVM load
 // observes them, but Go's stack scanner independently observes every pointer
-// word selected by a callsite bitmap. Zero each pointer-containing alloca at
-// the start of every source lifetime; marker-free allocas conservatively start
-// at function entry. Fixed-size memset.inline cannot fall back to a hosted
-// libcall during GoObj lowering.
+// word selected by a callsite bitmap. Ensure each pointer-containing alloca is
+// zero at the start of every source lifetime; marker-free allocas
+// conservatively start at function entry. Existing complete zeros and the
+// frontend's volatile defer initialization remain authoritative. Fixed-size
+// memset.inline cannot fall back to a hosted libcall during GoObj lowering.
+bool hasFullZeroBeforeSafepoint(Instruction *Begin,
+                                const PointerAllocaRecord &Record,
+                                const DataLayout &DL) {
+  for (Instruction *I = Begin; I; I = I->getNextNode()) {
+    if (auto *Set = dyn_cast<MemSetInst>(I)) {
+      auto *ByteValue = dyn_cast<ConstantInt>(Set->getValue());
+      auto *Length = dyn_cast<ConstantInt>(Set->getLength());
+      int64_t Offset = 0;
+      Value *Base =
+          GetPointerBaseWithConstantOffset(Set->getDest(), Offset, DL);
+      if (ByteValue && ByteValue->isZero() && Length &&
+          Length->getValue() == Record.ByteSize &&
+          Base == Record.Alloca && Offset == 0)
+        return true;
+    }
+    if (auto *Call = dyn_cast<CallBase>(I); Call && !isLeafCall(*Call))
+      return false;
+  }
+  return false;
+}
+
 void initializePointerAllocasForGC(
     MutableArrayRef<PointerAllocaRecord> PointerAllocas,
     const SmallPtrSetImpl<AllocaInst *> &WholeLifetimeAllocas) {
+  if (PointerAllocas.empty())
+    return;
+  const DataLayout &DL =
+      PointerAllocas.front().Alloca->getFunction()->getDataLayout();
   for (PointerAllocaRecord &Record : PointerAllocas) {
-    if (WholeLifetimeAllocas.contains(Record.Alloca))
+    if (WholeLifetimeAllocas.contains(Record.Alloca) || Record.DeferResult ||
+        Record.OpenDeferSlot)
       continue;
 
     SmallVector<IntrinsicInst *, 4> LifetimeStarts;
@@ -1028,11 +1055,15 @@ void initializePointerAllocasForGC(
                                  Builder.getInt64(Record.ByteSize));
     };
     if (LifetimeStarts.empty()) {
-      InitializeAt(Record.Alloca->getNextNode());
+      Instruction *Begin = Record.Alloca->getNextNode();
+      if (!hasFullZeroBeforeSafepoint(Begin, Record, DL))
+        InitializeAt(Begin);
       continue;
     }
     for (IntrinsicInst *Start : LifetimeStarts)
-      InitializeAt(Start->getNextNode());
+      if (Instruction *Begin = Start->getNextNode();
+          !hasFullZeroBeforeSafepoint(Begin, Record, DL))
+        InitializeAt(Begin);
   }
 }
 

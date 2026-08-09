@@ -2,6 +2,7 @@ target triple = "x86_64-unknown-linux-goobj"
 
 declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture)
 declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture)
+declare void @llvm.memset.inline.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
 declare void @llvm.fake.use(...)
 declare goabiinternal void @safepoint()
 declare goabiinternal void @observe(ptr)
@@ -44,6 +45,16 @@ loop:
 
 exit:
   call goabiinternal void @safepoint()
+  ret void
+}
+
+define goabiinternal void @preinitialized_pointer_alloca() "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca [2 x ptr], align 8
+  call void @llvm.lifetime.start.p0(i64 16, ptr %slot)
+  call void @llvm.memset.inline.p0.i64(ptr align 8 %slot, i8 0, i64 16, i1 false)
+  call goabiinternal void @safepoint()
+  call void (...) @llvm.fake.use(ptr %slot)
   ret void
 }
 

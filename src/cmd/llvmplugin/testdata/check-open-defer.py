@@ -170,6 +170,8 @@ def main():
             fail(f"open-defer frame record is malformed: {bundle}")
     if len(re.findall(r'"gc-live"\([^)]*ptr %slots', body)) != 2:
         fail("the open-defer slots array is not live at both statepoints")
+    if "llvm.memset.inline" in body:
+        fail("open-defer slots received a duplicate nonvolatile zero")
     if "goallc.open_defer" in body:
         fail("frontend open-defer alloca metadata was not consumed")
     print("open-defer bits and two closure slots are carried at both calls")
