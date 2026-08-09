@@ -23,12 +23,12 @@ define goabiinternal ptr @defer_result(ptr %pointer) #0 gc "goallc" {
 entry:
   %result = alloca ptr, align 8, !goallc.defer_result !1
   call void @llvm.lifetime.start.p0(ptr %result)
-  store ptr null, ptr %result, align 8
+  store volatile ptr null, ptr %result, align 8
   call goabiinternal void @runtime.deferproc()
   callbr void @llvm.go.defer.edge() to label %panic [label %recover]
 
 panic:
-  store ptr %pointer, ptr %result, align 8
+  store volatile ptr %pointer, ptr %result, align 8
   call goabiinternal void @runtime.panicmem()
   unreachable
 

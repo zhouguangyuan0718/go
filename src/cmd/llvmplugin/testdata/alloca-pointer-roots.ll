@@ -2,6 +2,7 @@ target triple = "x86_64-unknown-linux-goobj"
 
 %nested = type { ptr, i64, [2 x { i32, ptr }] }
 %pointer_field = type { i64, ptr }
+%two_pointers = type { ptr, ptr }
 %high_bitmap = type { [63 x i64], ptr }
 
 declare goabiinternal void @safepoint()
@@ -9,6 +10,7 @@ declare goabiinternal void @mutate_pointer_slot(ptr)
 declare goabiinternal void @mutate_nocapture(ptr captures(none))
 declare goabiinternal void @escape_pointer_slot(ptr)
 declare goabiinternal void @unknown_writing()
+declare goabiinternal ptr @make_pointer()
 declare goabiinternal void @observe_stack_address(ptr)
 declare goabiinternal i64 @readonly_pointer_slot(ptr readonly) memory(read)
 declare goabiinternal i64 @readnone_callee() memory(none)
@@ -64,6 +66,24 @@ entry:
   call goabiinternal void @safepoint()
   call goabiinternal void @safepoint()
   %result = load ptr, ptr %slot, align 8
+  ret ptr %result
+}
+
+define goabiinternal ptr @alloca_partial_initialization()
+    "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  ; Each field is initialized from a different safepointing call. The plugin
+  ; must zero the whole object before the first call so the complete bitmap is
+  ; safe both before initialization and while only the first field is set.
+  %slot = alloca %two_pointers, align 8
+  call void @llvm.lifetime.start.p0(i64 16, ptr %slot)
+  %first = call goabiinternal ptr @make_pointer()
+  %first.field = getelementptr inbounds %two_pointers, ptr %slot, i32 0, i32 0
+  store ptr %first, ptr %first.field, align 8
+  %second = call goabiinternal ptr @make_pointer()
+  %second.field = getelementptr inbounds %two_pointers, ptr %slot, i32 0, i32 1
+  store ptr %second, ptr %second.field, align 8
+  %result = load ptr, ptr %first.field, align 8
   ret ptr %result
 }
 

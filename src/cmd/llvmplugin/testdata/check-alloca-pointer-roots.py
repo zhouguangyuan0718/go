@@ -148,11 +148,11 @@ def record(base, size, bits, words):
 
 def check_rewritten_ir(ir):
     statepoints = re.findall(r"@llvm\.experimental\.gc\.statepoint", ir)
-    # Thirty-two calls plus the intrinsic declaration.
-    if len(statepoints) != 33:
-        fail(f"found {len(statepoints) - 1} statepoints, want 32")
-    if len(re.findall(r'"deopt"\(', ir)) != 29:
-        fail("pointer allocas do not have twenty-nine deopt records")
+    # Thirty-four calls plus the intrinsic declaration.
+    if len(statepoints) != 35:
+        fail(f"found {len(statepoints) - 1} statepoints, want 34")
+    if len(re.findall(r'"deopt"\(', ir)) != 31:
+        fail("pointer allocas do not have thirty-one deopt records")
     if "llvm.statepoint.fixed_stack_home" in ir:
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
@@ -160,14 +160,38 @@ def check_rewritten_ir(ir):
         fail("ordinary StackObject received plugin entry initialization")
 
     one = [record("slot", 8, 1, [1])]
-    expect_records(ir, "pointer_slot", [one], [["i64 7"]])
-    expect_records(
+    pointer_slot = expect_records(ir, "pointer_slot", [one], [["i64 7"]])
+    nested = expect_records(
         ir,
         "nested_whole_aggregate",
         [[record("slot", 48, 6, [0x29])]],
     )
+    if "llvm.memset.inline" in pointer_slot:
+        fail("complete scalar pointer store received a duplicate GC zero")
+    if "llvm.memset.inline" in nested:
+        fail("complete aggregate pointer store received a duplicate GC zero")
     expect_records(ir, "alloca_call_skip", [one])
-    expect_records(ir, "alloca_multiple_calls", [one, one])
+    multiple_calls = expect_records(ir, "alloca_multiple_calls", [one, one])
+    if "llvm.memset.inline" in multiple_calls:
+        fail("pointer store before multiple calls received a duplicate GC zero")
+    aggregate_home = function_body(
+        ir, "argument_aggregate_home_address_across_calls"
+    )
+    if "llvm.memset.inline" in aggregate_home:
+        fail("aggregate argument store received a duplicate GC zero")
+    partial = expect_records(
+        ir,
+        "alloca_partial_initialization",
+        [[record("slot", 16, 2, [0x3])]] * 2,
+    )
+    lifetime_start = partial.find("call void @llvm.lifetime.start")
+    entry_zero = partial.find("call void @llvm.memset.inline")
+    first_call = partial.find("@llvm.experimental.gc.statepoint")
+    if (
+        min(lifetime_start, entry_zero, first_call) < 0
+        or not lifetime_start < entry_zero < first_call
+    ):
+        fail("partially initialized alloca was not zeroed after lifetime start")
     expect_records(ir, "alloca_loop", [one])
     direct_gep = expect_records(
         ir,
@@ -280,12 +304,12 @@ def check_rewritten_ir(ir):
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir
     )
-    # Twenty-four active pointer-containing alloca roots retain their storage
+    # Twenty-six active pointer-containing alloca roots retain their storage
     # identity and two ordinary scalar roots are relocated separately.
     # Pointer-free and derived stack addresses are rebuilt at their uses, so
     # they need neither an alloca relocate nor their own ptrmap root.
-    if len(relocates) != 26:
-        fail(f"found {len(relocates)} relocates, want 26")
+    if len(relocates) != 28:
+        fail(f"found {len(relocates)} relocates, want 28")
     marker_free = function_body(ir, "alloca_marker_free_at_safepoint")
     if '"gc-live"(ptr %pointer' not in marker_free:
         fail("ordinary scalar SSA pointer is missing from gc-live")
@@ -492,13 +516,13 @@ def main():
             ]
         )
         statepoint_lines = re.findall(r"(?m)^.*STATEPOINT.*$", machine_ir)
-        if len(statepoint_lines) != 32:
-            fail(f"MIR has {len(statepoint_lines)} statepoints, want 32")
+        if len(statepoint_lines) != 34:
+            fail(f"MIR has {len(statepoint_lines)} statepoints, want 34")
         alloca_statepoints = [
             line for line in statepoint_lines if str(BEGIN) in line
         ]
-        if len(alloca_statepoints) != 29:
-            fail("MIR does not contain twenty-nine alloca statepoints")
+        if len(alloca_statepoints) != 31:
+            fail("MIR does not contain thirty-one alloca statepoints")
         for statepoint in alloca_statepoints:
             if str(ALLOCA_TAG) not in statepoint or not re.search(
                 r"%(?:fixed-)?stack\.[0-9]+", statepoint
