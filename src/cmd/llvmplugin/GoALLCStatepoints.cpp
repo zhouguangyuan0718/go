@@ -85,6 +85,7 @@ struct SafepointRecord {
   uint64_t ID;
   ValueSet Live;
   ValueSet AllocaAddresses;
+  ValueSet DerivedPointers;
   CallInst *Statepoint = nullptr;
   CallInst *Result = nullptr;
   SmallVector<CallInst *, 8> Relocates;
@@ -126,6 +127,7 @@ enum class LivenessKind {
   PointerAggregates,
   RelocatablePointers,
   AllocaAddresses,
+  DerivedPointers,
 };
 
 bool isGoCallingConv(CallingConv::ID CC) {
@@ -182,6 +184,42 @@ bool isStaticAllocaAddress(const Value *V) {
   return rematerializableAllocaBase(V) != nullptr;
 }
 
+const Value *rematerializableDerivedBase(const Value *V) {
+  if (!isRelocatablePointerType(V->getType()) || isStaticAllocaAddress(V))
+    return nullptr;
+
+  bool HasDerivedOperation = false;
+  while (true) {
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+      V = GEP->getPointerOperand();
+      HasDerivedOperation = true;
+      continue;
+    }
+    if (const auto *Cast = dyn_cast<CastInst>(V);
+        Cast && isRelocatablePointerType(Cast->getSrcTy()) &&
+        isRelocatablePointerType(Cast->getDestTy()) &&
+        Cast->isNoopCast(Cast->getDataLayout())) {
+      V = Cast->getOperand(0);
+      HasDerivedOperation = true;
+      continue;
+    }
+    break;
+  }
+
+  // Constants cannot be relocated. Leave addresses rooted at them on the
+  // ordinary pointer path until their provenance has an explicit
+  // representation.
+  if (!HasDerivedOperation || isa<Constant>(V) || isa<AllocaInst>(V) ||
+      !isRelocatablePointerType(V->getType()))
+    return nullptr;
+  return V;
+}
+
+Value *rematerializableDerivedBase(Value *V) {
+  return const_cast<Value *>(
+      rematerializableDerivedBase(static_cast<const Value *>(V)));
+}
+
 bool isDirectFrameAddressUse(const Use &U) {
   auto *I = dyn_cast<Instruction>(U.getUser());
   if (!I)
@@ -205,8 +243,8 @@ bool isDirectFrameAddressUse(const Use &U) {
   return false;
 }
 
-Value *rematerializeAllocaAddress(Value *Address, Value *RelocatedBase,
-                                  Instruction *InsertBefore);
+Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
+                            Instruction *InsertBefore);
 
 Error canonicalizeDirectAllocaAddresses(
     Function &F, DominatorTree &DT,
@@ -269,7 +307,7 @@ Error canonicalizeDirectAllocaAddresses(
                                 : "alloca.address");
         } else {
           UseAddress =
-              rematerializeAllocaAddress(Address, Alloca, InsertBefore);
+              rematerializeAddress(Address, Alloca, Alloca, InsertBefore);
         }
         UseAddresses[InsertBefore] = UseAddress;
       }
@@ -287,7 +325,8 @@ bool isTrackedValue(const Value *V, LivenessKind Kind) {
   case LivenessKind::PointerAggregates:
     return !isRelocatablePointerType(Ty) && containsPointer(Ty);
   case LivenessKind::RelocatablePointers:
-    return isRelocatablePointerType(Ty) && !isStaticAllocaAddress(V);
+    return isRelocatablePointerType(Ty) && !isStaticAllocaAddress(V) &&
+           !rematerializableDerivedBase(V);
   case LivenessKind::AllocaAddresses:
     // Direct memory operations retain their FrameIndex identity through
     // SelectionDAG and must not enter relocation SSA. Under register pressure,
@@ -297,8 +336,11 @@ bool isTrackedValue(const Value *V, LivenessKind Kind) {
     // use point, so only those local values need address liveness here.
     return Ty->isPointerTy() && !isa<AllocaInst>(V) &&
            isStaticAllocaAddress(V) &&
-           llvm::any_of(V->uses(),
-                        [](const Use &U) { return !isDirectFrameAddressUse(U); });
+           llvm::any_of(V->uses(), [](const Use &U) {
+             return !isDirectFrameAddressUse(U);
+           });
+  case LivenessKind::DerivedPointers:
+    return rematerializableDerivedBase(V) != nullptr;
   }
   llvm_unreachable("unknown GoALLC liveness kind");
 }
@@ -1270,14 +1312,14 @@ void eraseOriginalCalls(ArrayRef<SafepointRecord> Records) {
   }
 }
 
-Value *rematerializeAllocaAddress(Value *Address, Value *RelocatedBase,
-                                  Instruction *InsertBefore) {
+Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
+                            Instruction *InsertBefore) {
   SmallVector<Instruction *, 4> Chain;
   Value *Current = Address;
-  while (!isa<AllocaInst>(Current)) {
+  while (Current != Base) {
     auto *I = cast<Instruction>(Current);
     assert((isa<GetElementPtrInst>(I) || isa<CastInst>(I)) &&
-           "unexpected rematerializable alloca address");
+           "unexpected rematerializable address");
     Chain.push_back(I);
     Current = isa<GetElementPtrInst>(I)
                   ? cast<GetElementPtrInst>(I)->getPointerOperand()
@@ -1289,8 +1331,7 @@ Value *rematerializeAllocaAddress(Value *Address, Value *RelocatedBase,
   for (Instruction *I : llvm::reverse(Chain)) {
     auto *Clone = I->clone();
     Clone->replaceUsesOfWith(OldOperand, NewOperand);
-    Clone->setName(I->hasName() ? I->getName() + ".remat"
-                                : "alloca.address.remat");
+    Clone->setName(I->hasName() ? I->getName() + ".remat" : "address.remat");
     Clone->insertBefore(InsertBefore->getIterator());
     OldOperand = I;
     NewOperand = Clone;
@@ -1322,7 +1363,18 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
       assert(Relocate != Record.Relocates.end() &&
              "alloca address is missing its base relocate");
       Value *Rematerialized =
-          rematerializeAllocaAddress(Address, *Relocate, InsertBefore);
+          rematerializeAddress(Address, Base, *Relocate, InsertBefore);
+      Definitions[Address].push_back(Rematerialized);
+    }
+    for (Value *Address : Record.DerivedPointers) {
+      Value *Base = rematerializableDerivedBase(Address);
+      auto Relocate = llvm::find_if(Record.Relocates, [&](CallInst *Call) {
+        return cast<GCRelocateInst>(Call)->getDerivedPtr() == Base;
+      });
+      assert(Relocate != Record.Relocates.end() &&
+             "derived pointer is missing its base relocate");
+      Value *Rematerialized =
+          rematerializeAddress(Address, Base, *Relocate, InsertBefore);
       Definitions[Address].push_back(Rematerialized);
     }
   }
@@ -1437,6 +1489,7 @@ Error rewriteFunction(Function &F) {
 
   LivenessData Data = computeLiveness(F, LivenessKind::RelocatablePointers);
   LivenessData AddressData = computeLiveness(F, LivenessKind::AllocaAddresses);
+  LivenessData DerivedData = computeLiveness(F, LivenessKind::DerivedPointers);
   SmallVector<SafepointRecord, 8> Records;
   uint64_t CallOrdinal = 0;
 
@@ -1452,9 +1505,17 @@ Error rewriteFunction(Function &F) {
     Records.push_back(
         {OrdinaryCall, stableStatepointID(F.getName(), CallOrdinal++),
          liveAtCall(*OrdinaryCall, Data, LivenessKind::RelocatablePointers),
-         liveAtCall(*OrdinaryCall, AddressData,
-                    LivenessKind::AllocaAddresses)});
+         liveAtCall(*OrdinaryCall, AddressData, LivenessKind::AllocaAddresses),
+         liveAtCall(*OrdinaryCall, DerivedData,
+                    LivenessKind::DerivedPointers)});
   }
+  for (SafepointRecord &Record : Records)
+    for (Value *Address : Record.DerivedPointers) {
+      // A hoisted GEP from null can be a small non-Go pointer. Keep only its
+      // relocatable base in Go's stack map; repairRelocationSSA reconstructs
+      // the exact address expression after the statepoint.
+      Record.Live.insert(rematerializableDerivedBase(Address));
+    }
   for (const SafepointRecord &Record : Records)
     if (Error Err = validateSafepoint(Record))
       return Err;
