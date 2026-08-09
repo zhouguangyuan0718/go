@@ -16,7 +16,7 @@ concurrency:
 
 env:
   LLVM_RELEASE: goallc-llvm23.1.0-v6
-  LLVM_REVISION: 4ee8cef4139d7726017759b8f11b4e7ceaaacce9
+  LLVM_REVISION: 55ecc0838b8f49e04d9c68874cf83d6f7153e2a3
 
 jobs:
   linux:
