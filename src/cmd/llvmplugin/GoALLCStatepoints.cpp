@@ -1001,6 +1001,41 @@ void protectStackObjectsFromColoring(
   }
 }
 
+// Re-establish the Go zero-value invariant after the ordinary optimization
+// pipeline. LLVM can remove source-level zero stores when no LLVM load
+// observes them, but Go's stack scanner independently observes every pointer
+// word selected by a callsite bitmap. Zero each pointer-containing alloca at
+// the start of every source lifetime; marker-free allocas conservatively start
+// at function entry. Fixed-size memset.inline cannot fall back to a hosted
+// libcall during GoObj lowering.
+void initializePointerAllocasForGC(
+    MutableArrayRef<PointerAllocaRecord> PointerAllocas,
+    const SmallPtrSetImpl<AllocaInst *> &WholeLifetimeAllocas) {
+  for (PointerAllocaRecord &Record : PointerAllocas) {
+    if (WholeLifetimeAllocas.contains(Record.Alloca))
+      continue;
+
+    SmallVector<IntrinsicInst *, 4> LifetimeStarts;
+    for (IntrinsicInst *Marker : Record.LifetimeMarkers)
+      if (Marker->getIntrinsicID() == Intrinsic::lifetime_start)
+        LifetimeStarts.push_back(Marker);
+
+    auto InitializeAt = [&](Instruction *InsertBefore) {
+      IRBuilder<> Builder(InsertBefore);
+      Builder.SetCurrentDebugLocation(InsertBefore->getDebugLoc());
+      Builder.CreateMemSetInline(Record.Alloca, Record.Alloca->getAlign(),
+                                 Builder.getInt8(0),
+                                 Builder.getInt64(Record.ByteSize));
+    };
+    if (LifetimeStarts.empty()) {
+      InitializeAt(Record.Alloca->getNextNode());
+      continue;
+    }
+    for (IntrinsicInst *Start : LifetimeStarts)
+      InitializeAt(Start->getNextNode());
+  }
+}
+
 Error promoteAllocasToWholeFunctionLifetime(
     Function &F, const SmallPtrSetImpl<AllocaInst *> &WholeLifetimeAllocas) {
   if (WholeLifetimeAllocas.empty())
@@ -1553,6 +1588,7 @@ Error rewriteFunction(Function &F) {
       Record.AllocaAddresses.remove(Address);
   }
   protectStackObjectsFromColoring(PointerAllocas);
+  initializePointerAllocasForGC(PointerAllocas, WholeLifetimeAllocas);
   if (Error Err =
           promoteAllocasToWholeFunctionLifetime(F, WholeLifetimeAllocas))
     return Err;

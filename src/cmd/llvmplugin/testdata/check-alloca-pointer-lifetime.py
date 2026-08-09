@@ -120,6 +120,8 @@ def main():
         fail("direct-only initialization is not inside its active region")
     if locals_body.count("call void @llvm.lifetime.start") != 1:
         fail("direct-only lifetime start was not preserved")
+    if locals_body.count("call void @llvm.memset.inline") != 1:
+        fail("direct-only alloca is not zeroed after its lifetime start")
     if locals_body.count('"gc-live"(ptr %slot)') != 1 or locals_body.count(
         "%slot.relocated"
     ) != 1:
@@ -136,6 +138,8 @@ def main():
         fail("stack object is not present at every statepoint")
     if stack_body.count("call void @llvm.lifetime.start") != 1:
         fail("stack-object lifetime start was not preserved")
+    if stack_body.count("call void @llvm.memset.inline") != 1:
+        fail("stack object is not zeroed after its lifetime start")
     if '"gc-live"(ptr %slot)' in stack_body or "%slot.relocated" in stack_body:
         fail("call-only stack-object address entered caller live-out")
     if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in stack_body:
@@ -143,11 +147,12 @@ def main():
     source_initialize = stack_body.find("store ptr null")
     first_call = stack_body.find("@llvm.experimental.gc.statepoint")
     lifetime_start = stack_body.find("call void @llvm.lifetime.start")
-    if min(first_call, lifetime_start, source_initialize) < 0:
+    entry_initialize = stack_body.find("call void @llvm.memset.inline")
+    if min(first_call, lifetime_start, entry_initialize, source_initialize) < 0:
         fail("stack object initialization sequence is incomplete")
     if stack_body.count("store ptr null") != 1:
         fail("ordinary stack object was unnecessarily initialized at entry")
-    if not first_call < lifetime_start < source_initialize:
+    if not first_call < lifetime_start < entry_initialize < source_initialize:
         fail("stack object source initialization is misordered")
 
     loop_body = function_body(ir, "loop_reinitialized_pointer_alloca")
@@ -161,6 +166,8 @@ def main():
         fail("loop alloca is not one explicit active root")
     if loop_body.count("call void @llvm.lifetime.start") != 1:
         fail("loop lifetime start was not preserved")
+    if loop_body.count("call void @llvm.memset.inline") != 1:
+        fail("loop alloca is not zeroed after its lifetime start")
 
     phi_body = function_body(ir, "phi_edge_pointer_alloca")
     if phi_body.count("@llvm.experimental.gc.statepoint") != 1:
