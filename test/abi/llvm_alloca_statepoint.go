@@ -15,6 +15,8 @@ type pointerLocal struct {
 	tail   [2]*int
 }
 
+type pointerArray [2]*int
+
 var (
 	globalFirst  *int
 	globalSecond *int
@@ -31,6 +33,9 @@ func safepoint()
 //
 //go:noescape
 func mutateLocal(value *pointerLocal, branch bool)
+
+//go:noescape
+func mutatePointerArray(value *pointerArray)
 
 // localAcrossSafepoints deliberately takes the address of a pointer-containing
 // local. Its pointer leaves must remain rooted in that original stack object
@@ -56,4 +61,27 @@ func localAcrossSafepoints(branch bool, rounds int) uintptr {
 		}
 	}
 	return value.scalar
+}
+
+// parameterAcrossSafepoints takes the address of an ABIInternal aggregate
+// parameter. SelectionDAG must assign its canonical alloca to the real
+// argument home. The final call does not keep the direct alloca base live-out,
+// so the object also exercises the function-level argp-relative StackObject.
+//
+//go:noinline
+func parameterAcrossSafepoints(value pointerLocal) {
+	mutateLocal(&value, false)
+	safepoint()
+	mutateLocal(&value, true)
+}
+
+// stackParameterAcrossSafepoints exercises the same address identity for an
+// aggregate assigned wholly to the ABI stack. Its canonical alloca must reuse
+// the caller-populated incoming slot rather than copying into a local object.
+//
+//go:noinline
+func stackParameterAcrossSafepoints(value pointerArray) {
+	mutatePointerArray(&value)
+	safepoint()
+	mutatePointerArray(&value)
 }
