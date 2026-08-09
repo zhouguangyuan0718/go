@@ -533,6 +533,20 @@ if(BUILD_TESTING)
   )
 
   add_test(
+    NAME GoALLCStatepoints.AllocaPointerRootsAArch64
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-alloca-pointer-roots.py"
+      --llc "${GOALLC_LLC_EXECUTABLE}"
+      --opt "${GOALLC_OPT_EXECUTABLE}"
+      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
+      --mtriple aarch64-unknown-linux-goobj
+      --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+      ${GOALLC_ALLOCA_POINTER_ROOTS_EXTRA_ARGS}
+  )
+
+  add_test(
     NAME GoALLCStatepoints.MalformedAllocaPointerMapsFail
     COMMAND
       "${Python3_EXECUTABLE}"

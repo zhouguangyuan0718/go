@@ -83,6 +83,32 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 			t.Fatalf("input alloca IR does not match %q\n%s", pattern, inputFunction)
 		}
 	}
+	parameterInputFunction := llvmAllocaIRFunction(t, inputIR,
+		"p.parameterAcrossSafepoints")
+	for _, pattern := range []string{
+		`define goabiinternal void @p\.parameterAcrossSafepoints\(%p\.pointerLocal %value\)`,
+		`alloca %p\.pointerLocal, align 8`,
+		`call void @llvm\.lifetime\.start\.p0\(ptr %v[0-9]+\)`,
+		`store %p\.pointerLocal %value, ptr %v[0-9]+, align 8`,
+	} {
+		if !regexp.MustCompile(pattern).Match(parameterInputFunction) {
+			t.Fatalf("input parameter-home IR does not match %q\n%s",
+				pattern, parameterInputFunction)
+		}
+	}
+	stackParameterInputFunction := llvmAllocaIRFunction(t, inputIR,
+		"p.stackParameterAcrossSafepoints")
+	for _, pattern := range []string{
+		`define goabiinternal void @p\.stackParameterAcrossSafepoints\(\[2 x ptr\] %value\)`,
+		`alloca \[2 x ptr\], align 8`,
+		`call void @llvm\.lifetime\.start\.p0\(ptr %v[0-9]+\)`,
+		`store \[2 x ptr\] %value, ptr %v[0-9]+, align 8`,
+	} {
+		if !regexp.MustCompile(pattern).Match(stackParameterInputFunction) {
+			t.Fatalf("input stack-parameter-home IR does not match %q\n%s",
+				pattern, stackParameterInputFunction)
+		}
+	}
 
 	// LLVM compilation runs before native register allocation turns
 	// OpKeepAlive of a stack address into OpVarLive. Preserve the value in the
@@ -202,6 +228,38 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 			t.Fatalf("STATEPOINT does not carry the direct alloca frame base: %s", statepoint)
 		}
 	}
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"p.parameterAcrossSafepoints", 40},
+		{"p.stackParameterAcrossSafepoints", 16},
+	} {
+		parameterMachineFunction := llvmABIMachineFunction(t, machineIR, tc.name)
+		parameterHomes := regexp.MustCompile(`(?m)^\s+- \{ id: ([0-9]+), type: (?:default|spill-slot), offset: [0-9]+, size: `+strconv.Itoa(tc.size)+`, alignment: 8,`).
+			FindAllSubmatch(parameterMachineFunction, -1)
+		if len(parameterHomes) != 1 {
+			t.Fatalf("MIR %s fixed-home count=%d, want 1\n%s",
+				tc.name, len(parameterHomes), parameterMachineFunction)
+		}
+		if !bytes.Contains(parameterMachineFunction, []byte("stack:           []")) {
+			t.Fatalf("MIR %s retained a separate local parameter alloca\n%s",
+				tc.name, parameterMachineFunction)
+		}
+		parameterHome := []byte("%fixed-stack." + string(parameterHomes[0][1]))
+		parameterStatepoints := regexp.MustCompile(`(?m)^.*STATEPOINT.*$`).
+			FindAll(parameterMachineFunction, -1)
+		if got, want := len(parameterStatepoints), 3; got != want {
+			t.Fatalf("MIR %s STATEPOINT count=%d, want %d\n%s",
+				tc.name, got, want, parameterMachineFunction)
+		}
+		for _, statepoint := range parameterStatepoints {
+			if !bytes.Contains(statepoint, parameterHome) {
+				t.Fatalf("STATEPOINT does not reference %s fixed home %s: %s",
+					tc.name, parameterHome, statepoint)
+			}
+		}
+	}
 
 	goallcAssembly := runLLVMABICommand(t, nil, llc,
 		"-load-pass-plugin="+plugin, "-verify-machineinstrs",
@@ -233,6 +291,39 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 		t.Fatalf("GoALLC all-callsite-live object emitted StackObjects=%v", goallcStackObjects)
 	}
 
+	parameterCases := []struct {
+		name     string
+		size     int32
+		bits     []int
+		gcSymbol string
+	}{
+		{"p.parameterAcrossSafepoints", 40, []int{0, 2, 3, 4}, "runtime.gcbits.1d00000000000000"},
+		{"p.stackParameterAcrossSafepoints", 16, []int{0, 1}, "runtime.gcbits.0300000000000000"},
+	}
+	for _, tc := range parameterCases {
+		parameterSymbol := findLLVMABISymbol(t, readLLVMABIObject(t, goallcObject),
+			tc.name)
+		parameterObjects := llvmABIStackObjects(t, parameterSymbol)
+		if got, want := len(parameterObjects), 1; got != want {
+			t.Fatalf("GoALLC %s StackObjects=%v, want one object",
+				tc.name, parameterObjects)
+		}
+		parameterObject := parameterObjects[0]
+		if parameterObject.Offset != 0 || parameterObject.Size != tc.size ||
+			parameterObject.PtrBytes != tc.size || parameterObject.GCData == nil ||
+			parameterObject.GCData.Name != tc.gcSymbol {
+			t.Fatalf("GoALLC %s has malformed argp-relative StackObject=%v",
+				tc.name, parameterObject)
+		}
+		if got, want := llvmABIStackMapBitmaps(t, parameterSymbol, "args_pointer_maps"),
+			[][]int{tc.bits, nil}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("GoALLC %s ArgsPointerMaps=%v, want %v", tc.name, got, want)
+		}
+		if got := llvmABIStackMapBitmaps(t, parameterSymbol, "locals_pointer_maps"); !reflect.DeepEqual(got, [][]int{nil, nil}) {
+			t.Fatalf("GoALLC %s LocalsPointerMaps=%v, want [[] []]", tc.name, got)
+		}
+	}
+
 	// A matching direct gc-live alloca expands the deopt layout into the
 	// callsite's LocalsPointerMaps. This fixture is live at every ordinary
 	// statepoint, so it does not need the fallback function-level StackObject.
@@ -246,6 +337,24 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 	nativeStackObjects := llvmABIStackObjects(t, nativeSymbol)
 	if got, want := len(nativeStackObjects), 1; got != want {
 		t.Fatalf("native StackObjects=%v, want one object", nativeStackObjects)
+	}
+	for _, tc := range parameterCases {
+		nativeParameterSymbol := findLLVMABISymbol(t,
+			readLLVMABIObject(t, nativeObject), tc.name)
+		nativeParameterObjects := llvmABIStackObjects(t, nativeParameterSymbol)
+		if got, want := len(nativeParameterObjects), 1; got != want {
+			t.Fatalf("native %s StackObjects=%v, want one object",
+				tc.name, nativeParameterObjects)
+		}
+		nativeParameterObject := nativeParameterObjects[0]
+		if nativeParameterObject.Offset != 0 ||
+			nativeParameterObject.Size != tc.size ||
+			nativeParameterObject.PtrBytes != tc.size ||
+			nativeParameterObject.GCData == nil ||
+			nativeParameterObject.GCData.Name != tc.gcSymbol {
+			t.Fatalf("native %s has malformed argp-relative StackObject=%v",
+				tc.name, nativeParameterObject)
+		}
 	}
 }
 
