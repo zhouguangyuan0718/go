@@ -160,14 +160,25 @@ def check_rewritten_ir(ir):
         fail("ordinary StackObject received plugin entry initialization")
 
     one = [record("slot", 8, 1, [1])]
-    expect_records(ir, "pointer_slot", [one], [["i64 7"]])
-    expect_records(
+    pointer_slot = expect_records(ir, "pointer_slot", [one], [["i64 7"]])
+    nested = expect_records(
         ir,
         "nested_whole_aggregate",
         [[record("slot", 48, 6, [0x29])]],
     )
+    if "llvm.memset.inline" in pointer_slot:
+        fail("complete scalar pointer store received a duplicate GC zero")
+    if "llvm.memset.inline" in nested:
+        fail("complete aggregate pointer store received a duplicate GC zero")
     expect_records(ir, "alloca_call_skip", [one])
-    expect_records(ir, "alloca_multiple_calls", [one, one])
+    multiple_calls = expect_records(ir, "alloca_multiple_calls", [one, one])
+    if "llvm.memset.inline" in multiple_calls:
+        fail("pointer store before multiple calls received a duplicate GC zero")
+    aggregate_home = function_body(
+        ir, "argument_aggregate_home_address_across_calls"
+    )
+    if "llvm.memset.inline" in aggregate_home:
+        fail("aggregate argument store received a duplicate GC zero")
     partial = expect_records(
         ir,
         "alloca_partial_initialization",

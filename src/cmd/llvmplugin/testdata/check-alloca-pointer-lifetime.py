@@ -120,8 +120,8 @@ def main():
         fail("direct-only initialization is not inside its active region")
     if locals_body.count("call void @llvm.lifetime.start") != 1:
         fail("direct-only lifetime start was not preserved")
-    if locals_body.count("call void @llvm.memset.inline") != 1:
-        fail("direct-only alloca is not zeroed after its lifetime start")
+    if "call void @llvm.memset.inline" in locals_body:
+        fail("direct pointer store received a duplicate GC zero")
     if locals_body.count('"gc-live"(ptr %slot)') != 1 or locals_body.count(
         "%slot.relocated"
     ) != 1:
@@ -138,8 +138,8 @@ def main():
         fail("stack object is not present at every statepoint")
     if stack_body.count("call void @llvm.lifetime.start") != 1:
         fail("stack-object lifetime start was not preserved")
-    if stack_body.count("call void @llvm.memset.inline") != 1:
-        fail("stack object is not zeroed after its lifetime start")
+    if "call void @llvm.memset.inline" in stack_body:
+        fail("stack-object pointer store received a duplicate GC zero")
     if '"gc-live"(ptr %slot)' in stack_body or "%slot.relocated" in stack_body:
         fail("call-only stack-object address entered caller live-out")
     if "alloca ptr, align 8, !llvm.stackcoloring.no_merge" not in stack_body:
@@ -147,12 +147,11 @@ def main():
     source_initialize = stack_body.find("store ptr null")
     first_call = stack_body.find("@llvm.experimental.gc.statepoint")
     lifetime_start = stack_body.find("call void @llvm.lifetime.start")
-    entry_initialize = stack_body.find("call void @llvm.memset.inline")
-    if min(first_call, lifetime_start, entry_initialize, source_initialize) < 0:
+    if min(first_call, lifetime_start, source_initialize) < 0:
         fail("stack object initialization sequence is incomplete")
     if stack_body.count("store ptr null") != 1:
         fail("ordinary stack object was unnecessarily initialized at entry")
-    if not first_call < lifetime_start < entry_initialize < source_initialize:
+    if not first_call < lifetime_start < source_initialize:
         fail("stack object source initialization is misordered")
 
     loop_body = function_body(ir, "loop_reinitialized_pointer_alloca")
@@ -166,8 +165,8 @@ def main():
         fail("loop alloca is not one explicit active root")
     if loop_body.count("call void @llvm.lifetime.start") != 1:
         fail("loop lifetime start was not preserved")
-    if loop_body.count("call void @llvm.memset.inline") != 1:
-        fail("loop alloca is not zeroed after its lifetime start")
+    if "call void @llvm.memset.inline" in loop_body:
+        fail("loop pointer store received a duplicate GC zero")
 
     preinitialized_body = function_body(ir, "preinitialized_pointer_alloca")
     if preinitialized_body.count("call void @llvm.lifetime.start") != 1:
@@ -178,6 +177,26 @@ def main():
     safepoint = preinitialized_body.find("@llvm.experimental.gc.statepoint")
     if source_zero < 0 or safepoint < 0 or source_zero > safepoint:
         fail("preinitialized alloca zero does not precede its safepoint")
+
+    stored_body = function_body(ir, "store_initialized_pointer_alloca")
+    if stored_body.count("store ptr") != 2:
+        fail("per-field pointer initialization stores were not preserved")
+    if "call void @llvm.memset.inline" in stored_body:
+        fail("fully stored pointer slots received a duplicate GC zero")
+    if "i64 3, i64 64, i64 1, i64 5" not in stored_body:
+        fail("pointer-only bitmap does not ignore the unstored non-pointer field")
+
+    partial_body = function_body(ir, "partially_stored_pointer_alloca")
+    if partial_body.count("call void @llvm.memset.inline") != 1:
+        fail("partially stored pointer slots did not receive one GC zero")
+    lifetime_start = partial_body.find("call void @llvm.lifetime.start")
+    inserted_zero = partial_body.find("call void @llvm.memset.inline")
+    first_store = partial_body.find("store ptr %first")
+    safepoint = partial_body.find("@llvm.experimental.gc.statepoint")
+    if min(lifetime_start, inserted_zero, first_store, safepoint) < 0 or not (
+        lifetime_start < inserted_zero < first_store < safepoint
+    ):
+        fail("partial-store fallback zero is misordered")
 
     phi_body = function_body(ir, "phi_edge_pointer_alloca")
     if phi_body.count("@llvm.experimental.gc.statepoint") != 1:

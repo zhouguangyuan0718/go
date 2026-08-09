@@ -1,5 +1,7 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+%pointer_gap = type { ptr, i64, ptr }
+
 declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture)
 declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture)
 declare void @llvm.memset.inline.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
@@ -54,6 +56,34 @@ entry:
   call void @llvm.lifetime.start.p0(i64 16, ptr %slot)
   call void @llvm.memset.inline.p0.i64(ptr align 8 %slot, i8 0, i64 16, i1 false)
   call goabiinternal void @safepoint()
+  call void (...) @llvm.fake.use(ptr %slot)
+  ret void
+}
+
+define goabiinternal void @store_initialized_pointer_alloca(
+    ptr %first, ptr %second) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca %pointer_gap, align 8
+  call void @llvm.lifetime.start.p0(i64 24, ptr %slot)
+  %first.field = getelementptr inbounds %pointer_gap, ptr %slot, i32 0, i32 0
+  store ptr %first, ptr %first.field, align 8
+  %second.field = getelementptr inbounds %pointer_gap, ptr %slot, i32 0, i32 2
+  store ptr %second, ptr %second.field, align 8
+  call goabiinternal void @safepoint()
+  call void (...) @llvm.fake.use(ptr %slot)
+  ret void
+}
+
+define goabiinternal void @partially_stored_pointer_alloca(
+    ptr %first, ptr %second) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %slot = alloca %pointer_gap, align 8
+  call void @llvm.lifetime.start.p0(i64 24, ptr %slot)
+  %first.field = getelementptr inbounds %pointer_gap, ptr %slot, i32 0, i32 0
+  store ptr %first, ptr %first.field, align 8
+  call goabiinternal void @safepoint()
+  %second.field = getelementptr inbounds %pointer_gap, ptr %slot, i32 0, i32 2
+  store ptr %second, ptr %second.field, align 8
   call void (...) @llvm.fake.use(ptr %slot)
   ret void
 }

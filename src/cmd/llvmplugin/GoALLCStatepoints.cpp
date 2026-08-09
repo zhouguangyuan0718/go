@@ -7,6 +7,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
@@ -1006,28 +1007,121 @@ void protectStackObjectsFromColoring(
 // observes them, but Go's stack scanner independently observes every pointer
 // word selected by a callsite bitmap. Ensure each pointer-containing alloca is
 // zero at the start of every source lifetime; marker-free allocas
-// conservatively start at function entry. Existing complete zeros and the
-// frontend's volatile defer initialization remain authoritative. Fixed-size
-// memset.inline cannot fall back to a hosted libcall during GoObj lowering.
-bool hasFullZeroBeforeSafepoint(Instruction *Begin,
-                                const PointerAllocaRecord &Record,
-                                const DataLayout &DL) {
+// conservatively start at function entry. If ordinary stores already
+// initialize every GC-visible pointer slot before the first safepoint, no
+// additional zero is needed; non-pointer fields and padding are irrelevant.
+// The frontend's volatile defer initialization remains authoritative.
+// Fixed-size memset.inline cannot fall back to a hosted libcall during GoObj
+// lowering.
+void updateInitializedPointerSlots(SmallBitVector &Initialized,
+                                   Value *Destination, uint64_t WriteSize,
+                                   bool WritesZero,
+                                   ArrayRef<uint64_t> StoredPointerOffsets,
+                                   const PointerAllocaRecord &Record,
+                                   const DataLayout &DL) {
+  if (getUnderlyingObject(Destination) != Record.Alloca)
+    return;
+
+  int64_t SignedOffset = 0;
+  Value *Base = GetPointerBaseWithConstantOffset(Destination, SignedOffset, DL);
+  if (Base != Record.Alloca || SignedOffset < 0) {
+    Initialized.reset();
+    return;
+  }
+  uint64_t WriteBegin = static_cast<uint64_t>(SignedOffset);
+  std::optional<uint64_t> WriteEnd = checkedAddUnsigned(WriteBegin, WriteSize);
+  if (!WriteEnd) {
+    Initialized.reset();
+    return;
+  }
+
+  uint64_t PointerSize = DL.getPointerSize(0);
+  for (auto [Index, Leaf] : llvm::enumerate(Record.Leaves)) {
+    uint64_t SlotBegin = Leaf.Offset;
+    uint64_t SlotEnd = SlotBegin + PointerSize;
+    if (*WriteEnd <= SlotBegin || WriteBegin >= SlotEnd)
+      continue;
+
+    bool CoversSlot = WriteBegin <= SlotBegin && *WriteEnd >= SlotEnd;
+    bool StoresPointer =
+        CoversSlot &&
+        llvm::is_contained(StoredPointerOffsets, SlotBegin - WriteBegin);
+    Initialized[Index] = CoversSlot && (WritesZero || StoresPointer);
+  }
+}
+
+bool hasInitializedPointerSlotsBeforeSafepoint(
+    Instruction *Begin, const PointerAllocaRecord &Record,
+    const DataLayout &DL) {
+  SmallBitVector Initialized(Record.Leaves.size());
   for (Instruction *I = Begin; I; I = I->getNextNode()) {
+    if (auto *Store = dyn_cast<StoreInst>(I)) {
+      Value *StoredValue = Store->getValueOperand();
+      TypeSize StoreSize = DL.getTypeStoreSize(StoredValue->getType());
+      if (StoreSize.isScalable()) {
+        if (getUnderlyingObject(Store->getPointerOperand()) == Record.Alloca)
+          Initialized.reset();
+        continue;
+      }
+
+      bool WritesZero = false;
+      if (auto *C = dyn_cast<Constant>(StoredValue))
+        WritesZero = C->isNullValue();
+
+      SmallVector<uint64_t, 4> StoredPointerOffsets;
+      if (!WritesZero && !isa<UndefValue, PoisonValue>(StoredValue) &&
+          containsPointer(StoredValue->getType())) {
+        SmallVector<PointerAllocaLeaf, 4> StoredLeaves;
+        SmallVector<unsigned, 4> Path;
+        if (Error Err = enumeratePointerAllocaLeaves(StoredValue->getType(), DL,
+                                                     Path, 0, StoredLeaves)) {
+          consumeError(std::move(Err));
+        } else {
+          for (const PointerAllocaLeaf &Leaf : StoredLeaves) {
+            Value *LeafValue = FindInsertedValue(StoredValue, Leaf.Indices);
+            // A non-constant aggregate SSA value is defined by the Go value
+            // model even when FindInsertedValue cannot recover an individual
+            // leaf. Explicit undef/poison construction remains uninitialized.
+            if (!LeafValue || !isa<UndefValue, PoisonValue>(LeafValue))
+              StoredPointerOffsets.push_back(Leaf.Offset);
+          }
+        }
+      }
+      updateInitializedPointerSlots(Initialized, Store->getPointerOperand(),
+                                    StoreSize.getFixedValue(), WritesZero,
+                                    StoredPointerOffsets, Record, DL);
+      continue;
+    }
+
     if (auto *Set = dyn_cast<MemSetInst>(I)) {
       auto *ByteValue = dyn_cast<ConstantInt>(Set->getValue());
       auto *Length = dyn_cast<ConstantInt>(Set->getLength());
-      int64_t Offset = 0;
-      Value *Base =
-          GetPointerBaseWithConstantOffset(Set->getDest(), Offset, DL);
-      if (ByteValue && ByteValue->isZero() && Length &&
-          Length->getValue() == Record.ByteSize &&
-          Base == Record.Alloca && Offset == 0)
-        return true;
+      if (!Length || Length->getValue().getActiveBits() > 64) {
+        if (getUnderlyingObject(Set->getDest()) == Record.Alloca)
+          Initialized.reset();
+        continue;
+      }
+      updateInitializedPointerSlots(
+          Initialized, Set->getDest(), Length->getZExtValue(),
+          ByteValue && ByteValue->isZero(), {}, Record, DL);
+      continue;
+    }
+    if (auto *Transfer = dyn_cast<MemTransferInst>(I)) {
+      auto *Length = dyn_cast<ConstantInt>(Transfer->getLength());
+      if (!Length || Length->getValue().getActiveBits() > 64) {
+        if (getUnderlyingObject(Transfer->getDest()) == Record.Alloca)
+          Initialized.reset();
+        continue;
+      }
+      updateInitializedPointerSlots(Initialized, Transfer->getDest(),
+                                    Length->getZExtValue(), false, {}, Record,
+                                    DL);
+      continue;
     }
     if (auto *Call = dyn_cast<CallBase>(I); Call && !isLeafCall(*Call))
-      return false;
+      return Initialized.count() == Record.Leaves.size();
   }
-  return false;
+  return Initialized.count() == Record.Leaves.size();
 }
 
 void initializePointerAllocasForGC(
@@ -1056,13 +1150,13 @@ void initializePointerAllocasForGC(
     };
     if (LifetimeStarts.empty()) {
       Instruction *Begin = Record.Alloca->getNextNode();
-      if (!hasFullZeroBeforeSafepoint(Begin, Record, DL))
+      if (!hasInitializedPointerSlotsBeforeSafepoint(Begin, Record, DL))
         InitializeAt(Begin);
       continue;
     }
     for (IntrinsicInst *Start : LifetimeStarts)
       if (Instruction *Begin = Start->getNextNode();
-          !hasFullZeroBeforeSafepoint(Begin, Record, DL))
+          !hasInitializedPointerSlotsBeforeSafepoint(Begin, Record, DL))
         InitializeAt(Begin);
   }
 }
