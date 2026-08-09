@@ -112,6 +112,7 @@
       "abi/double_nested_struct.go": "upstream regression repeatedly qualified through LLVM compile, link, and execution",
       "abi/fuzz_trailing_zero_field.go": "nested trailing zero-sized fields preserve native ABI size and valid GoObj runtime tables",
       "abi/leaf.go": "upstream regression repeatedly qualified through LLVM compile, link, and execution",
+      "abi/llvm_args_results.go": "movable stack address observations and caller-owned stack results pass LLVM O2 compile, GoObj link, and execution",
       "abi/llvm_register_argument_pieces.go": "register-assigned and stack-assigned aggregate argument homes plus zero-width Empty values",
       "abi/llvm_selectnaddr.go": "address-selected stack call result through LLVM compile, GoObj link, and execution",
       "abi/part_live.go": "pointer-to-uintptr Convert semantics and partial aggregate liveness across repeated runtime.GC",
