@@ -12,6 +12,7 @@ declare goabiinternal void @unknown_writing()
 declare goabiinternal void @observe_stack_address(ptr)
 declare goabiinternal i64 @readonly_pointer_slot(ptr readonly) memory(read)
 declare goabiinternal i64 @readnone_callee() memory(none)
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr captures(none))
 
 define goabiinternal ptr @pointer_slot(ptr %pointer) "go-stack-growth-statepoint" gc "goallc" {
 entry:
@@ -98,6 +99,35 @@ define goabiinternal void @alloca_direct_address_across_calls()
 entry:
   %slot = alloca ptr, align 8
   store ptr null, ptr %slot, align 8
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  call goabiinternal void @safepoint()
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  ret void
+}
+
+define goabiinternal void @argument_home_address_across_calls(ptr %pointer)
+    "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  ; This canonical parameter alloca becomes the argument's fixed ABI home.
+  ; Its last callsite has no direct gc-live base, so the function also needs
+  ; an argp-relative StackObject for pointers that reach the home indirectly.
+  %slot = alloca ptr, align 8
+  call void @llvm.lifetime.start.p0(i64 8, ptr %slot)
+  store ptr %pointer, ptr %slot, align 8
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  call goabiinternal void @safepoint()
+  call goabiinternal void @observe_stack_address(ptr %slot)
+  ret void
+}
+
+define goabiinternal void @argument_aggregate_home_address_across_calls(
+    %nested %value) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  ; The split aggregate parameter still has one complete fixed home and one
+  ; argp-relative StackObject covering all ABI pieces and padding.
+  %slot = alloca %nested, align 8
+  call void @llvm.lifetime.start.p0(i64 48, ptr %slot)
+  store %nested %value, ptr %slot, align 8
   call goabiinternal void @observe_stack_address(ptr %slot)
   call goabiinternal void @safepoint()
   call goabiinternal void @observe_stack_address(ptr %slot)
@@ -218,7 +248,7 @@ entry:
   ret i64 %sum.1
 }
 
-@llvm.used = appending global [17 x ptr] [
+@llvm.used = appending global [19 x ptr] [
   ptr @pointer_slot,
   ptr @nested_whole_aggregate,
   ptr @alloca_call_skip,
@@ -226,6 +256,8 @@ entry:
   ptr @alloca_loop,
   ptr @alloca_gep_address_across_call,
   ptr @alloca_direct_address_across_calls,
+  ptr @argument_home_address_across_calls,
+  ptr @argument_aggregate_home_address_across_calls,
   ptr @alloca_gep_value_across_calls,
   ptr @alloca_pointer_free_address_across_calls,
   ptr @alloca_address_passed_to_callee,

@@ -148,11 +148,11 @@ def record(base, size, bits, words):
 
 def check_rewritten_ir(ir):
     statepoints = re.findall(r"@llvm\.experimental\.gc\.statepoint", ir)
-    # Twenty-six calls plus the intrinsic declaration.
-    if len(statepoints) != 27:
-        fail(f"found {len(statepoints) - 1} statepoints, want 26")
-    if len(re.findall(r'"deopt"\(', ir)) != 23:
-        fail("pointer allocas do not have twenty-three deopt records")
+    # Thirty-two calls plus the intrinsic declaration.
+    if len(statepoints) != 33:
+        fail(f"found {len(statepoints) - 1} statepoints, want 32")
+    if len(re.findall(r'"deopt"\(', ir)) != 29:
+        fail("pointer allocas do not have twenty-nine deopt records")
     if "llvm.statepoint.fixed_stack_home" in ir:
         fail("obsolete fixed-home metadata remains in rewritten IR")
 
@@ -280,12 +280,12 @@ def check_rewritten_ir(ir):
     relocates = re.findall(
         r"= call coldcc ptr @llvm\.experimental\.gc\.relocate", ir
     )
-    # Twenty active pointer-containing alloca roots retain their storage
+    # Twenty-four active pointer-containing alloca roots retain their storage
     # identity and two ordinary scalar roots are relocated separately.
     # Pointer-free and derived stack addresses are rebuilt at their uses, so
     # they need neither an alloca relocate nor their own ptrmap root.
-    if len(relocates) != 22:
-        fail(f"found {len(relocates)} relocates, want 22")
+    if len(relocates) != 26:
+        fail(f"found {len(relocates)} relocates, want 26")
     marker_free = function_body(ir, "alloca_marker_free_at_safepoint")
     if '"gc-live"(ptr %pointer' not in marker_free:
         fail("ordinary scalar SSA pointer is missing from gc-live")
@@ -306,11 +306,18 @@ def check_objview(objview, object_path):
     def funcdata_kinds(name):
         return [entry["kind"] for entry in function(name)["funcdata"]]
 
-    locals_kinds = funcdata_kinds("alloca_multiple_calls")
-    if "locals_pointer_maps" not in locals_kinds:
-        fail("locals-only alloca has no LocalsPointerMaps")
-    if "stack_objects" in locals_kinds:
-        fail("locals-only alloca unexpectedly emitted StackObjects")
+    argument_home = function("alloca_multiple_calls")
+    argument_home_data = {
+        entry["kind"]: entry for entry in argument_home["funcdata"]
+    }
+    if "stack_objects" in argument_home_data:
+        fail("all-callsite-live argument home unexpectedly emitted StackObjects")
+    argument_maps = argument_home_data["args_pointer_maps"]["stack_map"]
+    if not any(bitmap.get("set_bits") for bitmap in argument_maps["bitmaps"]):
+        fail("active argument home did not expand ArgsPointerMaps")
+    argument_locals = argument_home_data["locals_pointer_maps"]["stack_map"]
+    if any(bitmap.get("set_bits") for bitmap in argument_locals["bitmaps"]):
+        fail("active argument home polluted LocalsPointerMaps")
 
     active_only_kinds = funcdata_kinds("alloca_address_passed_to_callee")
     if "stack_objects" in active_only_kinds:
@@ -319,9 +326,69 @@ def check_objview(objview, object_path):
     active_only_data = {
         entry["kind"]: entry for entry in active_only["funcdata"]
     }
-    active_only_maps = active_only_data["locals_pointer_maps"]["stack_map"]
+    active_only_maps = active_only_data["args_pointer_maps"]["stack_map"]
     if not any(bitmap.get("set_bits") for bitmap in active_only_maps["bitmaps"]):
-        fail("matching alloca gc-live did not expand LocalsPointerMaps")
+        fail("matching argument-home gc-live did not expand ArgsPointerMaps")
+
+    argument_stack_object = function("argument_home_address_across_calls")
+    argument_stack_object_data = {
+        entry["kind"]: entry for entry in argument_stack_object["funcdata"]
+    }
+    argument_objects = argument_stack_object_data.get("stack_objects", {}).get(
+        "stack_objects", []
+    )
+    if len(argument_objects) != 1:
+        fail(f"argument home StackObjects={argument_objects}, want one object")
+    argument_object = argument_objects[0]
+    if (
+        argument_object["offset"] != 0
+        or argument_object["size"] != 8
+        or argument_object["ptr_bytes"] != 8
+    ):
+        fail(f"argument home has malformed argp-relative object: {argument_object}")
+    argument_object_maps = argument_stack_object_data["args_pointer_maps"][
+        "stack_map"
+    ]
+    if not any(
+        bitmap.get("set_bits") for bitmap in argument_object_maps["bitmaps"]
+    ):
+        fail("active argument StackObject layout did not expand ArgsPointerMaps")
+    argument_object_locals = argument_stack_object_data["locals_pointer_maps"][
+        "stack_map"
+    ]
+    if any(
+        bitmap.get("set_bits") for bitmap in argument_object_locals["bitmaps"]
+    ):
+        fail("argument StackObject polluted LocalsPointerMaps")
+
+    aggregate_stack_object = function(
+        "argument_aggregate_home_address_across_calls"
+    )
+    aggregate_stack_object_data = {
+        entry["kind"]: entry for entry in aggregate_stack_object["funcdata"]
+    }
+    aggregate_objects = aggregate_stack_object_data.get(
+        "stack_objects", {}
+    ).get("stack_objects", [])
+    if len(aggregate_objects) != 1:
+        fail(f"aggregate argument StackObjects={aggregate_objects}, want one object")
+    aggregate_object = aggregate_objects[0]
+    if (
+        aggregate_object["offset"] != 0
+        or aggregate_object["size"] != 48
+        or aggregate_object["ptr_bytes"] != 48
+        or aggregate_object["gcdata"]["name"]
+        != "runtime.gcbits.2900000000000000"
+    ):
+        fail(
+            "aggregate argument has malformed argp-relative object: "
+            f"{aggregate_object}"
+        )
+    aggregate_maps = aggregate_stack_object_data["args_pointer_maps"][
+        "stack_map"
+    ]["bitmaps"]
+    if not any(bitmap.get("set_bits") == [0, 3, 5] for bitmap in aggregate_maps):
+        fail("aggregate argument home did not preserve split pointer pieces")
 
     stack_object_kinds = funcdata_kinds("alloca_direct_address_across_calls")
     if "stack_objects" not in stack_object_kinds:
@@ -352,11 +419,17 @@ def main():
     parser.add_argument("--plugin", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--objview")
+    parser.add_argument("--mtriple")
     args = parser.parse_args()
+    llc = [args.llc]
+    if args.mtriple:
+        llc.append(f"-mtriple={args.mtriple}")
+        if args.mtriple.startswith("aarch64"):
+            llc.append("-frame-pointer=all")
 
     rewritten = run(
         [
-            args.llc,
+            *llc,
             f"-load-pass-plugin={args.plugin}",
             "-goallc-pass-plugin-emit-ir",
             "-filetype=null",
@@ -390,7 +463,7 @@ def main():
         )
         optimized_rewritten = run(
             [
-                args.llc,
+                *llc,
                 f"-load-pass-plugin={args.plugin}",
                 "-goallc-pass-plugin-emit-ir",
                 "-filetype=null",
@@ -400,7 +473,7 @@ def main():
             ],
             input_text=optimized,
         )
-        if len(re.findall(r'"deopt"\(', optimized_rewritten)) != 13:
+        if len(re.findall(r'"deopt"\(', optimized_rewritten)) != 19:
             fail("default<O2> did not preserve stack-object records")
         if "alloca %nested" in function_body(
             optimized_rewritten, "nested_whole_aggregate"
@@ -409,7 +482,7 @@ def main():
 
         machine_ir = run(
             [
-                args.llc,
+                *llc,
                 f"-load-pass-plugin={args.plugin}",
                 "-verify-machineinstrs",
                 "-stop-after=finalize-isel",
@@ -419,21 +492,23 @@ def main():
             ]
         )
         statepoint_lines = re.findall(r"(?m)^.*STATEPOINT.*$", machine_ir)
-        if len(statepoint_lines) != 26:
-            fail(f"MIR has {len(statepoint_lines)} statepoints, want 26")
+        if len(statepoint_lines) != 32:
+            fail(f"MIR has {len(statepoint_lines)} statepoints, want 32")
         alloca_statepoints = [
             line for line in statepoint_lines if str(BEGIN) in line
         ]
-        if len(alloca_statepoints) != 23:
-            fail("MIR does not contain twenty-three alloca statepoints")
+        if len(alloca_statepoints) != 29:
+            fail("MIR does not contain twenty-nine alloca statepoints")
         for statepoint in alloca_statepoints:
-            if str(ALLOCA_TAG) not in statepoint or "%stack." not in statepoint:
+            if str(ALLOCA_TAG) not in statepoint or not re.search(
+                r"%(?:fixed-)?stack\.[0-9]+", statepoint
+            ):
                 fail(f"MIR alloca record is malformed: {statepoint}")
 
         output = f"{directory}/alloca-pointer-roots.goobj"
         run(
             [
-                args.llc,
+                *llc,
                 f"-load-pass-plugin={args.plugin}",
                 "-verify-machineinstrs",
                 "-filetype=obj",
@@ -447,7 +522,7 @@ def main():
         optimized_output = f"{directory}/alloca-pointer-roots-o2.goobj"
         run(
             [
-                args.llc,
+                *llc,
                 f"-load-pass-plugin={args.plugin}",
                 "-verify-machineinstrs",
                 "-filetype=obj",
