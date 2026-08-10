@@ -464,7 +464,7 @@
       "typeparam/smallest.go": "generic ordered minimum over slices",
       "typeparam/typeswitch4.go": "generic type switches over interfaces",
       "235.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
-      "abi/method_wrapper.go": "aggregate method-wrapper results repeatedly pass LLVM O2 compile, GoObj link, and execution on Darwin/arm64; Linux/amd64 remains explicitly overridden gray",
+      "abi/method_wrapper.go": "aggregate method-wrapper results repeatedly pass LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "armimm.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "atomicload.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "bigmap.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
@@ -1167,10 +1167,11 @@
       "fixedbugs/issue19658.go": "closure and interface regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue26411.go": "runtime regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue28688.go": "soft-float copy regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
-      "fixedbugs/issue78081.go": "concurrent GC and stack-shrink regression repeatedly passes LLVM O2 compile, GoObj link, and execution on Darwin/arm64; Linux/amd64 remains explicitly overridden gray",
+      "fixedbugs/issue78081.go": "concurrent GC and stack-shrink regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "zerodivide.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution"
     },
     "graylist": {
+      "devirtualization_nil_panics.go": "panic line checks require LLVM pcfile and pcline emission from the pending Go #117 and LLVM #62 changes",
       "fixedbugs/issue73916.go": "recover needs frontend pcinline metadata to count the inlined deferred function as a logical frame",
       "fixedbugs/issue73916b.go": "recover needs frontend pcinline metadata to count nested inlined logical frames",
       "fixedbugs/issue73917.go": "recover needs frontend pcinline metadata through an inlined value-method wrapper",
@@ -1194,10 +1195,8 @@
     },
     "platform_graylist": {
       "linux/amd64": {
-        "abi/method_wrapper.go": "x86 releases the outgoing call frame before loading aggregate method results returned on the stack",
         "fixedbugs/issue23522.go": "x86 dynamic SSE4.1 floor selection lowers the guarded LLVM intrinsic to an unavailable external libcall",
         "fixedbugs/issue68322.go": "x86 dynamic SSE4.1 truncation lowers the guarded LLVM intrinsic to an unavailable external libcall",
-        "fixedbugs/issue78081.go": "Linux/amd64 concurrent GC and stack shrinking intermittently fail to unwind a GoObj frame completely",
         "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls",
         "stackobj2.go": "Linux/amd64 stack growth scans an uninitialized pointer slot in main.makelist"
       }
