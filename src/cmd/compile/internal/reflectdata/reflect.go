@@ -556,6 +556,7 @@ func TypeSym(t *types.Type) *types.Sym {
 	if t.Kind() == types.TFUNC && t.Recv() != nil {
 		base.Fatalf("misuse of method type: %v", t)
 	}
+	t = formalType(t)
 	s := types.TypeSym(t)
 	signatmu.Lock()
 	NeedRuntimeType(t)
@@ -572,6 +573,11 @@ func TypeLinksymLookup(name string) *obj.LSym {
 }
 
 func TypeLinksym(t *types.Type) *obj.LSym {
+	// Predeclared aliases have the same linker symbol as their underlying
+	// runtime type. Keep TypeInfo canonical too: it describes the descriptor
+	// that writeType actually emits, not whichever spelling first requested
+	// the shared symbol.
+	t = formalType(t)
 	lsym := TypeSym(t).Linksym()
 	signatmu.Lock()
 	if lsym.Extra == nil {
