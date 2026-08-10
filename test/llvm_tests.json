@@ -464,12 +464,14 @@
       "typeparam/smallest.go": "generic ordered minimum over slices",
       "typeparam/typeswitch4.go": "generic type switches over interfaces",
       "235.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
-      "abi/method_wrapper.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "abi/method_wrapper.go": "aggregate method-wrapper results repeatedly pass LLVM O2 compile, GoObj link, and execution on Darwin/arm64; Linux/amd64 remains explicitly overridden gray",
       "armimm.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "atomicload.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "bigmap.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "blank.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "chan/fifo.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
+      "chan/powser1.go": "channel powerset stress test repeatedly passes LLVM O2 compile, GoObj link, and execution",
+      "chan/powser2.go": "channel powerset stress test repeatedly passes LLVM O2 compile, GoObj link, and execution",
       "chan/select7.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "chan/select8.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
       "chan/sieve2.go": "upstream regression repeatedly qualified through LLVM compile, GoObj link, and execution",
@@ -1165,7 +1167,7 @@
       "fixedbugs/issue19658.go": "closure and interface regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue26411.go": "runtime regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
       "fixedbugs/issue28688.go": "soft-float copy regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
-      "fixedbugs/issue78081.go": "runtime regression repeatedly passes LLVM O2 compile, GoObj link, and execution on both CI architectures",
+      "fixedbugs/issue78081.go": "concurrent GC and stack-shrink regression repeatedly passes LLVM O2 compile, GoObj link, and execution on Darwin/arm64; Linux/amd64 remains explicitly overridden gray",
       "zerodivide.go": "defer/recover execution repeatedly qualified through LLVM O2 compile, link, and execution"
     },
     "graylist": {
@@ -1179,8 +1181,6 @@
       "*": "LLVM lowering or runtime ABI support has not reached this test yet"
     },
     "blacklist": {
-      "chan/powser1.go": "timeout: exhaustive channel powerset test does not complete within the per-case limit",
-      "chan/powser2.go": "timeout: exhaustive channel powerset test does not complete within the per-case limit",
       "recover.go": "timeout: LLVM O2 compilation exceeds the one-minute per-case limit",
       "clearfat.go": "slow: exceeds the one-minute LLVM CI per-case budget",
       "cmplxdivide.go": "slow: exceeds the one-minute LLVM CI per-case budget",
@@ -1194,18 +1194,12 @@
     },
     "platform_graylist": {
       "linux/amd64": {
-        "abi/method_wrapper.go": "x86 GoObj traceback does not yet unwind the panic path through the method wrapper",
+        "abi/method_wrapper.go": "x86 releases the outgoing call frame before loading aggregate method results returned on the stack",
         "fixedbugs/issue23522.go": "x86 dynamic SSE4.1 floor selection lowers the guarded LLVM intrinsic to an unavailable external libcall",
-        "fixedbugs/issue51101.go": "x86 large-frame recursion still reaches morestack below the current stack bound",
-        "fixedbugs/issue56990.go": "Linux/amd64 stack growth reports an invalid derived pointer in the main.Foo frame",
         "fixedbugs/issue68322.go": "x86 dynamic SSE4.1 truncation lowers the guarded LLVM intrinsic to an unavailable external libcall",
         "fixedbugs/issue78081.go": "Linux/amd64 concurrent GC and stack shrinking intermittently fail to unwind a GoObj frame completely",
-        "gcgort.go": "x86 GoObj pcsp and traceback metadata do not yet unwind all generated goroutine wrappers during stack growth",
         "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls",
         "stackobj2.go": "Linux/amd64 stack growth scans an uninitialized pointer slot in main.makelist"
-      },
-      "linux/arm64": {
-        "fixedbugs/issue56990.go": "Linux/arm64 stack growth reports an invalid derived pointer in the main.Foo frame"
       }
     },
     "platform_blacklist": {
