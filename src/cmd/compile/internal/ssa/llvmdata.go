@@ -179,7 +179,7 @@ func LowerGoObjData() {
 		}
 		g.SetSection(llvmDataSection(s))
 		g.SetGlobalConstant(llvmDataIsReadOnly(s))
-		setLLVMDataLinkage(g, s)
+		setLLVMSymbolLinkage(g, s)
 		if s.Align != 0 {
 			g.SetAlignment(int(s.Align))
 		}
@@ -510,11 +510,11 @@ func llvmDataIsReadOnly(s *obj.LSym) bool {
 	}
 }
 
-func setLLVMDataLinkage(g llvm.Value, s *obj.LSym) {
+func setLLVMSymbolLinkage(value llvm.Value, s *obj.LSym) {
 	if s.Local() {
-		g.SetLinkage(llvm.InternalLinkage)
+		value.SetLinkage(llvm.InternalLinkage)
 	} else if s.DuplicateOK() {
-		g.SetLinkage(llvm.WeakAnyLinkage)
+		value.SetLinkage(llvm.WeakAnyLinkage)
 	}
 }
 
@@ -557,16 +557,13 @@ func setGoObjDataFlags(g llvm.Value, s *obj.LSym) {
 }
 
 // Functions carry linker-visible semantic flags in the same GoObj symbol
-// record as native compiler output. Keep this separate from LLVM function
-// attributes: ReflectMethod drives Go linker method reachability rather than
-// code generation, and Linkname/ABIWrapper are likewise object properties.
+// record as native compiler output. Local and non-local Dupok symbols use LLVM
+// linkage and are recovered by AsmPrinter. LLVM cannot encode both properties
+// at once, so only a Local+Dupok overlap needs a residual metadata bit.
 func setGoObjFunctionFlags(fn llvm.Value, s *obj.LSym) {
 	var flag, flag2 uint64
-	if s.DuplicateOK() {
+	if s.Local() && s.DuplicateOK() {
 		flag |= goobj.SymFlagDupok
-	}
-	if s.Local() {
-		flag |= goobj.SymFlagLocal
 	}
 	if s.ReflectMethod() {
 		flag |= goobj.SymFlagReflectMethod

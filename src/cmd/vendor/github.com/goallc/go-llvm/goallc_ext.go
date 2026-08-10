@@ -33,3 +33,15 @@ func (c Context) PointerType(addressSpace uint32) (t Type) {
 	t.C = C.LLVMPointerTypeInContext(c.C, C.unsigned(addressSpace))
 	return
 }
+
+func (c Context) MetadataAsValue(md Metadata) (v Value) {
+	v.C = C.LLVMMetadataAsValue(c.C, md.C)
+	return
+}
+
+func (b Builder) CreateFence(ordering AtomicOrdering, singleThread bool, name string) (v Value) {
+	namestr := C.CString(name)
+	defer C.free(unsafe.Pointer(namestr))
+	v.C = C.LLVMBuildFence(b.C, C.LLVMAtomicOrdering(ordering), boolToLLVMBool(singleThread), namestr)
+	return
+}
