@@ -14,7 +14,7 @@ package codegen
 // LLVM-SAME: ptr %pointer, i64 %scalar)
 // LLVM-NOT: llvm.experimental.stackmap
 // LLVM-LABEL: define goabiinternal i64 @codegen.goABIStatepointAttributes(
-// LLVM-SAME: i64 %x) #[[ATTRS:[0-9]+]] gc "goallc" {
+// LLVM-SAME: i64 %x) #[[ATTRS:[0-9]+]] gc "goallc" {{.*}}{
 // LLVM: attributes #[[ATTRS]] = { {{.*}}"frame-pointer"="non-leaf"{{.*}}"go-stack-growth-statepoint"{{.*}} }
 func goABIStatepointAttributes(x int) int {
 	return x + 1

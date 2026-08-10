@@ -18,12 +18,14 @@ type llvmGenericPair[A, B any] struct {
 // LLVM-DAG: %"codegen.llvmGenericPair[int,string]" = type { i64, { ptr, i64 } }
 // LLVM-DAG: %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" = type { i64, { ptr, i64 } }
 // LLVM-LABEL: define goabiinternal %"codegen.llvmGenericPair[int,string]" @"codegen.llvmMakeGenericPair[int,string]"(
+// LLVM-SAME: !goobj.symbol.flags ![[DUPOK:[0-9]+]]
 // LLVM: [[SHAPE:%.*]] = call goabiinternal %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" @"codegen.llvmMakeGenericPair[go.shape.int,go.shape.string]"
 // LLVM: [[FIRST:%.*]] = extractvalue %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" [[SHAPE]], 0
 // LLVM: [[CONCRETE0:%.*]] = insertvalue %"codegen.llvmGenericPair[int,string]" undef, i64 [[FIRST]], 0
 // LLVM: [[SECOND:%.*]] = extractvalue %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" [[SHAPE]], 1
 // LLVM: [[CONCRETE1:%.*]] = insertvalue %"codegen.llvmGenericPair[int,string]" [[CONCRETE0]], { ptr, i64 } [[SECOND]], 1
 // LLVM: ret %"codegen.llvmGenericPair[int,string]" [[CONCRETE1]]
+// LLVM: ![[DUPOK]] = !{i32 1, i32 0}
 //
 //go:noinline
 func llvmMakeGenericPair[A, B any](first A, second B) llvmGenericPair[A, B] {

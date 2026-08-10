@@ -75,6 +75,7 @@ const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolNameMD = "goobj.symbol.name"
+const goObjSymbolIndexMD = "goobj.symbol.index"
 const llvmFramePointerAttr = "frame-pointer"
 const llvmFramePointerNonLeaf = "non-leaf"
 

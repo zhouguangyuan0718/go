@@ -199,18 +199,16 @@ func LowerGoObjData() {
 	emitGoObjCompilerUsed()
 }
 
-// FinalizeGoObjSymbolMetadata carries native GoObj definition classes after
-// NumberSyms has assigned them. LowerGoObjData runs first so imported-reference
-// metadata retains the same pre-numbering classification as the established
-// LLVM path.
+// FinalizeGoObjSymbolMetadata carries native GoObj definition classes and
+// package-local indices after NumberSyms has assigned them. LowerGoObjData runs
+// first so imported-reference metadata retains the same pre-numbering
+// classification as the established LLVM path.
 func FinalizeGoObjSymbolMetadata() {
 	var syms []*obj.LSym
 	if currentLLVMDataLowerer != nil {
 		syms = make([]*obj.LSym, 0, len(currentLLVMDataLowerer.lowered))
 		for s := range currentLLVMDataLowerer.lowered {
-			if s.ContentAddressable() || s.PkgIdx == goobj.PkgIdxNone {
-				syms = append(syms, s)
-			}
+			syms = append(syms, s)
 		}
 	}
 	sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
@@ -218,6 +216,9 @@ func FinalizeGoObjSymbolMetadata() {
 		g := currentLLVMDataLowerer.values[s]
 		if g.IsNil() {
 			base.Fatalf("missing lowered LLVM global for finalized GoObj symbol %s", s.Name)
+		}
+		if s.PkgIdx == goobj.PkgIdxSelf {
+			setGoObjPackageSymbolIndexMetadata(g, s)
 		}
 		if s.PkgIdx == goobj.PkgIdxNone {
 			setGoObjNonPackageMetadata(g)
@@ -227,14 +228,26 @@ func FinalizeGoObjSymbolMetadata() {
 		}
 	}
 	for _, s := range base.Ctxt.Text {
-		if s.PkgIdx != goobj.PkgIdxNone {
+		fn := CurrentModule.NamedFunction(llvmFunctionStorageName(s.Name, llvmCallConv(s.ABI())))
+		if fn.IsNil() {
 			continue
 		}
-		fn := CurrentModule.NamedFunction(llvmFunctionStorageName(s.Name, llvmCallConv(s.ABI())))
-		if !fn.IsNil() {
+		if s.PkgIdx == goobj.PkgIdxSelf {
+			setGoObjPackageSymbolIndexMetadata(fn, s)
+		}
+		if s.PkgIdx == goobj.PkgIdxNone {
 			setGoObjNonPackageMetadata(fn)
 		}
 	}
+}
+
+func setGoObjPackageSymbolIndexMetadata(value llvm.Value, s *obj.LSym) {
+	if value.IsNil() || s == nil || s.PkgIdx != goobj.PkgIdxSelf || !s.Indexed() || s.SymIdx < 0 {
+		base.Fatalf("invalid LLVM GoObj package symbol index")
+	}
+	value.SetGlobalMetadata(GlobalCtxt.MDKindID(goObjSymbolIndexMD), GlobalCtxt.MDNode([]llvm.Metadata{
+		llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(s.SymIdx), false).ConstantAsMetadata(),
+	}))
 }
 
 func setGoObjNonPackageMetadata(value llvm.Value) {
@@ -549,6 +562,12 @@ func setGoObjDataFlags(g llvm.Value, s *obj.LSym) {
 // code generation, and Linkname/ABIWrapper are likewise object properties.
 func setGoObjFunctionFlags(fn llvm.Value, s *obj.LSym) {
 	var flag, flag2 uint64
+	if s.DuplicateOK() {
+		flag |= goobj.SymFlagDupok
+	}
+	if s.Local() {
+		flag |= goobj.SymFlagLocal
+	}
 	if s.ReflectMethod() {
 		flag |= goobj.SymFlagReflectMethod
 	}
