@@ -68,6 +68,19 @@ func llvmDescriptorGoType(s *obj.LSym) *types.Type {
 		return nil
 	}
 	t, _ := ti.Type.(*types.Type)
+	return llvmCanonicalDescriptorGoType(t)
+}
+
+// llvmCanonicalDescriptorGoType returns the type whose runtime descriptor was
+// written to s. Predeclared aliases share linker symbols with their underlying
+// types, so TypeInfo can retain whichever spelling first requested the symbol.
+// reflectdata.writeType writes the underlying type's layout; canonicalize only
+// the LLVM view used to reconstruct that layout in IR.
+func llvmCanonicalDescriptorGoType(t *types.Type) *types.Type {
+	switch t {
+	case types.AnyType, types.ByteType, types.RuneType:
+		return types.Types[t.Kind()]
+	}
 	return t
 }
 

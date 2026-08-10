@@ -535,9 +535,10 @@ path/filepath regexp strings text/scanner text/tabwriter
   完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
   已确认的 O2/statepoint 问题相似，但在各自的无优化对照完成前不提前改分类；
 - 完整闭包已越过 atomic 8/64、`Mul{32,64}uover`、`GetClosurePtr`、`GetG`、
-  `PubBarrier`、prefetch 和 canonical type descriptor；当前停止在自动生成调用与
-  已定义 `runtime.growslice` 的 LLVM 函数类型冲突。该问题属于 runtime ABI/声明
-  的系统性建模边界，不在入口包扩面中旁路。
+  `PubBarrier`、prefetch，以及仅在 LLVM IR descriptor 重构时对预声明别名
+  `TypeInfo` 视图的 canonicalization；原生 `reflectdata` 逻辑保持不变。当前停止在
+  自动生成调用与已定义 `runtime.growslice` 的 LLVM 函数类型冲突。该问题属于
+  runtime ABI/声明的系统性建模边界，不在入口包扩面中旁路。
 
 调查 O2/statepoint 失败时，可保留完全相同的入口包范围，只移除优化 pipeline
 形成对照；这只是分类命令，不能作为 O2 资格结果：
