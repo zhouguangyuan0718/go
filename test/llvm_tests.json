@@ -1197,8 +1197,7 @@
       "linux/amd64": {
         "fixedbugs/issue23522.go": "x86 dynamic SSE4.1 floor selection lowers the guarded LLVM intrinsic to an unavailable external libcall",
         "fixedbugs/issue68322.go": "x86 dynamic SSE4.1 truncation lowers the guarded LLVM intrinsic to an unavailable external libcall",
-        "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls",
-        "stackobj2.go": "Linux/amd64 stack growth scans an uninitialized pointer slot in main.makelist"
+        "llvm_float_intrinsics.go": "x86 dynamic SSE4.1 and FMA intrinsics lower to unavailable external libc and libm calls"
       }
     },
     "platform_blacklist": {
