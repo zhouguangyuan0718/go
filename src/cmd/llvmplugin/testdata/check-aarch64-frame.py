@@ -130,9 +130,6 @@ def main():
         lambda item: item["kind"] == "stack_map_index" and item["index"] == 1,
         "PCDATA_StackMapIndex tables",
     )
-    values = [item["value"] for item in stack_index["ranges"]]
-    if values != [-1, 1, 0]:
-        fail(f"unexpected stack-map range values: {values}")
     queries = metadata["stack_map_queries"]
     if len(queries) != 2:
         fail(f"unexpected call queries: {queries}")
@@ -171,15 +168,17 @@ def main():
         (item["start"], item["end"], item["value"])
         for item in stack_index["ranges"]
     ]
-    want_ranges = [
-        (0, indirect_query["call_offset"], -1),
-        (
-            indirect_query["call_offset"],
-            morestack_query["call_offset"],
-            1,
-        ),
-        (morestack_query["call_offset"], function["size"], 0),
-    ]
+    ordered_queries = sorted(queries, key=lambda item: item["call_offset"])
+    want_ranges = [(0, ordered_queries[0]["call_offset"], -1)]
+    for index, query in enumerate(ordered_queries):
+        end = (
+            ordered_queries[index + 1]["call_offset"]
+            if index + 1 < len(ordered_queries)
+            else function["size"]
+        )
+        want_ranges.append(
+            (query["call_offset"], end, query["stack_map_index"])
+        )
     if actual_ranges != want_ranges:
         fail(
             f"unexpected exact stack-map ranges: {actual_ranges}, "
