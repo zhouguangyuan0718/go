@@ -70,7 +70,7 @@ const goStackGrowthStatepointAttr = "go-stack-growth-statepoint"
 const goAsyncUnsafeAttr = "go-async-unsafe"
 const goWriteBarrierIntrinsic = "llvm.go.gc.write.barrier"
 const goDeferEdgeIntrinsic = "llvm.go.defer.edge"
-const goPointerAddressObservation = "__goallc$pointer.address"
+const goPointerAddressObservation = "llvm.go.pointer.address"
 const goDeferResultMD = "goallc.defer_result"
 const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
@@ -285,12 +285,12 @@ func getOrInsertLLVMIntrinsic(name string, typ llvm.Type) llvm.Value {
 	return fn
 }
 
-func getLLVMIntrinsicDeclaration(name string) llvm.Value {
+func getLLVMIntrinsicDeclaration(name string, overloadTypes ...llvm.Type) llvm.Value {
 	id := llvm.LookupIntrinsicID(name)
 	if id == 0 {
 		base.Fatalf("unknown LLVM intrinsic %s", name)
 	}
-	return llvm.GetIntrinsicDeclaration(CurrentModule, id, nil)
+	return llvm.GetIntrinsicDeclaration(CurrentModule, id, overloadTypes)
 }
 
 func (lfc *LLVMFuncContext) llvmLifetimeStart(slot llvmStackSlot) {
@@ -736,11 +736,12 @@ func (lfc *LLVMFuncContext) stackAddress(v *Value) llvm.Value {
 
 func (lfc *LLVMFuncContext) observePointerAddress(pointer llvm.Value, resultType llvm.Type, name string) llvm.Value {
 	// Go stack pointers can change when a call grows the goroutine stack. Keep
-	// the physical-address observation opaque through LLVM optimization; the
+	// the physical-address observation ordered through LLVM optimization; the
 	// statepoint plugin lowers it to ptrtoint immediately before it computes
 	// pointer liveness and relocation SSA.
-	sig := llvm.FunctionType(resultType, []llvm.Type{pointer.Type()}, false)
-	fn := getOrInsertLLVMIntrinsic(goPointerAddressObservation, sig)
+	fn := getLLVMIntrinsicDeclaration(
+		goPointerAddressObservation, resultType, pointer.Type())
+	sig := fn.GlobalValueType()
 	return lfc.b.CreateCall(sig, fn, []llvm.Value{pointer}, name)
 }
 

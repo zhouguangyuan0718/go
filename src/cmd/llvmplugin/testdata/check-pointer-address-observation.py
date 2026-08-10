@@ -26,7 +26,7 @@ def main():
     )
     if optimized.returncode != 0:
         fail(f"opt failed:\n{optimized.stdout}{optimized.stderr}")
-    if optimized.stdout.count('call i64 @"__goallc$pointer.address"') != 2:
+    if optimized.stdout.count("call i64 @llvm.go.pointer.address.i64.p0") != 2:
         fail("O2 did not preserve both physical-address observations")
     if "ret i1 true" in optimized.stdout:
         fail("O2 folded the address comparison")
@@ -48,7 +48,7 @@ def main():
     if rewritten.returncode != 0:
         fail(f"llc failed:\n{rewritten.stdout}{rewritten.stderr}")
     ir = rewritten.stdout + rewritten.stderr
-    if "__goallc$pointer.address" in ir:
+    if "llvm.go.pointer.address" in ir:
         fail("statepoint rewrite left a pointer-address observation behind")
     patterns = [
         r"%before\.lowered = ptrtoint ptr %pointer to i64",

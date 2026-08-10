@@ -39,8 +39,6 @@ namespace {
 
 constexpr StringLiteral GoALLCGCName = "goallc";
 constexpr StringLiteral GCLeafAttr = "gc-leaf-function";
-constexpr StringLiteral GoPointerAddressObservation =
-    "__goallc$pointer.address";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
 constexpr StringLiteral GoDeferResultMD = "goallc.defer_result";
 constexpr StringLiteral GoOpenDeferBitsMD = "goallc.open_defer_bits";
@@ -1796,32 +1794,19 @@ Error materializeFunctionMarkerRelocs(Module &M) {
 }
 
 Error lowerPointerAddressObservations(Module &M) {
-  Function *Observer = M.getFunction(GoPointerAddressObservation);
-  if (!Observer)
-    return Error::success();
-  if (!Observer->isDeclaration())
-    return createStringError(
-        std::errc::invalid_argument,
-        "GoALLC pointer-address observation must be a declaration");
-
   SmallVector<CallInst *, 8> Calls;
-  for (User *U : Observer->users()) {
-    auto *Call = dyn_cast<CallInst>(U);
-    if (!Call || Call->getCalledFunction() != Observer ||
-        Call->arg_size() != 1 ||
-        !Call->getArgOperand(0)->getType()->isPointerTy() ||
-        !Call->getType()->isIntegerTy())
-      return createStringError(
-          std::errc::invalid_argument,
-          "GoALLC pointer-address observation has an invalid use");
-    unsigned AddressSpace =
-        cast<PointerType>(Call->getArgOperand(0)->getType())->getAddressSpace();
-    if (Call->getType()->getIntegerBitWidth() !=
-        M.getDataLayout().getPointerSizeInBits(AddressSpace))
-      return createStringError(
-          std::errc::invalid_argument,
-          "GoALLC pointer-address observation has an invalid result width");
-    Calls.push_back(Call);
+  SmallVector<Function *, 2> Declarations;
+  for (Function &F : M) {
+    if (F.getIntrinsicID() != Intrinsic::go_pointer_address)
+      continue;
+    Declarations.push_back(&F);
+    for (User *U : F.users()) {
+      auto *Call = dyn_cast<CallInst>(U);
+      if (!Call || Call->getCalledFunction() != &F)
+        return createStringError(std::errc::invalid_argument,
+                                 "llvm.go.pointer.address has an invalid use");
+      Calls.push_back(Call);
+    }
   }
 
   for (CallInst *Call : Calls) {
@@ -1832,7 +1817,9 @@ Error lowerPointerAddressObservations(Module &M) {
     Call->replaceAllUsesWith(Address);
     Call->eraseFromParent();
   }
-  Observer->eraseFromParent();
+  for (Function *Declaration : Declarations)
+    if (Declaration->use_empty())
+      Declaration->eraseFromParent();
   return Error::success();
 }
 

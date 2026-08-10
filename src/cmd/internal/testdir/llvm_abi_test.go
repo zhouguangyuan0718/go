@@ -132,7 +132,7 @@ func runLLVMAArch64ABIDifferentialTest(t *testing.T, gorootTestDir string) {
 		[]byte(`"go_results_tuple"`),
 		[]byte(`gc "goallc"`),
 		[]byte(`"go-stack-growth-statepoint"`),
-		[]byte(`call i64 @"__goallc$pointer.address"`),
+		[]byte(`call i64 @llvm.go.pointer.address.i64.p0`),
 	} {
 		if !bytes.Contains(ir, needle) {
 			t.Fatalf("GoALLC IR does not contain %q", needle)
