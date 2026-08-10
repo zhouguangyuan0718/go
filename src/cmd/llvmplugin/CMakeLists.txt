@@ -259,11 +259,9 @@ if(BUILD_TESTING)
   foreach(GOALLC_CALLIND_TARGET IN ITEMS X86 AArch64)
     if(GOALLC_CALLIND_TARGET STREQUAL "X86")
       set(GOALLC_CALLIND_TRIPLE "x86_64-unknown-linux-goobj")
-      set(GOALLC_CALLIND_OFFSET 17)
       set(GOALLC_DIRECT_CALL_RELOC 7)
     else()
       set(GOALLC_CALLIND_TRIPLE "aarch64-unknown-linux-goobj")
-      set(GOALLC_CALLIND_OFFSET 32)
       set(GOALLC_DIRECT_CALL_RELOC 9)
     endif()
     add_test(
@@ -275,7 +273,6 @@ if(BUILD_TESTING)
         --plugin "$<TARGET_FILE:GoALLCStatepoints>"
         --input "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
         --triple "${GOALLC_CALLIND_TRIPLE}"
-        --indirect-offset "${GOALLC_CALLIND_OFFSET}"
         --direct-reloc "${GOALLC_DIRECT_CALL_RELOC}"
         --output
           "${CMAKE_CURRENT_BINARY_DIR}/${GOALLC_CALLIND_TARGET}-indirect.goobj"
