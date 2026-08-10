@@ -526,10 +526,11 @@ path/filepath regexp strings text/scanner text/tabwriter
   `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend 而完整通过；
 - `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
   SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
-- `hash/fnv`、`encoding/json` 和 `encoding/xml`：均完成编译和链接，但 O2
-  产物运行时出现参数、指针或聚合数据破坏；对应的 `TestHashInterface` 和
-  `TestMarshalInvalidUTF8`，以及 `encoding/xml/TestDecodeEOF` 在不运行 O2
-  pipeline 的对照中通过，因此归为 `opt/statepoint`；
+- `sort`、`hash/fnv`、`encoding/json` 和 `encoding/xml`：均完成编译和链接，
+  但 O2 产物运行时出现 callback、参数、指针或聚合数据破坏；对应的
+  `sort/TestFind`、`TestHashInterface`、`TestMarshalInvalidUTF8` 和
+  `encoding/xml/TestDecodeEOF` 在不运行 O2 pipeline 的对照中通过，因此归为
+  `opt/statepoint`；
 - `encoding/pem`、`net/url`、`math/rand`、`archive/tar` 和 `archive/zip`：同样
   完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
   已确认的 O2/statepoint 问题相似，但在各自的无优化对照完成前不提前改分类；
