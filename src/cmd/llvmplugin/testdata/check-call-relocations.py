@@ -10,6 +10,8 @@ BLOCK_COUNT = 19
 SYMBOL_SIZE = 21
 RELOC_SIZE = 23
 R_CALLIND = 10
+BLK_DATA_IDX = 13
+BLK_DATA = 16
 
 
 def fail(message):
@@ -65,8 +67,63 @@ def read_object(path):
                     "target": target_index,
                 }
             )
-        result[name] = relocs
+        data_index_offset = offsets[BLK_DATA_IDX] + 4 * symbol_index
+        data_start, data_end = struct.unpack_from(
+            "<II", data, data_index_offset
+        )
+        result[name] = {
+            "data": data[
+                offsets[BLK_DATA] + data_start : offsets[BLK_DATA] + data_end
+            ],
+            "relocations": relocs,
+        }
     return result
+
+
+def is_x86_indirect_call(function_data, offset):
+    # Skip the instruction prefixes that may precede the FF /2 opcode. The
+    # relocation still points at the beginning of the complete instruction.
+    index = offset
+    legacy_prefixes = {
+        0x26,
+        0x2E,
+        0x36,
+        0x3E,
+        0x64,
+        0x65,
+        0x66,
+        0x67,
+        0xF2,
+        0xF3,
+    }
+    while index < len(function_data) and index - offset < 15:
+        byte = function_data[index]
+        if byte in legacy_prefixes or 0x40 <= byte <= 0x4F:
+            index += 1
+            continue
+        break
+    if index + 1 >= len(function_data) or function_data[index] != 0xFF:
+        return False
+    modrm = function_data[index + 1]
+    return modrm & 0x38 == 0x10
+
+
+def is_aarch64_indirect_call(function_data, offset):
+    if offset < 0 or offset + 4 > len(function_data) or offset % 4 != 0:
+        return False
+    instruction = struct.unpack_from("<I", function_data, offset)[0]
+    # BLR Xn, ignoring the register field in bits [9:5].
+    return instruction & 0xFFFFFC1F == 0xD63F0000
+
+
+def is_indirect_call(function_data, offset, triple):
+    if offset < 0 or offset >= len(function_data):
+        return False
+    if triple.startswith("x86_64-"):
+        return is_x86_indirect_call(function_data, offset)
+    if triple.startswith("aarch64-"):
+        return is_aarch64_indirect_call(function_data, offset)
+    fail(f"unsupported triple {triple}")
 
 
 def main():
@@ -75,7 +132,6 @@ def main():
     parser.add_argument("--plugin", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--triple", required=True)
-    parser.add_argument("--indirect-offset", type=int, required=True)
     parser.add_argument("--direct-reloc", type=int, required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -93,25 +149,45 @@ def main():
         ],
         check=True,
     )
-    relocations = read_object(args.output)
+    symbols = read_object(args.output)
 
-    expected_marker = {
-        "offset": args.indirect_offset,
+    expected_marker_fields = {
         "size": 0,
         "type": R_CALLIND,
         "addend": 0,
         "pkg": 0,
         "target": 0,
     }
+    marker_offsets = []
     for function_name in ("indirect_callee", "memory_indirect_callee"):
-        indirect = relocations.get(function_name)
+        indirect = symbols.get(function_name)
         if indirect is None:
             fail(f"missing {function_name} symbol")
-        markers = [reloc for reloc in indirect if reloc["type"] == R_CALLIND]
-        if markers != [expected_marker]:
+        relocations = indirect["relocations"]
+        markers = [
+            reloc for reloc in relocations if reloc["type"] == R_CALLIND
+        ]
+        if len(markers) != 1:
             fail(f"{function_name} has unexpected R_CALLIND markers: {markers}")
+        marker = markers[0]
+        marker_fields = {
+            key: marker[key] for key in expected_marker_fields
+        }
+        if marker_fields != expected_marker_fields:
+            fail(f"{function_name} has unexpected R_CALLIND marker: {marker}")
+        if not is_indirect_call(
+            indirect["data"], marker["offset"], args.triple
+        ):
+            code = indirect["data"][marker["offset"] : marker["offset"] + 8]
+            fail(
+                f"{function_name} R_CALLIND offset {marker['offset']} does not "
+                f"point at an indirect call instruction: {code.hex()}"
+            )
+        marker_offsets.append(marker["offset"])
         direct = [
-            reloc for reloc in indirect if reloc["type"] == args.direct_reloc
+            reloc
+            for reloc in relocations
+            if reloc["type"] == args.direct_reloc
         ]
         if len(direct) != 1:
             fail(
@@ -119,13 +195,16 @@ def main():
                 "want 1"
             )
 
-    direct_function = relocations.get("call_only_pointer_argument")
+    direct_function = symbols.get("call_only_pointer_argument")
     if direct_function is None:
         fail("missing call_only_pointer_argument symbol")
-    if any(reloc["type"] == R_CALLIND for reloc in direct_function):
+    direct_relocations = direct_function["relocations"]
+    if any(reloc["type"] == R_CALLIND for reloc in direct_relocations):
         fail("direct call function has an R_CALLIND marker")
     direct_calls = [
-        reloc for reloc in direct_function if reloc["type"] == args.direct_reloc
+        reloc
+        for reloc in direct_relocations
+        if reloc["type"] == args.direct_reloc
     ]
     if len(direct_calls) != 2:
         fail(
@@ -135,7 +214,8 @@ def main():
 
     print(
         f"{args.triple}: register and memory-loaded calls have R_CALLIND "
-        f"offset={expected_marker['offset']} size=0 target=0:0; "
+        f"offsets={marker_offsets} pointing at indirect call instructions, "
+        "size=0 target=0:0; "
         f"direct calls remain type={args.direct_reloc}"
     )
 
