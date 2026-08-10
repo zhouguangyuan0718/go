@@ -508,28 +508,30 @@ env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
 不能替代 Linux 正式 v8 资格。每个入口包都使用独立空 `GOCACHE`、
 `default<O2>` 和上述入口包命令，并在编译成功后运行完整包用例。
 
-以下 40 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
+以下 47 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
 
 ```text
 cmp container/heap container/list container/ring
-crypto/md5 crypto/sha1 crypto/sha256 crypto/sha512
+crypto/md5 crypto/rand crypto/sha1 crypto/sha256 crypto/sha512 crypto/subtle
 encoding/ascii85 encoding/base64 encoding/binary encoding/csv encoding/hex
-hash/adler32 hash/crc32 hash/crc64 hash/maphash html image/color mime
+go/scanner go/token hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
+html image/color mime mime/quotedprintable
 math math/bits math/cmplx path strconv unicode unicode/utf8 unicode/utf16
 bufio bytes compress/gzip compress/zlib index/suffixarray io io/fs
-path/filepath regexp strings text/scanner text/tabwriter
+path/filepath regexp strings text/scanner text/tabwriter text/template/parse
 ```
 
 失败按最早边界记录如下：
 
-- `regexp/syntax`：statepoint 拒绝 call parameter attribute `readnone`，属于
-  `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend 而完整通过；
+- `regexp/syntax` 和 `encoding/gob`：statepoint 拒绝 call parameter attribute
+  `readnone`，属于 `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend
+  而完整通过；
 - `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
   SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
-- `sort`、`hash/fnv`、`encoding/json` 和 `encoding/xml`：均完成编译和链接，
-  但 O2 产物运行时出现 callback、参数、指针或聚合数据破坏；对应的
-  `sort/TestFind`、`TestHashInterface`、`TestMarshalInvalidUTF8` 和
-  `encoding/xml/TestDecodeEOF` 在不运行 O2 pipeline 的对照中通过，因此归为
+- `sort`、`hash/fnv`、`encoding/json`、`encoding/xml`、`encoding/base32`、
+  `math/rand/v2`、`net/netip` 和 `image`：均完成编译和链接，但 O2 产物运行时
+  出现 callback、参数、指针或聚合数据破坏，或在 `image/TestYCbCr` 中超时；
+  对应失败在不运行 O2 pipeline 的同范围对照中通过，因此归为
   `opt/statepoint`；
 - `encoding/pem`、`net/url`、`math/rand`、`archive/tar` 和 `archive/zip`：同样
   完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
