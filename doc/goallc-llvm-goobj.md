@@ -502,6 +502,55 @@ env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
 这一层包含 `runtime`、`testing`、测试入口和全部依赖；只有它通过才能声称完整测试
 闭包使用 LLVM。它不是入口包 smoke test 的同义词。
 
+### Darwin/arm64 开发载荷阶段结果
+
+2026-08-11 的本地扩面使用基于正式 v8 加 LLVM #64 的 Darwin/arm64 开发载荷，
+不能替代 Linux 正式 v8 资格。每个入口包都使用独立空 `GOCACHE`、
+`default<O2>` 和上述入口包命令，并在编译成功后运行完整包用例。
+
+以下 40 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
+
+```text
+cmp container/heap container/list container/ring
+crypto/md5 crypto/sha1 crypto/sha256 crypto/sha512
+encoding/ascii85 encoding/base64 encoding/binary encoding/csv encoding/hex
+hash/adler32 hash/crc32 hash/crc64 hash/maphash html image/color mime
+math math/bits math/cmplx path strconv unicode unicode/utf8 unicode/utf16
+bufio bytes compress/gzip compress/zlib index/suffixarray io io/fs
+path/filepath regexp strings text/scanner text/tabwriter
+```
+
+失败按最早边界记录如下：
+
+- `regexp/syntax`：statepoint 拒绝 call parameter attribute `readnone`，属于
+  `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend 而完整通过；
+- `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
+  SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
+- `hash/fnv`、`encoding/json` 和 `encoding/xml`：均完成编译和链接，但 O2
+  产物运行时出现参数、指针或聚合数据破坏；对应的 `TestHashInterface` 和
+  `TestMarshalInvalidUTF8`，以及 `encoding/xml/TestDecodeEOF` 在不运行 O2
+  pipeline 的对照中通过，因此归为 `opt/statepoint`；
+- `encoding/pem`、`net/url`、`math/rand`、`archive/tar` 和 `archive/zip`：同样
+  完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
+  已确认的 O2/statepoint 问题相似，但在各自的无优化对照完成前不提前改分类；
+- 完整闭包已越过 atomic 8/64、`Mul{32,64}uover`、`GetClosurePtr`、`GetG`、
+  `PubBarrier`、prefetch 和 canonical type descriptor；当前停止在自动生成调用与
+  已定义 `runtime.growslice` 的 LLVM 函数类型冲突。该问题属于 runtime ABI/声明
+  的系统性建模边界，不在入口包扩面中旁路。
+
+调查 O2/statepoint 失败时，可保留完全相同的入口包范围，只移除优化 pipeline
+形成对照；这只是分类命令，不能作为 O2 资格结果：
+
+```sh
+TOOLEXEC_NOOPT="$TOOLDIR/llvmtoolexec"
+CACHE=$(mktemp -d)
+env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test -count=1 -timeout=2m \
+  -toolexec="$TOOLEXEC_NOOPT" \
+  -gcflags="$PKG=-enablellvm -llvmironly" \
+  "$PKG"
+```
+
 ### 失败分类和证据
 
 按最早出现错误的语义边界记录失败，并同时保留后续症状：
