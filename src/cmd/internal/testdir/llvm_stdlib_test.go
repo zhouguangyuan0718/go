@@ -22,8 +22,9 @@ import (
 const llvmStdlibPolicyEnv = "GOALLC_RUN_LLVM_STDLIB"
 
 type llvmStdlibTestSet struct {
-	Whitelist map[string]string `json:"whitelist"`
-	Blacklist map[string]string `json:"blacklist"`
+	Whitelist         map[string]string            `json:"whitelist"`
+	Blacklist         map[string]string            `json:"blacklist"`
+	PlatformBlacklist map[string]map[string]string `json:"platform_blacklist,omitempty"`
 }
 
 type llvmStdlibPolicy struct {
@@ -91,6 +92,24 @@ func classifyLLVMStdlibPackage(set llvmStdlibTestSet, name string) llvmStdlibCla
 	return llvmStdlibUnclassified
 }
 
+func effectiveLLVMStdlibTestSet(set llvmStdlibTestSet, platform string) llvmStdlibTestSet {
+	effective := llvmStdlibTestSet{
+		Whitelist: make(map[string]string, len(set.Whitelist)),
+		Blacklist: make(map[string]string, len(set.Blacklist)),
+	}
+	for name, reason := range set.Whitelist {
+		effective.Whitelist[name] = reason
+	}
+	for name, reason := range set.Blacklist {
+		effective.Blacklist[name] = reason
+	}
+	for name, reason := range set.PlatformBlacklist[platform] {
+		delete(effective.Whitelist, name)
+		effective.Blacklist[name] = reason
+	}
+	return effective
+}
+
 func validateLLVMStdlibPolicy(t *testing.T, packages map[string]bool, set llvmStdlibTestSet) {
 	t.Helper()
 	failed := false
@@ -130,6 +149,30 @@ func validateLLVMStdlibPolicy(t *testing.T, packages map[string]bool, set llvmSt
 			failed = true
 		}
 	}
+	for platform, entries := range set.PlatformBlacklist {
+		if strings.TrimSpace(platform) == "" {
+			t.Error("LLVM standard library platform blacklist has an empty platform")
+			failed = true
+		}
+		for name, reason := range entries {
+			if name == "*" || strings.ContainsAny(name, "*?[\\") {
+				t.Errorf("LLVM standard library platform blacklist entry %q for %s is not an exact package", name, platform)
+				failed = true
+			}
+			if !packages[name] {
+				t.Errorf("LLVM standard library platform blacklist entry %q for %s is not a standard library package", name, platform)
+				failed = true
+			}
+			if strings.TrimSpace(reason) == "" {
+				t.Errorf("LLVM standard library platform blacklist entry %q for %s has no reason", name, platform)
+				failed = true
+			}
+			if _, ok := set.Whitelist[name]; !ok {
+				t.Errorf("LLVM standard library platform blacklist entry %q for %s is not in the common whitelist", name, platform)
+				failed = true
+			}
+		}
+	}
 	for name := range packages {
 		if classifyLLVMStdlibPackage(set, name) == llvmStdlibUnclassified {
 			t.Errorf("standard library package %q is not classified as white or black", name)
@@ -165,6 +208,26 @@ func TestClassifyLLVMStdlibPackage(t *testing.T) {
 	}
 }
 
+func TestEffectiveLLVMStdlibTestSet(t *testing.T) {
+	set := llvmStdlibTestSet{
+		Whitelist: map[string]string{"bytes": "qualified", "cmp": "qualified"},
+		Blacklist: map[string]string{"*": "not yet qualified"},
+		PlatformBlacklist: map[string]map[string]string{
+			"linux/amd64": {"bytes": "known failure"},
+		},
+	}
+	effective := effectiveLLVMStdlibTestSet(set, "linux/amd64")
+	if got := classifyLLVMStdlibPackage(effective, "bytes"); got != llvmStdlibBlack {
+		t.Errorf("classifyLLVMStdlibPackage(bytes) = %v, want %v", got, llvmStdlibBlack)
+	}
+	if got := classifyLLVMStdlibPackage(effective, "cmp"); got != llvmStdlibWhite {
+		t.Errorf("classifyLLVMStdlibPackage(cmp) = %v, want %v", got, llvmStdlibWhite)
+	}
+	if got := classifyLLVMStdlibPackage(set, "bytes"); got != llvmStdlibWhite {
+		t.Errorf("platform selection modified the common set: classifyLLVMStdlibPackage(bytes) = %v, want %v", got, llvmStdlibWhite)
+	}
+}
+
 func TestLLVMStdlib(t *testing.T) {
 	if os.Getenv(llvmStdlibPolicyEnv) != "1" {
 		t.Skipf("set %s=1 to run the LLVM standard library package policy", llvmStdlibPolicyEnv)
@@ -178,8 +241,9 @@ func TestLLVMStdlib(t *testing.T) {
 	}
 
 	packages := llvmStdlibPackages(t)
-	set := readLLVMStdlibPolicy(t).EntryPackage
-	validateLLVMStdlibPolicy(t, packages, set)
+	policySet := readLLVMStdlibPolicy(t).EntryPackage
+	validateLLVMStdlibPolicy(t, packages, policySet)
+	set := effectiveLLVMStdlibTestSet(policySet, platform)
 	configureLLVMTestToolchain(t)
 	toolexec := llvmToolexec(t, "default<O2>")
 

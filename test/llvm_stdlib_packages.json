@@ -67,6 +67,14 @@
       "net/url": "runtime semantics: linked test binary corrupts data; no-optimization control not yet completed",
       "regexp/syntax": "opt/statepoint: statepoint rejects the readnone call parameter attribute",
       "sort": "opt/statepoint: O2 test binary corrupts data; no-optimization control passes"
+    },
+    "platform_blacklist": {
+      "linux/amd64": {
+        "bytes": "llc/GoObj: GoObj stack-growth statepoint contains an invalid argument pointer slot",
+        "crypto/md5": "runtime semantics: TestGolden passes corrupted interface arguments to runtime.convTnoptr",
+        "crypto/sha1": "runtime semantics: stack growth in blockAVX2 reports an untyped argument frame with a missing stack map",
+        "math": "llc/GoObj: x86-64 lowering requires unavailable ftrunc and ffloor libcalls"
+      }
     }
   }
 }
