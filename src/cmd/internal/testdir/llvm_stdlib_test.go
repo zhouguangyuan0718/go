@@ -21,6 +21,12 @@ import (
 
 const llvmStdlibPolicyEnv = "GOALLC_RUN_LLVM_STDLIB"
 
+// A package is only a required LLVM standard library test after it survives
+// multiple independent test processes. The processes share the isolated build
+// cache below, so this repeats runtime qualification without recompiling every
+// package from scratch.
+const llvmStdlibWhitelistRuns = 3
+
 type llvmStdlibTestSet struct {
 	Whitelist         map[string]string            `json:"whitelist"`
 	Blacklist         map[string]string            `json:"blacklist"`
@@ -273,30 +279,33 @@ func TestLLVMStdlib(t *testing.T) {
 	cache := t.TempDir()
 	for _, name := range whitelist {
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 5*time.Minute)
-			defer cancel()
-			cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t),
-				"test",
-				"-count=1",
-				"-timeout=2m",
-				"-toolexec="+toolexec,
-				fmt.Sprintf("-gcflags=%s=-enablellvm -llvmironly", name),
-				name,
-			)
-			cmd.Env = append(os.Environ(),
-				"GOENV=off",
-				"GOFLAGS=",
-				"GOROOT="+testenv.GOROOT(t),
-				"GOCACHE="+cache,
-			)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				if ctx.Err() != nil {
-					t.Fatalf("LLVM stdlib whitelist result: TIMEOUT package=%q: %v\n%s", name, ctx.Err(), out)
+			for run := 1; run <= llvmStdlibWhitelistRuns; run++ {
+				ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 5*time.Minute)
+				cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t),
+					"test",
+					"-count=1",
+					"-timeout=2m",
+					"-toolexec="+toolexec,
+					fmt.Sprintf("-gcflags=%s=-enablellvm -llvmironly", name),
+					name,
+				)
+				cmd.Env = append(os.Environ(),
+					"GOENV=off",
+					"GOFLAGS=",
+					"GOROOT="+testenv.GOROOT(t),
+					"GOCACHE="+cache,
+				)
+				out, err := cmd.CombinedOutput()
+				ctxErr := ctx.Err()
+				cancel()
+				if err != nil {
+					if ctxErr != nil {
+						t.Fatalf("LLVM stdlib whitelist result: TIMEOUT package=%q run=%d/%d: %v\n%s", name, run, llvmStdlibWhitelistRuns, ctxErr, out)
+					}
+					t.Fatalf("LLVM stdlib whitelist result: FAIL package=%q run=%d/%d: %v\n%s", name, run, llvmStdlibWhitelistRuns, err, out)
 				}
-				t.Fatalf("LLVM stdlib whitelist result: FAIL package=%q: %v\n%s", name, err, out)
+				t.Logf("LLVM stdlib whitelist result: PASS package=%q run=%d/%d", name, run, llvmStdlibWhitelistRuns)
 			}
-			t.Logf("LLVM stdlib whitelist result: PASS package=%q", name)
 		})
 	}
 }
