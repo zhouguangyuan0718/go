@@ -69,10 +69,10 @@ def main():
             r'"gc-live"\(<2 x ptr> %value\)',
         "whole fixed pointer vector relocation":
             r"call coldcc <2 x ptr> @llvm\.experimental\.gc\.relocate\.v2p0",
-        "nested fixed pointer vector reuse":
-            r'gc-live"\(<2 x ptr> %vector\.value\)',
+        "nested fixed pointer vector extraction":
+            r"%value\.leaf\.0 = extractvalue %vector_pair %value, 0",
         "nested fixed pointer vector reconstruction":
-            r"insertvalue %vector_pair .*<2 x ptr> %vector\.value\.relocated, 0",
+            r"insertvalue %vector_pair .*<2 x ptr> %value\.leaf\.0\.relocated, 0",
         "relocated leaf reconstruction":
             r"insertvalue %pair .*%value\.leaf\.0\.relocated",
         "aggregate phi scalarization": r"%value\.leaf\.0 = extractvalue %pair %value, 0",
@@ -109,10 +109,12 @@ def main():
     if not partial:
         fail("missing partial_insertvalue_across_call function")
     partial_body = partial.group(0)
-    if "partial.leaf" in partial_body:
-        fail("partially initialized aggregate materialized synthetic leaves")
+    if "%partial.leaf.0 = extractvalue %reflect_value %partial, 0" not in partial_body:
+        fail("defined partial aggregate leaf lacks a distinct SSA identity")
+    if "%partial.leaf.1" in partial_body:
+        fail("partially initialized aggregate materialized a poison leaf")
     partial_live = re.search(r'"gc-live"\(([^)]*)\)', partial_body)
-    if not partial_live or partial_live.group(1).strip() != "ptr %pointer":
+    if not partial_live or partial_live.group(1).strip() != "ptr %partial.leaf.0":
         fail("partially initialized aggregate recorded poison pointer leaves")
 
 

@@ -533,15 +533,19 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
   SmallVector<Value *, 8> Values;
   Values.reserve(Leaves.size());
   for (const AggregateLeaf &Leaf : Leaves) {
-    // Preserve leaves already exposed by an insertvalue chain. In particular,
-    // do not turn an undef or poison leaf into an ExtractValueInst: liveness
-    // would then treat the instruction as an ordinary pointer root even
-    // though SelectionDAG may legally remove its spill store. Constants are
-    // deliberately excluded from gc-live by isTrackedValue.
-    Value *LeafValue = FindInsertedValue(&Aggregate, Leaf.Indices);
-    if (!LeafValue)
-      LeafValue = Builder.CreateExtractValue(
-          &Aggregate, Leaf.Indices, leafName(Aggregate, Leaf.Indices));
+    // Use FindInsertedValue only to recognize leaves that do not contain a
+    // defined value. Reusing an ordinary inserted SSA value would make the
+    // relocation repair for this aggregate rewrite every other use of that
+    // value as well; distinct aggregate leaves need distinct SSA identities.
+    // Conversely, materializing an extractvalue from undef or poison would
+    // invent an ordinary pointer root whose SelectionDAG spill may be removed.
+    Value *Inserted = FindInsertedValue(&Aggregate, Leaf.Indices);
+    Value *LeafValue =
+        Inserted && isa<UndefValue, PoisonValue>(Inserted)
+            ? Inserted
+            : Builder.CreateExtractValue(
+                  &Aggregate, Leaf.Indices,
+                  leafName(Aggregate, Leaf.Indices));
     Values.push_back(LeafValue);
   }
   return Values;
