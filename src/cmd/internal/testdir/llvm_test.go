@@ -188,6 +188,7 @@ func runLLVMInfrastructureTests(t *testing.T, common testCommon) {
 	t.Run("caller-state", func(t *testing.T) {
 		runLLVMCallerStateTest(t, common.gorootTestDir)
 	})
+	t.Run("getg-abi0-fail-closed", runLLVMGetGABI0FailClosedTest)
 	t.Run("writebarrier-helpers", runLLVMWriteBarrierHelperTest)
 	t.Run("compile-only-regressions", func(t *testing.T) {
 		for _, name := range []string{"cmp.go", "typeparam/issue47684c.go"} {
@@ -197,6 +198,31 @@ func runLLVMInfrastructureTests(t *testing.T, common testCommon) {
 		}
 	})
 	t.Run("writebarrier-ir", runLLVMWriteBarrierIRTests)
+}
+
+func runLLVMGetGABI0FailClosedTest(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	source := filepath.Join(testenv.GOROOT(t), "src", "cmd", "internal", "testdir", "testdata", "llvm_getg_abi0.go")
+	archive := filepath.Join(dir, "getg.a")
+	cmd := exec.Command(goTool, "tool", "compile",
+		"-std",
+		"-+",
+		"-p=runtime",
+		"-enablellvm",
+		"-llvmironly",
+		"-o", archive,
+		source,
+	)
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=", "GOOS=linux", "GOARCH=amd64")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("LLVM accepted amd64 ABI0 OpGetG; want fail-closed\n%s", out)
+	}
+	want := "GetG is unsupported for LLVM amd64 ABI ABI0; ABI0 must load g from TLS"
+	if !bytes.Contains(out, []byte(want)) {
+		t.Fatalf("LLVM amd64 ABI0 OpGetG failed with the wrong diagnostic: %v\n%s\nwant substring %q", err, out, want)
+	}
 }
 
 func runLLVMCompileOnlyRegression(t *testing.T, gorootTestDir, name string) {

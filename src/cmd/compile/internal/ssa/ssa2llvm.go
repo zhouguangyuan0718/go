@@ -76,6 +76,7 @@ const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolNameMD = "goobj.symbol.name"
+const goObjSymbolIndexMD = "goobj.symbol.index"
 const llvmFramePointerAttr = "frame-pointer"
 const llvmFramePointerNonLeaf = "non-leaf"
 
@@ -494,6 +495,115 @@ func (lfc *LLVMFuncContext) unsignedMul64HiLo(v *Value) llvm.Value {
 	return lfc.buildPureTuple(v, high, low)
 }
 
+func (lfc *LLVMFuncContext) unsignedMulOver(v *Value) llvm.Value {
+	x, y := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1])
+	if x.Type() != y.Type() || x.Type().TypeKind() != llvm.IntegerTypeKind {
+		v.Fatalf("%s has incompatible LLVM operand types", v.Op)
+	}
+	bits := x.Type().IntTypeWidth()
+	if bits != 32 && bits != 64 {
+		v.Fatalf("%s has unsupported operand width %d", v.Op, bits)
+	}
+
+	i1 := GlobalCtxt.Int1Type()
+	overflowType := llvm.StructType([]llvm.Type{x.Type(), i1}, false)
+	sig := llvm.FunctionType(overflowType, []llvm.Type{x.Type(), x.Type()}, false)
+	fn := getOrInsertLLVMIntrinsic(fmt.Sprintf("llvm.umul.with.overflow.i%d", bits), sig)
+	result := lfc.b.CreateCall(sig, fn, []llvm.Value{x, y}, v.String())
+	product := lfc.b.CreateExtractValue(result, 0, v.String()+".product")
+	overflow := lfc.b.CreateExtractValue(result, 1, v.String()+".overflow.i1")
+	overflow = lfc.b.CreateZExt(overflow, getLLVMType(v.Type.FieldType(1)), v.String()+".overflow")
+	return lfc.buildPureTuple(v, product, overflow)
+}
+
+func (lfc *LLVMFuncContext) currentG(v *Value) llvm.Value {
+	abi := lfc.F.OwnAux.ABI().Which()
+	register, ok := llvmCurrentGRegister(lfc.F.Config.arch, abi)
+	if !ok {
+		if lfc.F.Config.arch == "amd64" && abi != obj.ABIInternal {
+			v.Fatalf("GetG is unsupported for LLVM amd64 ABI %v; ABI0 must load g from TLS", abi)
+		}
+		v.Fatalf("GetG is unsupported for LLVM target %s", lfc.F.Config.arch)
+	}
+
+	i64 := GlobalCtxt.Int64Type()
+	registerName := GlobalCtxt.MetadataAsValue(GlobalCtxt.MDString(register))
+	sig := llvm.FunctionType(i64, []llvm.Type{registerName.Type()}, false)
+	fn := getOrInsertLLVMIntrinsic("llvm.read_register.i64", sig)
+	raw := lfc.b.CreateCall(sig, fn, []llvm.Value{registerName}, v.String()+".register")
+	want := getLLVMType(v.Type)
+	if want.TypeKind() != llvm.PointerTypeKind {
+		v.Fatalf("GetG has non-pointer LLVM result type")
+	}
+	return lfc.b.CreateIntToPtr(raw, want, v.String())
+}
+
+func llvmCurrentGRegister(arch string, abi obj.ABI) (string, bool) {
+	switch arch {
+	case "amd64":
+		// The native amd64 backend only treats R14 as g under ABIInternal.
+		// ABI0 loads g from TLS and explicitly repairs R14 at ABI crossings;
+		// LLVM does not model those transitions yet, so fail closed.
+		if abi != obj.ABIInternal {
+			return "", false
+		}
+		return "r14", true
+	case "arm64":
+		return "x28", true
+	default:
+		return "", false
+	}
+}
+
+func (lfc *LLVMFuncContext) publicationBarrier(v *Value) llvm.Value {
+	if len(v.Args) != 1 || !v.Type.IsMemory() || !v.Args[0].Type.IsMemory() {
+		v.Fatalf("PubBarrier has an invalid memory operand")
+	}
+	lfc.GenLV(v.Args[0])
+	switch lfc.F.Config.arch {
+	case "amd64":
+		// Stores are already ordered on x86. A release fence is a compiler
+		// barrier and lowers without a machine instruction on this target.
+		return lfc.b.CreateFence(llvm.AtomicOrderingRelease, false, "")
+	case "arm64":
+		i32 := GlobalCtxt.Int32Type()
+		sig := llvm.FunctionType(GlobalCtxt.VoidType(), []llvm.Type{i32}, false)
+		fn := getOrInsertLLVMIntrinsic("llvm.aarch64.dmb", sig)
+		// Match the native ARM64 lowering's DMB ST option exactly. A generic
+		// LLVM release fence lowers to the stronger DMB ISH and loses this
+		// target-level publication-barrier contract.
+		return lfc.b.CreateCall(sig, fn, []llvm.Value{llvm.ConstInt(i32, 0xe, false)}, "")
+	default:
+		v.Fatalf("PubBarrier is unsupported for LLVM target %s", lfc.F.Config.arch)
+		return llvm.Value{}
+	}
+}
+
+func (lfc *LLVMFuncContext) prefetch(v *Value, locality uint64) llvm.Value {
+	if len(v.Args) != 2 || !v.Type.IsMemory() || !v.Args[1].Type.IsMemory() {
+		v.Fatalf("%s has invalid address or memory operands", v.Op)
+	}
+	address := lfc.GenLV(v.Args[0])
+	if address.Type().TypeKind() == llvm.IntegerTypeKind && address.Type().IntTypeWidth() == int(lfc.F.Config.PtrSize*8) {
+		address = lfc.b.CreateIntToPtr(address, GlobalCtxt.PointerType(0), v.String()+".address")
+	}
+	if address.Type().TypeKind() != llvm.PointerTypeKind {
+		v.Fatalf("%s has unsupported LLVM address type %s", v.Op, address.Type())
+	}
+	// Force the incoming Go memory dependency before emitting the side effect.
+	lfc.GenLV(v.Args[1])
+
+	i32 := GlobalCtxt.Int32Type()
+	sig := llvm.FunctionType(GlobalCtxt.VoidType(), []llvm.Type{address.Type(), i32, i32, i32}, false)
+	fn := getOrInsertLLVMIntrinsic("llvm.prefetch", sig)
+	return lfc.b.CreateCall(sig, fn, []llvm.Value{
+		address,
+		llvm.ConstInt(i32, 0, false),        // read
+		llvm.ConstInt(i32, locality, false), // 3 = keep, 0 = non-temporal
+		llvm.ConstInt(i32, 1, false),        // data cache
+	}, "")
+}
+
 func (lfc *LLVMFuncContext) unsignedDiv128By64(v *Value) llvm.Value {
 	hi, lo, divisor := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
 	i64 := GlobalCtxt.Int64Type()
@@ -542,7 +652,22 @@ func (lfc *LLVMFuncContext) selectPureTuple(v, src *Value, sel int) llvm.Value {
 	if tuple.Type().TypeKind() != llvm.StructTypeKind || len(tuple.Type().StructElementTypes()) != fields {
 		v.Fatalf("%s source %s has an incompatible LLVM tuple", v.Op, src.Op)
 	}
-	return lfc.b.CreateExtractValue(tuple, sel, v.String())
+	result := lfc.b.CreateExtractValue(tuple, sel, v.String()+".raw")
+	if result.Type() == getLLVMType(v.Type) {
+		result.SetName(v.String())
+		return result
+	}
+
+	// The MulUintptr intrinsic deliberately gives Mul{32,64}uover a
+	// (uint, uint) carrier tuple, while the Select1 produced for the source
+	// function's second result has Go type bool. Native backends turn the
+	// overflow flag into that bool while lowering the select. Do the same here
+	// rather than letting the carrier type escape into subsequent bool phis.
+	if sel == 1 && (src.Op == OpMul32uover || src.Op == OpMul64uover) && v.Type.IsBoolean() && result.Type().TypeKind() == llvm.IntegerTypeKind {
+		return lfc.goBool(lfc.llvmCondition(result, v.String()+".i1"), v.String())
+	}
+	v.Fatalf("%s source %s field %d has LLVM kind %v, want %v for Go type %v", v.Op, src.Op, sel, result.Type().TypeKind(), getLLVMType(v.Type).TypeKind(), v.Type)
+	return llvm.Value{}
 }
 
 func (lfc *LLVMFuncContext) bitLen(v *Value) llvm.Value {
@@ -1680,16 +1805,14 @@ func llvmFunctionUsesClosureContext(f *Func) bool {
 		}
 	}
 	needContext := f.OwnAux.Fn.NeedCtxt()
-	// NeedCtxt is the authoritative ABI property. Early deadcode may remove an
-	// unused OpGetClosurePtr while the hidden closure-context parameter must
-	// remain in the function signature.
-	if usesContext && !needContext {
-		f.fe.Fatalf(f.Entry.Pos, "closure context mismatch for %s: NEEDCTXT=%t, OpGetClosurePtr=%t", f.Name, needContext, usesContext)
-	}
-	if needContext && f.OwnAux.ABI().Which() != obj.ABIInternal {
+	// A live OpGetClosurePtr reads REGCTXT directly and therefore requires the
+	// hidden LLVM nest parameter even for the intrinsic's own body. NeedCtxt is
+	// still authoritative when early deadcode removes an otherwise unused op.
+	hasContext := usesContext || needContext
+	if hasContext && f.OwnAux.ABI().Which() != obj.ABIInternal {
 		f.fe.Fatalf(f.Entry.Pos, "closure context on unsupported ABI %v for %s", f.OwnAux.ABI().Which(), f.Name)
 	}
-	return needContext
+	return hasContext
 }
 
 func llvmLocalName(v *Value) (*ir.Name, llvmLocalKey) {
@@ -1820,6 +1943,14 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			v.Fatalf("closure context requested by a function without a closure ABI parameter")
 		}
 		lVal = lfc.ClosureContext
+		want := getLLVMType(v.Type)
+		if want.TypeKind() == llvm.IntegerTypeKind {
+			lVal = lfc.b.CreatePtrToInt(lVal, want, v.String())
+		} else if want.TypeKind() != llvm.PointerTypeKind {
+			v.Fatalf("closure context has unsupported LLVM result type")
+		}
+	case OpGetG:
+		lVal = lfc.currentG(v)
 	case OpGetCallerPC:
 		lVal = lfc.callerPC(v)
 	case OpGetCallerSP:
@@ -1898,6 +2029,8 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.b.CreateMul(arg0(), arg1(), v.String())
 	case OpMul64uhilo:
 		lVal = lfc.unsignedMul64HiLo(v)
+	case OpMul32uover, OpMul64uover:
+		lVal = lfc.unsignedMulOver(v)
 	case OpHmul32, OpHmul64:
 		lVal = lfc.highMultiply(v, true)
 	case OpHmul32u, OpHmul64u:
@@ -2139,16 +2272,21 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 		src := v.Args[0]
 		switch src.Op {
-		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
+		case OpAtomicLoadPtr, OpAtomicLoad8, OpAtomicLoad32, OpAtomicLoad64,
+			OpAtomicLoadAcq32, OpAtomicLoadAcq64,
 			OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
+			OpAtomicExchange8, OpAtomicExchange8Variant,
 			OpAtomicExchange32, OpAtomicExchange32Variant,
+			OpAtomicExchange64, OpAtomicExchange64Variant,
 			OpAtomicAnd64value, OpAtomicAnd64valueVariant,
 			OpAtomicAnd32value, OpAtomicAnd32valueVariant,
 			OpAtomicAnd8value, OpAtomicAnd8valueVariant,
 			OpAtomicOr64value, OpAtomicOr64valueVariant,
 			OpAtomicOr32value, OpAtomicOr32valueVariant,
 			OpAtomicOr8value, OpAtomicOr8valueVariant,
-			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
+			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant,
+			OpAtomicCompareAndSwap64, OpAtomicCompareAndSwap64Variant,
+			OpAtomicCompareAndSwapRel32:
 			load := lfc.GenLV(src)
 			if sel == 0 {
 				lVal = load
@@ -2180,16 +2318,21 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			if sel < int(aux.NResults()) {
 				lVal = lfc.llvmValueFromABI(v, lVal, aux.TypeOfResult(int64(sel)), v.Type, v.String()+".reshape")
 			}
-		case OpAtomicLoadPtr, OpAtomicLoad32, OpAtomicLoad64,
+		case OpAtomicLoadPtr, OpAtomicLoad8, OpAtomicLoad32, OpAtomicLoad64,
+			OpAtomicLoadAcq32, OpAtomicLoadAcq64,
 			OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
+			OpAtomicExchange8, OpAtomicExchange8Variant,
 			OpAtomicExchange32, OpAtomicExchange32Variant,
+			OpAtomicExchange64, OpAtomicExchange64Variant,
 			OpAtomicAnd64value, OpAtomicAnd64valueVariant,
 			OpAtomicAnd32value, OpAtomicAnd32valueVariant,
 			OpAtomicAnd8value, OpAtomicAnd8valueVariant,
 			OpAtomicOr64value, OpAtomicOr64valueVariant,
 			OpAtomicOr32value, OpAtomicOr32valueVariant,
 			OpAtomicOr8value, OpAtomicOr8valueVariant,
-			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
+			OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant,
+			OpAtomicCompareAndSwap64, OpAtomicCompareAndSwap64Variant,
+			OpAtomicCompareAndSwapRel32:
 			load := lfc.GenLV(src)
 			if sel == 0 {
 				lVal = load
@@ -2271,18 +2414,26 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpAtomicLoadPtr:
 		lVal = lfc.b.CreateLoad(GlobalCtxt.PointerType(0), arg0(), v.String())
 		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
-	case OpAtomicLoad32:
+	case OpAtomicLoad8, OpAtomicLoad32, OpAtomicLoad64, OpAtomicLoadAcq32, OpAtomicLoadAcq64:
 		lVal = lfc.b.CreateLoad(getLLVMType(v.Type.FieldType(0)), arg0(), v.String())
-		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
-		lVal.SetAlignment(4)
-	case OpAtomicLoad64:
-		lVal = lfc.b.CreateLoad(getLLVMType(v.Type.FieldType(0)), arg0(), v.String())
-		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
-		lVal.SetAlignment(8)
-	case OpAtomicStore32:
+		ordering := llvm.AtomicOrderingSequentiallyConsistent
+		if v.Op == OpAtomicLoadAcq32 || v.Op == OpAtomicLoadAcq64 {
+			ordering = llvm.AtomicOrderingAcquire
+		}
+		lVal.SetOrdering(ordering)
+		lVal.SetAlignment(int(v.Type.FieldType(0).Alignment()))
+	case OpAtomicStore8, OpAtomicStore8Variant,
+		OpAtomicStore32, OpAtomicStore32Variant,
+		OpAtomicStore64, OpAtomicStore64Variant,
+		OpAtomicStorePtrNoWB,
+		OpAtomicStoreRel32, OpAtomicStoreRel64:
 		lVal = lfc.b.CreateStore(arg1(), arg0())
-		lVal.SetOrdering(llvm.AtomicOrderingSequentiallyConsistent)
-		lVal.SetAlignment(4)
+		ordering := llvm.AtomicOrderingSequentiallyConsistent
+		if v.Op == OpAtomicStoreRel32 || v.Op == OpAtomicStoreRel64 {
+			ordering = llvm.AtomicOrderingRelease
+		}
+		lVal.SetOrdering(ordering)
+		lVal.SetAlignment(int(v.Args[1].Type.Alignment()))
 	case OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant:
 		old := lfc.b.CreateAtomicRMW(
 			llvm.AtomicRMWBinOpAdd, arg0(), arg1(),
@@ -2290,7 +2441,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal = lfc.b.CreateAdd(old, arg1(), v.String())
-	case OpAtomicExchange32, OpAtomicExchange32Variant:
+	case OpAtomicExchange8, OpAtomicExchange8Variant,
+		OpAtomicExchange32, OpAtomicExchange32Variant,
+		OpAtomicExchange64, OpAtomicExchange64Variant:
 		lVal = lfc.b.CreateAtomicRMW(
 			llvm.AtomicRMWBinOpXchg, arg0(), arg1(),
 			llvm.AtomicOrderingSequentiallyConsistent,
@@ -2317,15 +2470,29 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-	case OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant:
+	case OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant,
+		OpAtomicCompareAndSwap64, OpAtomicCompareAndSwap64Variant,
+		OpAtomicCompareAndSwapRel32:
+		successOrdering := llvm.AtomicOrderingSequentiallyConsistent
+		failureOrdering := llvm.AtomicOrderingSequentiallyConsistent
+		if v.Op == OpAtomicCompareAndSwapRel32 {
+			successOrdering = llvm.AtomicOrderingRelease
+			failureOrdering = llvm.AtomicOrderingMonotonic
+		}
 		pair := lfc.b.CreateAtomicCmpXchg(
 			arg0(), arg1(), lfc.GenLV(v.Args[2]),
-			llvm.AtomicOrderingSequentiallyConsistent,
-			llvm.AtomicOrderingSequentiallyConsistent,
+			successOrdering,
+			failureOrdering,
 			false,
 		)
 		success := lfc.b.CreateExtractValue(pair, 1, v.String()+".success")
 		lVal = lfc.b.CreateZExt(success, getLLVMType(v.Type.FieldType(0)), v.String())
+	case OpPubBarrier:
+		lVal = lfc.publicationBarrier(v)
+	case OpPrefetchCache:
+		lVal = lfc.prefetch(v, 3)
+	case OpPrefetchCacheStreamed:
+		lVal = lfc.prefetch(v, 0)
 	case OpNilCheck:
 		lVal = lfc.emitNilCheckIntrinsic(v)
 	case OpStore:
@@ -2632,6 +2799,7 @@ func LLVMCompile(f *Func) {
 			FCtxt.OpenDeferSlots[llvmLocalKeyForName(slot)] = i + 1
 		}
 	}
+	setLLVMSymbolLinkage(FCtxt.LF, f.OwnAux.Fn)
 	setGoObjFunctionFlags(FCtxt.LF, f.OwnAux.Fn)
 	setGoObjFunctionInfo(FCtxt.LF, f.OwnAux.Fn)
 	inParams := f.OwnAux.ABIInfo().InParams()
