@@ -527,36 +527,43 @@ env GOALLC_RUN_LLVM_STDLIB=1 GOALLC_LLVM_DIR="$LLVM_ROOT" \
 不能替代 Linux 正式 v8 资格。入口包共享同一个隔离 `GOCACHE`，
 `default<O2>` 和上述入口包命令，并在编译成功后运行完整包用例。
 
-以下 46 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
+以下 62 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
 
 ```text
 cmp container/heap container/list container/ring
 crypto/md5 crypto/rand crypto/sha1 crypto/sha256 crypto/sha512 crypto/subtle
 encoding/ascii85 encoding/base64 encoding/binary encoding/csv encoding/hex
-go/scanner hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
-html image/color mime mime/quotedprintable
-math math/bits math/cmplx path strconv unicode unicode/utf8 unicode/utf16
+encoding/base32 encoding/gob encoding/json encoding/pem encoding/xml
+go/scanner go/token hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
+hash/fnv html image image/color mime mime/quotedprintable
+math math/bits math/cmplx math/rand math/rand/v2 net/netip net/url path
+regexp/syntax sort strconv unicode unicode/utf8 unicode/utf16
+archive/tar archive/zip
 bufio bytes compress/gzip compress/zlib index/suffixarray io io/fs
 path/filepath regexp strings text/scanner text/tabwriter text/template/parse
 ```
 
-失败按最早边界记录如下：
+本轮通用修复后重新使用空缓存验证了后新增的 15 个包。其中：
 
-- `regexp/syntax` 和 `encoding/gob`：statepoint 拒绝 call parameter attribute
-  `readnone`，属于 `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend
-  而完整通过；
-- `go/token`：O2 栈增长时 inactive alloca 的布局基址被 LLVM 保守复制进
-  `gc-live`，运行时因扫描未初始化槽而报 invalid pointer，属于 `opt/statepoint`；
+- `encoding/base32`、`math/rand/v2`、`net/netip`、`image`、`sort`、`hash/fnv`、
+  `encoding/json`、`encoding/xml`、`encoding/pem`、`net/url`、`math/rand`、
+  `archive/tar` 和 `archive/zip` 在保留 Go 栈地址观察的 `OpConvert` lowering 后，
+  均以 `default<O2>` 完整通过；这说明原先的数据破坏和超时来自同一个
+  `opt/statepoint` 地址活跃性问题，而不是各包的运行语义；
+- `regexp/syntax` 和 `encoding/gob` 越过了 O2 推断的 `readnone` 参数属性；
+  statepoint verifier 和 SelectionDAG 均原生支持这一非 ABI 属性，因此插件与
+  `readonly` 等属性一样直接保留它；
+- `encoding/gob` 还暴露了一个独立的聚合标量化问题：对部分初始化的
+  `insertvalue poison/undef` 聚合，插件曾为未定义指针叶制造 `extractvalue` 并
+  错误加入 `gc-live`。SelectionDAG 合法删除 undef spill 后，GoObj 栈图仍会扫描
+  未初始化槽。现在标量化直接复用可从 `insertvalue` 链解析出的叶值，常量
+  poison/undef 不进入活根；`TestTypeRace` 50 次和完整 `encoding/gob` 5 次复测
+  均通过。
+
+当前入口包扩面的剩余失败按最早边界记录如下：
+
 - `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
   SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
-- `sort`、`hash/fnv`、`encoding/json`、`encoding/xml`、`encoding/base32`、
-  `math/rand/v2`、`net/netip` 和 `image`：均完成编译和链接，但 O2 产物运行时
-  出现 callback、参数、指针或聚合数据破坏，或在 `image/TestYCbCr` 中超时；
-  对应失败在不运行 O2 pipeline 的同范围对照中通过，因此归为
-  `opt/statepoint`；
-- `encoding/pem`、`net/url`、`math/rand`、`archive/tar` 和 `archive/zip`：同样
-  完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
-  已确认的 O2/statepoint 问题相似，但在各自的无优化对照完成前不提前改分类；
 - 完整闭包已越过 atomic 8/64、`Mul{32,64}uover`、`GetClosurePtr`、`GetG`、
   `PubBarrier`、prefetch，以及仅在 LLVM IR descriptor 重构时对预声明别名
   `TypeInfo` 视图的 canonicalization；原生 `reflectdata` 逻辑保持不变。当前停止在
