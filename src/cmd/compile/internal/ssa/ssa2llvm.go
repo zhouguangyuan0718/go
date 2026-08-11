@@ -516,13 +516,12 @@ func (lfc *LLVMFuncContext) unsignedMulOver(v *Value) llvm.Value {
 }
 
 func (lfc *LLVMFuncContext) currentG(v *Value) llvm.Value {
-	var register string
-	switch lfc.F.Config.arch {
-	case "amd64":
-		register = "r14"
-	case "arm64":
-		register = "x28"
-	default:
+	abi := lfc.F.OwnAux.ABI().Which()
+	register, ok := llvmCurrentGRegister(lfc.F.Config.arch, abi)
+	if !ok {
+		if lfc.F.Config.arch == "amd64" && abi != obj.ABIInternal {
+			v.Fatalf("GetG is unsupported for LLVM amd64 ABI %v; ABI0 must load g from TLS", abi)
+		}
 		v.Fatalf("GetG is unsupported for LLVM target %s", lfc.F.Config.arch)
 	}
 
@@ -536,6 +535,23 @@ func (lfc *LLVMFuncContext) currentG(v *Value) llvm.Value {
 		v.Fatalf("GetG has non-pointer LLVM result type")
 	}
 	return lfc.b.CreateIntToPtr(raw, want, v.String())
+}
+
+func llvmCurrentGRegister(arch string, abi obj.ABI) (string, bool) {
+	switch arch {
+	case "amd64":
+		// The native amd64 backend only treats R14 as g under ABIInternal.
+		// ABI0 loads g from TLS and explicitly repairs R14 at ABI crossings;
+		// LLVM does not model those transitions yet, so fail closed.
+		if abi != obj.ABIInternal {
+			return "", false
+		}
+		return "r14", true
+	case "arm64":
+		return "x28", true
+	default:
+		return "", false
+	}
 }
 
 func (lfc *LLVMFuncContext) publicationBarrier(v *Value) llvm.Value {
