@@ -511,7 +511,9 @@ env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
 因此包和构建模式仍使用不同缓存条目。工具链、payload 或同一路径下的外部 pass
 plugin 发生变化时必须换新缓存。任务使用 `default<O2>` 和本节“只编译入口标准库
 包”的 `-gcflags` 范围，因此普通依赖、`runtime` 和 `testing` 仍由原生 backend
-编译。这个任务不能用来声称依赖闭包或完整闭包已经使用 LLVM。
+编译。每个白名单包会在三个独立的 `go test -count=1` 进程中连续运行，三次共享
+编译缓存但任一次失败都会使白名单门禁失败；这个任务不能用来声称依赖闭包或完整
+闭包已经使用 LLVM。
 
 本地使用与 CI 相同的策略运行器：
 

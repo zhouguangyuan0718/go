@@ -71,9 +71,14 @@
     "platform_blacklist": {
       "linux/amd64": {
         "bytes": "llc/GoObj: GoObj stack-growth statepoint contains an invalid argument pointer slot",
+        "compress/gzip": "runtime semantics: FuzzReader passes a corrupted nil seed value to testing.F.Add",
         "crypto/md5": "runtime semantics: TestGolden passes corrupted interface arguments to runtime.convTnoptr",
         "crypto/sha1": "runtime semantics: stack growth in blockAVX2 reports an untyped argument frame with a missing stack map",
-        "math": "llc/GoObj: x86-64 lowering requires unavailable ftrunc and ffloor libcalls"
+        "encoding/binary": "runtime semantics: TestSizeAllocs observes corrupted reflect type metadata and an out-of-range name offset",
+        "math": "llc/GoObj: x86-64 lowering requires unavailable ftrunc and ffloor libcalls",
+        "mime/quotedprintable": "runtime semantics: TestReader observes corrupted nil input and error values",
+        "regexp": "runtime semantics: linked O2 tests request a corrupted allocation size and exhaust memory",
+        "strings": "runtime semantics: ReaderAt and PickAlgorithm observe corrupted nil integer and string values"
       }
     }
   }
