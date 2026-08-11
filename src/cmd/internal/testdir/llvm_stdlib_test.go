@@ -203,7 +203,7 @@ func TestLLVMStdlib(t *testing.T) {
 	t.Logf("LLVM stdlib blacklist result: NOT RUN remaining=%d reason=%q", len(packages)-len(whitelist)-len(knownBlacklist), set.Blacklist["*"])
 
 	for _, name := range whitelist {
-		if !t.Run(name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			cache := t.TempDir()
 			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 5*time.Minute)
 			defer cancel()
@@ -229,8 +229,6 @@ func TestLLVMStdlib(t *testing.T) {
 				t.Fatalf("LLVM stdlib whitelist result: FAIL package=%q: %v\n%s", name, err, out)
 			}
 			t.Logf("LLVM stdlib whitelist result: PASS package=%q", name)
-		}) {
-			t.FailNow()
-		}
+		})
 	}
 }
