@@ -202,9 +202,13 @@ func TestLLVMStdlib(t *testing.T) {
 	}
 	t.Logf("LLVM stdlib blacklist result: NOT RUN remaining=%d reason=%q", len(packages)-len(whitelist)-len(knownBlacklist), set.Blacklist["*"])
 
+	// The target package, gcflags, and toolexec pipeline are part of cmd/go's
+	// action IDs, so one isolated cache can safely serve every package in this
+	// policy run. The toolchain, payload, and pass plugin remain fixed for the
+	// lifetime of the test process.
+	cache := t.TempDir()
 	for _, name := range whitelist {
 		t.Run(name, func(t *testing.T) {
-			cache := t.TempDir()
 			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 5*time.Minute)
 			defer cancel()
 			cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t),

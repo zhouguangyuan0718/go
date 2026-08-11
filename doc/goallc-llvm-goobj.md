@@ -506,10 +506,12 @@ env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
 
 `test/llvm_stdlib_packages.json` 单独管理入口包层次的标准库白名单和黑名单。
 精确白名单优先于 `*` 黑名单；白名单包是 CI 的 required tests，黑名单包不运行，
-并保留最早失败边界或“尚未资格化”的原因。CI 为每个白名单包创建独立空
-`GOCACHE`，使用 `default<O2>` 和本节“只编译入口标准库包”的 `-gcflags` 范围，
-因此普通依赖、`runtime` 和 `testing` 仍由原生 backend 编译。这个任务不能用来
-声称依赖闭包或完整闭包已经使用 LLVM。
+并保留最早失败边界或“尚未资格化”的原因。CI 整个任务共享一个隔离
+`GOCACHE`；目标包、`-gcflags` 和 toolexec pipeline 都进入 cmd/go action ID，
+因此包和构建模式仍使用不同缓存条目。工具链、payload 或同一路径下的外部 pass
+plugin 发生变化时必须换新缓存。任务使用 `default<O2>` 和本节“只编译入口标准库
+包”的 `-gcflags` 范围，因此普通依赖、`runtime` 和 `testing` 仍由原生 backend
+编译。这个任务不能用来声称依赖闭包或完整闭包已经使用 LLVM。
 
 本地使用与 CI 相同的策略运行器：
 
@@ -522,16 +524,16 @@ env GOALLC_RUN_LLVM_STDLIB=1 GOALLC_LLVM_DIR="$LLVM_ROOT" \
 ### Darwin/arm64 开发载荷阶段结果
 
 2026-08-11 的本地扩面使用基于正式 v8 加 LLVM #64 的 Darwin/arm64 开发载荷，
-不能替代 Linux 正式 v8 资格。每个入口包都使用独立空 `GOCACHE`、
+不能替代 Linux 正式 v8 资格。入口包共享同一个隔离 `GOCACHE`，
 `default<O2>` 和上述入口包命令，并在编译成功后运行完整包用例。
 
-以下 47 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
+以下 46 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
 
 ```text
 cmp container/heap container/list container/ring
 crypto/md5 crypto/rand crypto/sha1 crypto/sha256 crypto/sha512 crypto/subtle
 encoding/ascii85 encoding/base64 encoding/binary encoding/csv encoding/hex
-go/scanner go/token hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
+go/scanner hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
 html image/color mime mime/quotedprintable
 math math/bits math/cmplx path strconv unicode unicode/utf8 unicode/utf16
 bufio bytes compress/gzip compress/zlib index/suffixarray io io/fs
@@ -543,6 +545,8 @@ path/filepath regexp strings text/scanner text/tabwriter text/template/parse
 - `regexp/syntax` 和 `encoding/gob`：statepoint 拒绝 call parameter attribute
   `readnone`，属于 `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend
   而完整通过；
+- `go/token`：O2 栈增长时 inactive alloca 的布局基址被 LLVM 保守复制进
+  `gc-live`，运行时因扫描未初始化槽而报 invalid pointer，属于 `opt/statepoint`；
 - `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
   SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
 - `sort`、`hash/fnv`、`encoding/json`、`encoding/xml`、`encoding/base32`、
