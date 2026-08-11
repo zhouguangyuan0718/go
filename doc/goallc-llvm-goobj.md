@@ -511,7 +511,9 @@ env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
 因此包和构建模式仍使用不同缓存条目。工具链、payload 或同一路径下的外部 pass
 plugin 发生变化时必须换新缓存。任务使用 `default<O2>` 和本节“只编译入口标准库
 包”的 `-gcflags` 范围，因此普通依赖、`runtime` 和 `testing` 仍由原生 backend
-编译。这个任务不能用来声称依赖闭包或完整闭包已经使用 LLVM。
+编译。每个白名单包会在三个独立的 `go test -count=1` 进程中连续运行，三次共享
+编译缓存但任一次失败都会使白名单门禁失败；这个任务不能用来声称依赖闭包或完整
+闭包已经使用 LLVM。
 
 本地使用与 CI 相同的策略运行器：
 
@@ -527,36 +529,73 @@ env GOALLC_RUN_LLVM_STDLIB=1 GOALLC_LLVM_DIR="$LLVM_ROOT" \
 不能替代 Linux 正式 v8 资格。入口包共享同一个隔离 `GOCACHE`，
 `default<O2>` 和上述入口包命令，并在编译成功后运行完整包用例。
 
-以下 46 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
+以下 62 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
 
 ```text
 cmp container/heap container/list container/ring
 crypto/md5 crypto/rand crypto/sha1 crypto/sha256 crypto/sha512 crypto/subtle
 encoding/ascii85 encoding/base64 encoding/binary encoding/csv encoding/hex
-go/scanner hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
-html image/color mime mime/quotedprintable
-math math/bits math/cmplx path strconv unicode unicode/utf8 unicode/utf16
+encoding/base32 encoding/gob encoding/json encoding/pem encoding/xml
+go/scanner go/token hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
+hash/fnv html image image/color mime mime/quotedprintable
+math math/bits math/cmplx math/rand math/rand/v2 net/netip net/url path
+regexp/syntax sort strconv unicode unicode/utf8 unicode/utf16
+archive/tar archive/zip
 bufio bytes compress/gzip compress/zlib index/suffixarray io io/fs
 path/filepath regexp strings text/scanner text/tabwriter text/template/parse
 ```
 
-失败按最早边界记录如下：
+本轮通用修复后重新使用空缓存验证了后新增的 15 个包。其中：
 
-- `regexp/syntax` 和 `encoding/gob`：statepoint 拒绝 call parameter attribute
-  `readnone`，属于 `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend
-  而完整通过；
-- `go/token`：O2 栈增长时 inactive alloca 的布局基址被 LLVM 保守复制进
-  `gc-live`，运行时因扫描未初始化槽而报 invalid pointer，属于 `opt/statepoint`；
-- `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
+- `encoding/base32`、`math/rand/v2`、`net/netip`、`image`、`sort`、`hash/fnv`、
+  `encoding/json`、`encoding/xml`、`encoding/pem`、`net/url`、`math/rand`、
+  `archive/tar` 和 `archive/zip` 在保留 Go 栈地址观察的 `OpConvert` lowering 后，
+  均以 `default<O2>` 完整通过；这说明原先的数据破坏和超时来自同一个
+  `opt/statepoint` 地址活跃性问题，而不是各包的运行语义；
+- `regexp/syntax` 和 `encoding/gob` 越过了 O2 推断的 `readnone` 参数属性；
+  statepoint verifier 和 SelectionDAG 均原生支持这一非 ABI 属性，因此插件与
+  `readonly` 等属性一样直接保留它；
+- `encoding/gob` 还暴露了一个独立的聚合标量化问题：对部分初始化的
+  `insertvalue poison/undef` 聚合，插件曾为未定义指针叶制造 `extractvalue` 并
+  错误加入 `gc-live`。SelectionDAG 合法删除 undef spill 后，GoObj 栈图仍会扫描
+  未初始化槽。现在只用 `FindInsertedValue` 识别 poison/undef 叶；已定义叶仍保留
+  各自的 `extractvalue` SSA 身份，避免 statepoint relocation 修复把同一源值的
+  其他使用一并改写。常量 poison/undef 不进入活根；`TestTypeRace` 50 次和完整
+  `encoding/gob` 5 次复测均通过。
+
+### Linux/amd64 正式 v8 资格复测
+
+2026-08-11 在 Ubuntu 22.04 x86-64 上使用 PR 121 的 `de9dde3b60` 和正式 release
+`goallc-llvm23.1.0-20260811T022435Z`（revision
+`90e5e5c7c626e3072fc77ce69cb42d8c7bb1b4a4`）复测了全部 28 个有精确降级记录的
+入口包。每包先独立运行三次；通过的 20 个候选又追加两次，因此以下包均为 5/5：
+
+```text
+archive/tar archive/zip compress/gzip
+encoding/base32 encoding/binary encoding/gob encoding/json encoding/pem encoding/xml
+go/token hash/fnv hash/maphash image mime/quotedprintable
+net/netip net/url regexp regexp/syntax sort strings
+```
+
+这些包不再需要公共或 linux/amd64 降级。公共白名单由 46 个增加到 60 个；扣除
+当前 5 个 linux/amd64 平台降级后，该平台 CI 实际要求 55 个包连续三次通过。
+剩余失败均保留在最早边界：
+
+- `bytes`：`llc/GoObj` 拒绝含无效参数指针槽的栈增长 statepoint；
+- `compress/flate`：X86 与 AArch64 都在 `compress/flate.testBlock` 的
+  SelectionDAG instruction selection 中断言；
+- `crypto/md5`：链接后的测试在 `runtime.convTnoptr` 附近发生 interface 数据破坏；
+- `crypto/sha1`：`blockAVX2` 栈增长时报告未类型化参数 frame 缺少 stack map；
+- `io`：三次中两次通过，一次 `TestPipeConcurrent/Write` 把已写数据替换为零字节，
+  属于仍可复现的间歇性 runtime semantics 问题，不能升白；
+- `math`：x86-64 lowering 缺少 `ftrunc` 和 `ffloor` libcall；
+- `math/rand`、`math/rand/v2`：x86-64 lowering 缺少 `ffloor` libcall，Linux arm64
+  仍需由 CI 之外的显式资格测试确认，所以暂不升入公共白名单。
+
+当前入口包扩面的剩余失败按最早边界记录如下：
+
+- `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 X86/AArch64
   SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
-- `sort`、`hash/fnv`、`encoding/json`、`encoding/xml`、`encoding/base32`、
-  `math/rand/v2`、`net/netip` 和 `image`：均完成编译和链接，但 O2 产物运行时
-  出现 callback、参数、指针或聚合数据破坏，或在 `image/TestYCbCr` 中超时；
-  对应失败在不运行 O2 pipeline 的同范围对照中通过，因此归为
-  `opt/statepoint`；
-- `encoding/pem`、`net/url`、`math/rand`、`archive/tar` 和 `archive/zip`：同样
-  完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
-  已确认的 O2/statepoint 问题相似，但在各自的无优化对照完成前不提前改分类；
 - 完整闭包已越过 atomic 8/64、`Mul{32,64}uover`、`GetClosurePtr`、`GetG`、
   `PubBarrier`、prefetch，以及仅在 LLVM IR descriptor 重构时对预声明别名
   `TypeInfo` 视图的 canonicalization；原生 `reflectdata` 逻辑保持不变。当前停止在

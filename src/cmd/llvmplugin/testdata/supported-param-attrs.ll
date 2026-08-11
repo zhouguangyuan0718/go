@@ -4,7 +4,7 @@ declare goabiinternal void @supported_callee(ptr)
 
 define goabiinternal void @supported_param_attrs(ptr %argument) #0 gc "goallc" {
 entry:
-  call goabiinternal void @supported_callee(ptr noundef nonnull align 8 %argument)
+  call goabiinternal void @supported_callee(ptr noundef nonnull readnone align 8 %argument)
   ret void
 }
 

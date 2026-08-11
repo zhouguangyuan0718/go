@@ -101,6 +101,21 @@ def main():
         fail("call-only aggregate argument was recorded in caller gc-live")
     if "extractvalue" in current_arg.group(0):
         fail("call-only aggregate argument was unnecessarily scalarized")
+    partial = re.search(
+        r"define goabiinternal ptr @partial_insertvalue_across_call.*?^}",
+        ir,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not partial:
+        fail("missing partial_insertvalue_across_call function")
+    partial_body = partial.group(0)
+    if "%partial.leaf.0 = extractvalue %reflect_value %partial, 0" not in partial_body:
+        fail("defined partial aggregate leaf lacks a distinct SSA identity")
+    if "%partial.leaf.1" in partial_body:
+        fail("partially initialized aggregate materialized a poison leaf")
+    partial_live = re.search(r'"gc-live"\(([^)]*)\)', partial_body)
+    if not partial_live or partial_live.group(1).strip() != "ptr %partial.leaf.0":
+        fail("partially initialized aggregate recorded poison pointer leaves")
 
 
 if __name__ == "__main__":
