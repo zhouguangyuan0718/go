@@ -10,6 +10,8 @@ package codegen
 // initialization task merely because LLVM data lowering scans for one.
 
 // LLVM-NOT: @codegen..inittask
+// LLVM-DAG: @codegen.llvmNoInitTaskValue = global {{.*}} zeroinitializer{{.*}}!goobj.symbol.index ![[INDEX:[0-9]+]]
+// LLVM-DAG: ![[INDEX]] = !{i32 {{[0-9]+}}}
 // LLVM-NOT: !goobj.marker_relocs
 
 var llvmNoInitTaskValue int

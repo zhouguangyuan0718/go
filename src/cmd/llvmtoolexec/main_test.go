@@ -206,6 +206,29 @@ func TestLLVMImportedPackageReferences(t *testing.T) {
 	}
 
 	object := readImportObjview(t, goTool, archivePath)
+	hasFlag := func(flags []string, want string) bool {
+		for _, flag := range flags {
+			if flag == want {
+				return true
+			}
+		}
+		return false
+	}
+	var sawDupokFunction, sawLocalGlobal bool
+	for _, symbol := range object.Symbols {
+		if strings.HasSuffix(symbol.Name, ".box[int]") && hasFlag(symbol.FlagNames, "dupok") {
+			sawDupokFunction = true
+		}
+		if strings.HasPrefix(symbol.Name, ".goallc.anon.") && hasFlag(symbol.FlagNames, "local") {
+			sawLocalGlobal = true
+		}
+	}
+	if !sawDupokFunction {
+		t.Error("generic wrapper did not derive GoObj dupok from weak LLVM linkage")
+	}
+	if !sawLocalGlobal {
+		t.Error("anonymous global did not derive GoObj local from internal LLVM linkage")
+	}
 
 	nativeList := testenv.Command(
 		t, goTool, "list", "-export", "-f={{.Export}}", packageArg,

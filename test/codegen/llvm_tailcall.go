@@ -6,11 +6,11 @@
 
 package codegen
 
-// LLVM-LABEL: define goabiinternal i64 @"codegen.(*llvmTailInter).dynamic"
+// LLVM-LABEL: define weak goabiinternal i64 @"codegen.(*llvmTailInter).dynamic"
 // LLVM-NOT: tail call
 // LLVM: %[[INTER_CALL:[0-9]+]] = call goabiinternal i64 %{{[0-9]+}}
 // LLVM-NEXT: ret i64 %[[INTER_CALL]]
-// LLVM-LABEL: define goabiinternal i64 @"codegen.(*llvmTailStatic).static"
+// LLVM-LABEL: define weak goabiinternal i64 @"codegen.(*llvmTailStatic).static"
 // LLVM-NOT: tail call
 // LLVM: %[[STATIC_CALL:[0-9]+]] = call goabiinternal i64 @"codegen.(*llvmTailBase).static"
 // LLVM-NEXT: ret i64 %[[STATIC_CALL]]

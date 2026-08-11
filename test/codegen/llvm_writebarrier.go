@@ -8,7 +8,7 @@ package codegen
 
 // LLVM-LABEL: define goabiinternal ptr @codegen.llvmWriteBarrierStore(
 // LLVM-SAME: ptr{{[^%]*}}%dst, ptr{{[^%]*}}%[[VALUE:[a-zA-Z0-9._]+]])
-// LLVM-SAME: #[[WBATTR:[0-9]+]] gc "goallc" {
+// LLVM-SAME: #[[WBATTR:[0-9]+]] gc "goallc" {{.*}}{
 // LLVM: load i32, ptr @runtime.writeBarrier
 // LLVM: br i1
 // LLVM: call ptr @llvm.go.gc.write.barrier(i32 2)
@@ -35,12 +35,12 @@ type llvmWriteBarrierPair struct {
 // The compiler drains its function queue in reverse source order, so keep the
 // checks in emitted IR order rather than beside the two source declarations.
 // LLVM-LABEL: define goabiinternal void @codegen.llvmWriteBarrierZero(
-// LLVM-SAME: #[[WBATTR]] gc "goallc" {
+// LLVM-SAME: #[[WBATTR]] gc "goallc" {{.*}}{
 // LLVM: call ptr @llvm.go.gc.write.barrier(i32 2)
 // LLVM: store ptr null
 // LLVM: store ptr null
 // LLVM-LABEL: define goabiinternal void @codegen.llvmWriteBarrierMove(
-// LLVM-SAME: #[[WBATTR]] gc "goallc" {
+// LLVM-SAME: #[[WBATTR]] gc "goallc" {{.*}}{
 // LLVM: call ptr @llvm.go.gc.write.barrier(i32 4)
 // LLVM: store ptr
 // LLVM: store ptr
