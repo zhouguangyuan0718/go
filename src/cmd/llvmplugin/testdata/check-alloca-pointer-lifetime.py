@@ -241,16 +241,18 @@ def main():
         fail("promoted alloca initialization may not use hosted memset")
     if not lifetime_start < entry_initialize < first_call < source_initialize:
         fail("promoted alloca was not initialized before its widened live range")
-    if "%slice.cap.leaf.0 = extractvalue" not in aggregate_body:
-        fail("hoisted aggregate stack address was not scalarized")
-    if "%slice.cap.leaf.0.relocated" not in aggregate_body:
-        fail("hoisted aggregate stack address was not relocated")
+    if "%slice.cap.leaf" in aggregate_body:
+        fail("known hoisted aggregate leaves were unnecessarily extracted")
+    if "%slot.address = getelementptr inbounds i8, ptr %slot, i64 0" not in aggregate_body:
+        fail("hoisted aggregate stack address was not canonicalized")
+    if "%slot.address.remat" not in aggregate_body:
+        fail("hoisted aggregate stack address was not rematerialized")
     statepoints = [
         line
         for line in aggregate_body.splitlines()
         if "@llvm.experimental.gc.statepoint" in line
     ]
-    if '"gc-live"(ptr %slice.cap.leaf.0)' not in statepoints[0]:
+    if '"gc-live"(ptr %slot)' not in statepoints[0]:
         fail("hoisted stack address is not live before its eventual use")
     if '"gc-live"' in statepoints[-1]:
         fail("promoted storage remained GC-live after its final use")

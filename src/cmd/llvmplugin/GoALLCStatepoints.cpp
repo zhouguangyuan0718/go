@@ -532,9 +532,18 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
 
   SmallVector<Value *, 8> Values;
   Values.reserve(Leaves.size());
-  for (const AggregateLeaf &Leaf : Leaves)
-    Values.push_back(Builder.CreateExtractValue(
-        &Aggregate, Leaf.Indices, leafName(Aggregate, Leaf.Indices)));
+  for (const AggregateLeaf &Leaf : Leaves) {
+    // Preserve leaves already exposed by an insertvalue chain. In particular,
+    // do not turn an undef or poison leaf into an ExtractValueInst: liveness
+    // would then treat the instruction as an ordinary pointer root even
+    // though SelectionDAG may legally remove its spill store. Constants are
+    // deliberately excluded from gc-live by isTrackedValue.
+    Value *LeafValue = FindInsertedValue(&Aggregate, Leaf.Indices);
+    if (!LeafValue)
+      LeafValue = Builder.CreateExtractValue(
+          &Aggregate, Leaf.Indices, leafName(Aggregate, Leaf.Indices));
+    Values.push_back(LeafValue);
+  }
   return Values;
 }
 
@@ -1328,6 +1337,7 @@ Error validateSafepoint(const SafepointRecord &Record) {
       // is covered separately.
       if (!Attr.hasAttribute(Attribute::Nest) &&
           !Attr.hasAttribute(Attribute::Captures) &&
+          !Attr.hasAttribute(Attribute::ReadNone) &&
           !Attr.hasAttribute(Attribute::ReadOnly) &&
           !Attr.hasAttribute(Attribute::NonNull) &&
           !Attr.hasAttribute(Attribute::NoUndef) &&
