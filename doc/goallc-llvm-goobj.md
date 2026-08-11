@@ -558,13 +558,43 @@ path/filepath regexp strings text/scanner text/tabwriter text/template/parse
 - `encoding/gob` 还暴露了一个独立的聚合标量化问题：对部分初始化的
   `insertvalue poison/undef` 聚合，插件曾为未定义指针叶制造 `extractvalue` 并
   错误加入 `gc-live`。SelectionDAG 合法删除 undef spill 后，GoObj 栈图仍会扫描
-  未初始化槽。现在标量化直接复用可从 `insertvalue` 链解析出的叶值，常量
-  poison/undef 不进入活根；`TestTypeRace` 50 次和完整 `encoding/gob` 5 次复测
-  均通过。
+  未初始化槽。现在只用 `FindInsertedValue` 识别 poison/undef 叶；已定义叶仍保留
+  各自的 `extractvalue` SSA 身份，避免 statepoint relocation 修复把同一源值的
+  其他使用一并改写。常量 poison/undef 不进入活根；`TestTypeRace` 50 次和完整
+  `encoding/gob` 5 次复测均通过。
+
+### Linux/amd64 正式 v8 资格复测
+
+2026-08-11 在 Ubuntu 22.04 x86-64 上使用 PR 121 的 `de9dde3b60` 和正式 release
+`goallc-llvm23.1.0-20260811T022435Z`（revision
+`90e5e5c7c626e3072fc77ce69cb42d8c7bb1b4a4`）复测了全部 28 个有精确降级记录的
+入口包。每包先独立运行三次；通过的 20 个候选又追加两次，因此以下包均为 5/5：
+
+```text
+archive/tar archive/zip compress/gzip
+encoding/base32 encoding/binary encoding/gob encoding/json encoding/pem encoding/xml
+go/token hash/fnv hash/maphash image mime/quotedprintable
+net/netip net/url regexp regexp/syntax sort strings
+```
+
+这些包不再需要公共或 linux/amd64 降级。公共白名单由 46 个增加到 60 个；扣除
+当前 5 个 linux/amd64 平台降级后，该平台 CI 实际要求 55 个包连续三次通过。
+剩余失败均保留在最早边界：
+
+- `bytes`：`llc/GoObj` 拒绝含无效参数指针槽的栈增长 statepoint；
+- `compress/flate`：X86 与 AArch64 都在 `compress/flate.testBlock` 的
+  SelectionDAG instruction selection 中断言；
+- `crypto/md5`：链接后的测试在 `runtime.convTnoptr` 附近发生 interface 数据破坏；
+- `crypto/sha1`：`blockAVX2` 栈增长时报告未类型化参数 frame 缺少 stack map；
+- `io`：三次中两次通过，一次 `TestPipeConcurrent/Write` 把已写数据替换为零字节，
+  属于仍可复现的间歇性 runtime semantics 问题，不能升白；
+- `math`：x86-64 lowering 缺少 `ftrunc` 和 `ffloor` libcall；
+- `math/rand`、`math/rand/v2`：x86-64 lowering 缺少 `ffloor` libcall，Linux arm64
+  仍需由 CI 之外的显式资格测试确认，所以暂不升入公共白名单。
 
 当前入口包扩面的剩余失败按最早边界记录如下：
 
-- `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
+- `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 X86/AArch64
   SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
 - 完整闭包已越过 atomic 8/64、`Mul{32,64}uover`、`GetClosurePtr`、`GetG`、
   `PubBarrier`、prefetch，以及仅在 LLVM IR descriptor 重构时对预声明别名
