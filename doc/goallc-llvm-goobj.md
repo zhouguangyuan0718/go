@@ -419,6 +419,185 @@ llvm/cmake-build-debug/bin/llvm-lit -sv \
 这同时验证 compiler archive、IR metadata、`llc`、GoObj archive member 和
 `cmd/link` 的接口。
 
+## 标准库的分层构建和测试
+
+扩大到标准库时必须记录 LLVM 实际覆盖的依赖范围。以下三种命令不能混称为
+“标准库使用 LLVM”。每次使用新的 `GOCACHE`，避免上一层生成的 archive 掩盖
+本层的编译边界；`-x -work` 和 wrapper 的 `-keep-ir` 可在调查失败时追加。
+
+公共设置如下。`LLVM_ROOT` 必须是构建 toolchain 时使用的项目 payload；正式
+Linux 资格还必须核对 release manifest 的 revision 和 `llvm_dirty=false`。
+Darwin 本地 dirty payload 只能记为开发验证。
+
+```sh
+GOROOT=/path/to/goallc-go-worktree
+LLVM_ROOT=/path/to/goallc-llvm-payload
+TOOLDIR=$("$GOROOT/bin/go" env GOTOOLDIR)
+TOOLEXEC="$TOOLDIR/llvmtoolexec -opt-passes=default<O2>"
+PKG=unicode/utf16
+```
+
+### 只编译入口标准库包
+
+```sh
+CACHE=$(mktemp -d)
+env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test -count=1 -timeout=2m \
+  -toolexec="$TOOLEXEC" \
+  -gcflags="$PKG=-enablellvm -llvmironly" \
+  "$PKG"
+```
+
+这里的“入口”是 cmd/go 的 package pattern：目标包及其 test variant 使用 LLVM，
+普通依赖、`runtime` 和 `testing` 仍使用原生 backend。它适合先验证单个包的
+frontend、GoObj、链接和运行语义，但不能证明其标准库依赖闭包使用了 LLVM。
+
+### 编译标准库依赖闭包，但保留 runtime 闭包
+
+下面从目标包的普通标准库依赖中减去 `runtime` 的依赖闭包。`testing` 和仅由测试
+引入的依赖不在普通 `go list -deps "$PKG"` 集合中，也保持原生 backend。
+
+```sh
+CACHE=$(mktemp -d)
+RUNTIME_DEPS=$(mktemp)
+env GOROOT="$GOROOT" GOCACHE="$CACHE" \
+  "$GOROOT/bin/go" list -deps \
+  -f '{{if .Standard}}{{.ImportPath}}{{end}}' runtime |
+  LC_ALL=C sort -u >"$RUNTIME_DEPS"
+
+LLVM_GCFLAGS=()
+while IFS= read -r dep; do
+  test -n "$dep" || continue
+  if ! grep -Fxq "$dep" "$RUNTIME_DEPS"; then
+    LLVM_GCFLAGS+=("-gcflags=$dep=-enablellvm -llvmironly")
+  fi
+done < <(
+  env GOROOT="$GOROOT" GOCACHE="$CACHE" \
+    "$GOROOT/bin/go" list -deps \
+    -f '{{if .Standard}}{{.ImportPath}}{{end}}' "$PKG" |
+    LC_ALL=C sort -u
+)
+
+env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test -count=1 -timeout=2m \
+  -toolexec="$TOOLEXEC" \
+  "${LLVM_GCFLAGS[@]}" \
+  "$PKG"
+```
+
+这个层次用来暴露入口包没有触及的公共依赖能力，例如 atomics、sync 和 io；遇到
+未支持 SSA op 时应归为 frontend 能力缺口，不要通过包名排除来制造假通过。
+
+### 编译 runtime/testing 在内的完整测试闭包
+
+```sh
+CACHE=$(mktemp -d)
+env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test -count=1 -timeout=2m \
+  -toolexec="$TOOLEXEC" \
+  -gcflags='all=-enablellvm -llvmironly' \
+  "$PKG"
+```
+
+这一层包含 `runtime`、`testing`、测试入口和全部依赖；只有它通过才能声称完整测试
+闭包使用 LLVM。它不是入口包 smoke test 的同义词。
+
+### 包级 CI 策略
+
+`test/llvm_stdlib_packages.json` 单独管理入口包层次的标准库白名单和黑名单。
+精确白名单优先于 `*` 黑名单；白名单包是 CI 的 required tests，黑名单包不运行，
+并保留最早失败边界或“尚未资格化”的原因。CI 整个任务共享一个隔离
+`GOCACHE`；目标包、`-gcflags` 和 toolexec pipeline 都进入 cmd/go action ID，
+因此包和构建模式仍使用不同缓存条目。工具链、payload 或同一路径下的外部 pass
+plugin 发生变化时必须换新缓存。任务使用 `default<O2>` 和本节“只编译入口标准库
+包”的 `-gcflags` 范围，因此普通依赖、`runtime` 和 `testing` 仍由原生 backend
+编译。这个任务不能用来声称依赖闭包或完整闭包已经使用 LLVM。
+
+本地使用与 CI 相同的策略运行器：
+
+```sh
+env GOALLC_RUN_LLVM_STDLIB=1 GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test cmd/internal/testdir \
+  -run '^TestLLVMStdlib$' -count=1 -timeout=100m -v
+```
+
+### Darwin/arm64 开发载荷阶段结果
+
+2026-08-11 的本地扩面使用基于正式 v8 加 LLVM #64 的 Darwin/arm64 开发载荷，
+不能替代 Linux 正式 v8 资格。入口包共享同一个隔离 `GOCACHE`，
+`default<O2>` 和上述入口包命令，并在编译成功后运行完整包用例。
+
+以下 46 个包完成了 LLVM 编译、GoObj/archive、链接和包用例运行：
+
+```text
+cmp container/heap container/list container/ring
+crypto/md5 crypto/rand crypto/sha1 crypto/sha256 crypto/sha512 crypto/subtle
+encoding/ascii85 encoding/base64 encoding/binary encoding/csv encoding/hex
+go/scanner hash hash/adler32 hash/crc32 hash/crc64 hash/maphash
+html image/color mime mime/quotedprintable
+math math/bits math/cmplx path strconv unicode unicode/utf8 unicode/utf16
+bufio bytes compress/gzip compress/zlib index/suffixarray io io/fs
+path/filepath regexp strings text/scanner text/tabwriter text/template/parse
+```
+
+失败按最早边界记录如下：
+
+- `regexp/syntax` 和 `encoding/gob`：statepoint 拒绝 call parameter attribute
+  `readnone`，属于 `opt/statepoint`；同轮 `regexp` 因其依赖使用原生 backend
+  而完整通过；
+- `go/token`：O2 栈增长时 inactive alloca 的布局基址被 LLVM 保守复制进
+  `gc-live`，运行时因扫描未初始化槽而报 invalid pointer，属于 `opt/statepoint`；
+- `compress/flate`：`llc` 在 `compress/flate.testBlock` 的 AArch64
+  SelectionDAG instruction selection 中断言失败，属于 `llc/GoObj` 的 llc 子类；
+- `sort`、`hash/fnv`、`encoding/json`、`encoding/xml`、`encoding/base32`、
+  `math/rand/v2`、`net/netip` 和 `image`：均完成编译和链接，但 O2 产物运行时
+  出现 callback、参数、指针或聚合数据破坏，或在 `image/TestYCbCr` 中超时；
+  对应失败在不运行 O2 pipeline 的同范围对照中通过，因此归为
+  `opt/statepoint`；
+- `encoding/pem`、`net/url`、`math/rand`、`archive/tar` 和 `archive/zip`：同样
+  完成编译和链接后出现数据破坏，先按可见边界归为 `runtime semantics`；症状与
+  已确认的 O2/statepoint 问题相似，但在各自的无优化对照完成前不提前改分类；
+- 完整闭包已越过 atomic 8/64、`Mul{32,64}uover`、`GetClosurePtr`、`GetG`、
+  `PubBarrier`、prefetch，以及仅在 LLVM IR descriptor 重构时对预声明别名
+  `TypeInfo` 视图的 canonicalization；原生 `reflectdata` 逻辑保持不变。当前停止在
+  自动生成调用与已定义 `runtime.growslice` 的 LLVM 函数类型冲突。该问题属于
+  runtime ABI/声明的系统性建模边界，不在入口包扩面中旁路。
+
+amd64 的 `GetG` 目前只接受 ABIInternal 并读取 R14。ABI0 在原生 backend 中从
+TLS 读取 g，并在 ABIInternal/ABI0 跨越处显式修复 R14；LLVM 尚未建模这套转换，
+因此 amd64 ABI0 遇到 `OpGetG` 会 fail-closed，而不是误读一个未建立契约的 R14。
+
+调查 O2/statepoint 失败时，可保留完全相同的入口包范围，只移除优化 pipeline
+形成对照；这只是分类命令，不能作为 O2 资格结果：
+
+```sh
+TOOLEXEC_NOOPT="$TOOLDIR/llvmtoolexec"
+CACHE=$(mktemp -d)
+env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test -count=1 -timeout=2m \
+  -toolexec="$TOOLEXEC_NOOPT" \
+  -gcflags="$PKG=-enablellvm -llvmironly" \
+  "$PKG"
+```
+
+### 失败分类和证据
+
+按最早出现错误的语义边界记录失败，并同时保留后续症状：
+
+- `frontend`：compile 在产生可用 IR 前拒绝 SSA op、ABI 或 closure 模型；
+- `opt/statepoint`：IR verifier、O2 pipeline、statepoint plugin 或 GC liveness 失败；
+- `llc/GoObj`：机器 lowering、GoObj symbol/relocation/aux data 与 frontend 契约不符；
+- `archive/link`：archive member、重复定义、relocation distance 或 Go linker 失败；
+- `runtime semantics`：成功链接后出现错误结果、panic、崩溃、死锁或 race；
+- `environment/timeout`：payload、loader、cache、宿主资源或独立超时问题。
+
+超时前已有错误栈或语义死锁时，根因仍记为 `runtime semantics`，timeout 只是症状。
+同理，若 consumer relocation 记录的 `(PkgIdx, SymIdx)` 名称正确，但 provider
+archive 同一 class index 指向另一个定义，根因是 `llc/GoObj`，不能归为运行时
+随机错误。报告至少包含 Go commit、payload manifest、OS/arch、scope、package、
+优化 pipeline、原生命令对照，以及 IR、`go tool objview -json`、link/runtime 中
+实际到达的最深证据。
+
 ## 回归测试机制
 
 GoALLC 不维护一套与 Go 仓库重复的测试源码。LLVM 测试由

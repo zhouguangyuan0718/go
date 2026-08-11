@@ -15,13 +15,13 @@ package codegen
 // LLVM-DAG: @llvm.compiler.used = appending global
 // LLVM-LABEL: define goabiinternal i64 @codegen.useLLVMInterface(
 // LLVM: call void @llvm.sideeffect(), !goobj.marker_reloc ![[USE_IFACE:[0-9]+]]
-// LLVM-LABEL: define goabiinternal i64 @codegen.llvmInterface.Value(
+// LLVM-LABEL: define weak goabiinternal i64 @codegen.llvmInterface.Value(
 // LLVM: call void @llvm.sideeffect(), !goobj.marker_reloc ![[VALUE_METHOD:[0-9]+]]
 // LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %
 // LLVM-SAME: (ptr
 // LLVM-SAME: i64
-// LLVM-LABEL: define goabiinternal i64 @codegen.llvmInterface.Double(
+// LLVM-LABEL: define weak goabiinternal i64 @codegen.llvmInterface.Double(
 // LLVM: call void @llvm.sideeffect(), !goobj.marker_reloc ![[DOUBLE_METHOD:[0-9]+]]
 // LLVM: load ptr, ptr
 // LLVM: call goabiinternal i64 %

@@ -17,7 +17,7 @@ type llvmGenericPair[A, B any] struct {
 //
 // LLVM-DAG: %"codegen.llvmGenericPair[int,string]" = type { i64, { ptr, i64 } }
 // LLVM-DAG: %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" = type { i64, { ptr, i64 } }
-// LLVM-LABEL: define goabiinternal %"codegen.llvmGenericPair[int,string]" @"codegen.llvmMakeGenericPair[int,string]"(
+// LLVM-LABEL: define weak goabiinternal %"codegen.llvmGenericPair[int,string]" @"codegen.llvmMakeGenericPair[int,string]"(
 // LLVM: [[SHAPE:%.*]] = call goabiinternal %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" @"codegen.llvmMakeGenericPair[go.shape.int,go.shape.string]"
 // LLVM: [[FIRST:%.*]] = extractvalue %"codegen.llvmGenericPair[go.shape.int,go.shape.string]" [[SHAPE]], 0
 // LLVM: [[CONCRETE0:%.*]] = insertvalue %"codegen.llvmGenericPair[int,string]" undef, i64 [[FIRST]], 0
