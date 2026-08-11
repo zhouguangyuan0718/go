@@ -2,6 +2,7 @@ target triple = "x86_64-unknown-linux-goobj"
 
 %pair = type { ptr, i64 }
 %triple = type { i64, ptr, ptr }
+%reflect_value = type { ptr, ptr, i64 }
 %nested = type { i64, [2 x { ptr, i32 }] }
 %vector_pair = type { <2 x ptr>, i64 }
 
@@ -64,6 +65,20 @@ entry:
   call goabiinternal void @leaf_consume_pair(%pair %value)
   %result = extractvalue %pair %value, 0
   ret ptr %result
+}
+
+; Scalarizing a partially initialized aggregate must not manufacture SSA
+; pointer roots for poison leaves. Those leaves can be overwritten after the
+; safepoint without ever being observed, as happens while reflect.Value is
+; assembled for a later call.
+define goabiinternal ptr @partial_insertvalue_across_call(ptr %pointer, i64 %number) "go-stack-growth-statepoint" gc "goallc" {
+entry:
+  %partial = insertvalue %reflect_value poison, ptr %pointer, 0
+  call goabiinternal void @safepoint()
+  %with_data = insertvalue %reflect_value %partial, ptr @partial_insertvalue_across_call, 1
+  %value = insertvalue %reflect_value %with_data, i64 %number, 2
+  %leaf = extractvalue %reflect_value %value, 0
+  ret ptr %leaf
 }
 
 define goabiinternal ptr @phi_across_call(i1 %choose, %pair %left_value, %pair %right_value) "go-stack-growth-statepoint" gc "goallc" {

@@ -244,7 +244,7 @@ if(BUILD_TESTING)
   )
   set_tests_properties(GoALLCStatepoints.SupportedParamAttrsRewrite PROPERTIES
     PASS_REGULAR_EXPRESSION
-      "ptr noundef nonnull align 8 %argument"
+      "ptr noundef nonnull readnone align 8 %argument"
   )
 
   add_test(
