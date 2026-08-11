@@ -22,7 +22,7 @@ jobs:
   linux:
     name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +150,19 @@ jobs:
           GOALLC_PASS_PLUGIN="$LLVM_ROOT/lib/GoALLCStatepoints.so" \
             ./bin/go test -count=1 \
               -run '^TestLLVMInitTaskOrder$' cmd/llvmtoolexec
+
+      - name: Test LLVM standard library package policy
+        shell: bash
+        env:
+          GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
+          GOALLC_FILECHECK: ${{ env.LLVM_ROOT }}/bin/FileCheck
+          GOALLC_RUN_LLVM_STDLIB: "1"
+        run: |
+          ./bin/go test cmd/internal/testdir \
+            -run '^TestLLVMStdlib$' \
+            -count=1 \
+            -timeout=100m \
+            -v
 
       - name: Test LLVM policy (white required, gray advisory)
         shell: bash

@@ -502,6 +502,23 @@ env GOROOT="$GOROOT" GOCACHE="$CACHE" GOALLC_LLVM_DIR="$LLVM_ROOT" \
 这一层包含 `runtime`、`testing`、测试入口和全部依赖；只有它通过才能声称完整测试
 闭包使用 LLVM。它不是入口包 smoke test 的同义词。
 
+### 包级 CI 策略
+
+`test/llvm_stdlib_packages.json` 单独管理入口包层次的标准库白名单和黑名单。
+精确白名单优先于 `*` 黑名单；白名单包是 CI 的 required tests，黑名单包不运行，
+并保留最早失败边界或“尚未资格化”的原因。CI 为每个白名单包创建独立空
+`GOCACHE`，使用 `default<O2>` 和本节“只编译入口标准库包”的 `-gcflags` 范围，
+因此普通依赖、`runtime` 和 `testing` 仍由原生 backend 编译。这个任务不能用来
+声称依赖闭包或完整闭包已经使用 LLVM。
+
+本地使用与 CI 相同的策略运行器：
+
+```sh
+env GOALLC_RUN_LLVM_STDLIB=1 GOALLC_LLVM_DIR="$LLVM_ROOT" \
+  "$GOROOT/bin/go" test cmd/internal/testdir \
+  -run '^TestLLVMStdlib$' -count=1 -timeout=100m -v
+```
+
 ### Darwin/arm64 开发载荷阶段结果
 
 2026-08-11 的本地扩面使用基于正式 v8 加 LLVM #64 的 Darwin/arm64 开发载荷，
@@ -541,6 +558,10 @@ path/filepath regexp strings text/scanner text/tabwriter text/template/parse
   `TypeInfo` 视图的 canonicalization；原生 `reflectdata` 逻辑保持不变。当前停止在
   自动生成调用与已定义 `runtime.growslice` 的 LLVM 函数类型冲突。该问题属于
   runtime ABI/声明的系统性建模边界，不在入口包扩面中旁路。
+
+amd64 的 `GetG` 目前只接受 ABIInternal 并读取 R14。ABI0 在原生 backend 中从
+TLS 读取 g，并在 ABIInternal/ABI0 跨越处显式修复 R14；LLVM 尚未建模这套转换，
+因此 amd64 ABI0 遇到 `OpGetG` 会 fail-closed，而不是误读一个未建立契约的 R14。
 
 调查 O2/statepoint 失败时，可保留完全相同的入口包范围，只移除优化 pipeline
 形成对照；这只是分类命令，不能作为 O2 资格结果：
