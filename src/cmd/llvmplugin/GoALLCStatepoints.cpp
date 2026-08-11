@@ -1793,9 +1793,41 @@ Error materializeFunctionMarkerRelocs(Module &M) {
   return Error::success();
 }
 
+Error lowerPointerAddressObservations(Module &M) {
+  SmallVector<CallInst *, 8> Calls;
+  SmallVector<Function *, 2> Declarations;
+  for (Function &F : M) {
+    if (F.getIntrinsicID() != Intrinsic::go_pointer_address)
+      continue;
+    Declarations.push_back(&F);
+    for (User *U : F.users()) {
+      auto *Call = dyn_cast<CallInst>(U);
+      if (!Call || Call->getCalledFunction() != &F)
+        return createStringError(std::errc::invalid_argument,
+                                 "llvm.go.pointer.address has an invalid use");
+      Calls.push_back(Call);
+    }
+  }
+
+  for (CallInst *Call : Calls) {
+    IRBuilder<> Builder(Call);
+    Builder.SetCurrentDebugLocation(Call->getDebugLoc());
+    Value *Address = Builder.CreatePtrToInt(
+        Call->getArgOperand(0), Call->getType(), Call->getName() + ".lowered");
+    Call->replaceAllUsesWith(Address);
+    Call->eraseFromParent();
+  }
+  for (Function *Declaration : Declarations)
+    if (Declaration->use_empty())
+      Declaration->eraseFromParent();
+  return Error::success();
+}
+
 } // namespace
 
 Error goallc::rewriteStatepoints(Module &M, TargetMachine &) {
+  if (Error Err = lowerPointerAddressObservations(M))
+    return Err;
   if (Error Err = materializeFunctionMarkerRelocs(M))
     return Err;
   for (Function &F : M) {
