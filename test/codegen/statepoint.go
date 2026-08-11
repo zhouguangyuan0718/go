@@ -6,8 +6,12 @@
 
 package codegen
 
+import "unsafe"
+
 // Functions are emitted in reverse declaration order.
 //
+// LLVM-LABEL: define goabiinternal i64 @codegen.goPointerAddress(
+// LLVM: call i64 @llvm.go.pointer.address.i64.p0(ptr %pointer)
 // LLVM-LABEL: define goabiinternal ptr @"codegen.(*goABIEntryReceiver).entryArgs"(
 // LLVM-NOT: llvm.experimental.stackmap
 // LLVM-LABEL: define goabiinternal ptr @codegen.goABIEntryArgs(
@@ -28,4 +32,8 @@ type goABIEntryReceiver struct{}
 
 func (receiver *goABIEntryReceiver) entryArgs(scalar int) *goABIEntryReceiver {
 	return receiver
+}
+
+func goPointerAddress(pointer unsafe.Pointer) uintptr {
+	return uintptr(pointer)
 }

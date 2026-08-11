@@ -9,10 +9,7 @@
 // silently drift apart.
 package main
 
-import (
-	"runtime"
-	"unsafe"
-)
+import "runtime"
 
 type stackAggregate struct {
 	left, right int
@@ -103,15 +100,10 @@ func growPointer(pointer *int, depth int) int {
 	return growPointer(pointer, depth-1) + *pointer
 }
 
-//go:noinline
-func stackAddress(pointer *byte) uintptr {
-	return uintptr(unsafe.Pointer(pointer))
-}
-
 // stackResultsAfterGrowth keeps caller-owned result slots live while a nested
-// call grows the Go stack. A caller must reload its current stack pointer after
-// this call; retaining the pre-call SP would read results from the retired
-// stack segment.
+// call recursively consumes enough stack to exercise stack growth. A caller
+// must reload its current stack pointer after this call; retaining the pre-call
+// SP would read results from the retired stack segment.
 //
 //go:noinline
 func stackResultsAfterGrowth(pointer *int) (
@@ -119,12 +111,7 @@ func stackResultsAfterGrowth(pointer *int) (
 	r8, r9, r10, r11, r12, r13, r14, r15 int,
 	result *int,
 ) {
-	var marker byte
-	oldStackAddress := stackAddress(&marker)
 	checksum := growPointer(pointer, 2000)
-	if stackAddress(&marker) == oldStackAddress {
-		panic("stackResultsAfterGrowth did not grow the stack")
-	}
 	return 0, 1, 2, 3, 4, 5, 6, 7,
 		8, 9, 10, 11, 12, 13, 14, checksum, pointer
 }

@@ -157,6 +157,18 @@ if(BUILD_TESTING)
   )
 
   add_test(
+    NAME GoALLCStatepoints.PointerAddressObservation
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-pointer-address-observation.py"
+      --opt "${GOALLC_OPT_EXECUTABLE}"
+      --llc "${GOALLC_LLC_EXECUTABLE}"
+      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
+      --input
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/pointer-address-observation.ll"
+  )
+
+  add_test(
     NAME GoALLCStatepoints.FrontendMarkersPreserved
     COMMAND
       "${GOALLC_LLC_EXECUTABLE}"
