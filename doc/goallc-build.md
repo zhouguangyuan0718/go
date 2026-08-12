@@ -145,21 +145,42 @@ GoALLC LLVM payload 发布在
 当前 Linux amd64 和 arm64 CI 固定使用：
 
 ```text
-tag:          goallc-llvm23.1.0-v2
-revision:     632f85a1ea4bc0d2ba302aaa7133fe5fbf592545
-amd64 asset: goallc-llvm23.1.0-v2-linux-amd64.tar.zst
-arm64 asset: goallc-llvm23.1.0-v2-linux-arm64.tar.zst
+tag:          goallc-llvm23.1.0-20260812T002702Z
+revision:     d9a0149bdda5b9fb1f63bf5c8cd2dbe71d7bf523
+amd64 asset: goallc-llvm23.1.0-20260812T002702Z-linux-amd64.tar.zst
+arm64 asset: goallc-llvm23.1.0-20260812T002702Z-linux-arm64.tar.zst
 ```
 
 发布 tag 由 llvm-project 的 `.github/workflows/goallc-release.yml` 构建；归档和
 对应 `.sha256` 文件同时上传。Go CI 在 `.github/workflows/goallc.yml` 中固定
-release tag、asset 名和 LLVM revision，并下载同版本的 checksum 文件校验 digest，
-relocatable prefix、manifest、工具、头文件、CMake package 和动态依赖，再运行
-`make.bash`。禁止依赖 `latest` release、系统 LLVM 或可变 URL。
+release tag 和 LLVM revision，由 release tag 推导 asset 名，并下载同版本的
+checksum 文件校验 digest、relocatable prefix、manifest、工具、头文件、CMake
+package 和动态依赖，再运行 `make.bash`。禁止依赖 `latest` release、系统 LLVM
+或可变 URL。
 
 升级 LLVM 时按以下顺序操作：先从新的 llvm-project commit 发布新 tag，确认
-Release asset 可重定位且 checksum 稳定，再在一个 Go PR 中同时更新上述三个固定
-值。旧 release 和 checksum 不覆盖，以便历史 Go commit 的 CI 可以复现。
+Release asset 可重定位且 checksum 稳定，再在一个 Go PR 中同时更新固定的 release
+tag 和 revision；asset 前缀由 release tag 推导。旧 release 和 checksum 不覆盖，
+以便历史 Go commit 的 CI 可以复现。
+
+需要同时修改 LLVM 和 Go 时，先为 LLVM 改动建立一个目标为
+`llvm23.1.master` 的 PR。LLVM 的 `GoALLC LLVM CI` 会从该 PR 的 head revision
+原生构建、测试并打包 Linux amd64 和 arm64 payload；两个任务全部成功后，受信的
+发布工作流只校验并转存归档和 checksum，不会执行 PR 产物。产物暂存在滚动的
+`goallc-llvm-ci` prerelease 中，LLVM PR 更新时替换为新的 revision，关闭时删除。
+
+在依赖它的 Go PR 描述中加入唯一一行：
+
+```text
+LLVM-PR: goallc/llvm-project#123
+```
+
+Go CI 会解析 LLVM PR 的当前 head revision，等待两个架构的 payload 发布，按
+release checksum 校验归档，并要求 payload manifest 中的 `llvm_revision` 与该
+head 完全相同。没有 `LLVM-PR` 行时仍使用工作流内固定的正式 release。修改 Go PR
+描述会重新运行 CI；LLVM PR 再次 push 后，需要重跑 Go PR CI 才会选择新的 head。
+联合构建产物只用于 PR 验证，合入 Go 前仍须先发布不可变的时间戳 LLVM release，
+再把 Go 工作流固定的 release 和 revision 更新到该正式版本。
 
 ## LLVM 测试工具选择
 
