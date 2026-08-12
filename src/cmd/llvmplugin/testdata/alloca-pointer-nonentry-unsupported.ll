@@ -1,5 +1,7 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; ERROR: GoALLC statepoints require a single fixed entry-block pointer-containing alloca
+
 declare goabiinternal void @safepoint()
 
 define goabiinternal void @nonentry_pointer_alloca(

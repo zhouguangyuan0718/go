@@ -1,5 +1,28 @@
 target triple = "aarch64-unknown-linux-goobj"
 
+; IR-LABEL: define goabiinternal i1 @hoisted_null_offset(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %base)
+; IR: %base.relocated{{.*}} = call {{.*}}ptr @llvm.experimental.gc.relocate
+; IR: %derived.remat{{.*}} = getelementptr i8, ptr %base.relocated{{.*}}, i64 96
+
+; IR-LABEL: define goabiinternal i8 @derived_chain(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %base)
+; IR: %field.remat{{.*}} = getelementptr i8, ptr %base.relocated{{.*}}, i64 16
+; IR: %element.remat{{.*}} = getelementptr i8, ptr %field.remat{{.*}}, i64 8
+
+; IR-LABEL: define goabiinternal i8 @conditional_derived(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %base)
+; IR: %derived.relocated.merge{{.*}} = phi ptr [ %derived.remat, %call ], [ %derived, %skip ]
+
+; IR-LABEL: define goabiinternal <2 x ptr> @derived_vector(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(<2 x ptr> %base)
+; IR: %base.relocated{{.*}} = call {{.*}}<2 x ptr> @llvm.experimental.gc.relocate.v2p0
+; IR: %derived.remat{{.*}} = getelementptr i8, <2 x ptr> %base.relocated{{.*}}, <2 x i64> <i64 16, i64 32>
+
+; IR-LABEL: define goabiinternal <2 x ptr> @derived_vector_from_scalar(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %base)
+; IR: %derived.remat{{.*}} = getelementptr i8, ptr %base.relocated{{.*}}, <2 x i64> <i64 16, i64 32>
+
 declare goabiinternal void @callee()
 
 ; Match the optimized form of issue56990: LLVM may legally hoist a field GEP

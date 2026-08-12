@@ -1,5 +1,51 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; IR-LABEL: define goabiinternal ptr @pair_across_call(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %value.leaf.0)
+
+; IR-LABEL: define goabiinternal ptr @triple_across_call(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %value.leaf.1, ptr %value.leaf.2)
+
+; IR-LABEL: define goabiinternal void @nested_across_call(
+; IR: extractvalue %nested %value, 1, 1, 0
+
+; IR-LABEL: define goabiinternal ptr @fixed_vector_across_call(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(<2 x ptr> %value)
+; IR: call coldcc <2 x ptr> @llvm.experimental.gc.relocate.v2p0
+
+; IR-LABEL: define goabiinternal ptr @nested_fixed_vector_across_call(
+; IR: %value.leaf.0 = extractvalue %vector_pair %value, 0
+; IR: insertvalue %vector_pair {{.*}}<2 x ptr> %value.leaf.0.relocated, 0
+
+; IR-LABEL: define goabiinternal ptr @insertvalue_across_call(
+; IR: insertvalue %pair {{.*}}ptr %value.leaf.0.relocated
+
+; IR-LABEL: define goabiinternal ptr @partial_insertvalue_across_call(
+; IR: %partial.leaf.0 = extractvalue %reflect_value %partial, 0
+; IR-NOT: %partial.leaf.1
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %partial.leaf.0)
+
+; IR-LABEL: define goabiinternal ptr @phi_across_call(
+; IR: %value.leaf.0 = extractvalue %pair %value, 0
+
+; IR-LABEL: define goabiinternal ptr @multiple_calls(
+; IR: %value.leaf.0.relocated2
+
+; IR-LABEL: define goabiinternal ptr @aggregate_call_result(
+; IR: call %pair @llvm.experimental.gc.result.{{[^(]+}}
+
+; IR-LABEL: define goabiinternal void @aggregate_current_call_argument(
+; IR-NOT: extractvalue
+; IR-NOT: "gc-live"
+; IR: @llvm.experimental.gc.statepoint{{.*}}@consume_pair{{.*}}%pair %value
+; IR: ret void
+
+; IR-LABEL: define goabiinternal void @aggregate_load_store(
+; IR: %value.leaf.0 = extractvalue %pair %value, 0
+
+; IR-LABEL: define goabiinternal void @frozen_aggregate(
+; IR: %value = freeze %pair poison
+
 %pair = type { ptr, i64 }
 %triple = type { i64, ptr, ptr }
 %reflect_value = type { ptr, ptr, i64 }

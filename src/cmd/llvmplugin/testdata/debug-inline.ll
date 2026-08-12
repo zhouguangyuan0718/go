@@ -1,5 +1,68 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; DEBUG-LABEL:      "name": "main.outer",
+; DEBUG:            "start_line": 5,
+; DEBUG:            "inline_tree": [
+; DEBUG:            "parent": -1,
+; DEBUG:            "line": 10,
+; DEBUG:            "name": "main.mid",
+; DEBUG-X86:        "parent_pc": 6
+; DEBUG-AARCH64:    "parent_pc": 0
+; DEBUG:            "parent": 0,
+; DEBUG:            "line": 20,
+; DEBUG:            "name": "main.inner",
+; DEBUG-X86:        "parent_pc": 7
+; DEBUG-AARCH64:    "parent_pc": 4
+; DEBUG-X86:        "pc_quantum": 1,
+; DEBUG-AARCH64:    "pc_quantum": 4,
+; DEBUG:            "kind": "pcfile",
+; DEBUG:            "value": 0,
+; DEBUG:            "file": "/tmp/goobj-inline/outer.go"
+; DEBUG:            "kind": "pcline",
+; DEBUG:            "value": 10
+; DEBUG:            "value": 20
+; DEBUG:            "kind": "pcinline",
+; DEBUG:            "value": -1
+; DEBUG:            "value": 0
+; DEBUG:            "value": 1
+
+; DEBUG-LABEL:      "name": "main.unlocated",
+; DEBUG:            "start_line": 40,
+; DEBUG:            "files": [
+; DEBUG:            "name": "/tmp/goobj-inline/unlocated.go"
+; DEBUG-X86:        "pc_quantum": 1,
+; DEBUG-AARCH64:    "pc_quantum": 4,
+; DEBUG:            "kind": "pcfile",
+; DEBUG:            "start": 0,
+; DEBUG:            "value": 1,
+; DEBUG:            "file": "/tmp/goobj-inline/unlocated.go"
+; DEBUG:            "kind": "pcline",
+; DEBUG:            "start": 0,
+; DEBUG:            "value": 40
+
+; DEBUG-LABEL:      "name": "main.zero",
+; DEBUG:            "start_line": 50,
+; DEBUG:            "inline_tree": [
+; DEBUG:            "parent": -1,
+; DEBUG:            "line": 0,
+; DEBUG:            "name": "main.zeroCallee",
+; DEBUG-X86:        "parent_pc": 6
+; DEBUG-AARCH64:    "parent_pc": 0
+
+; DEBUG-LABEL:      "name": "main.shared",
+; DEBUG:            "start_line": 70,
+; DEBUG:            "inline_tree": [
+; DEBUG:            "parent": -1,
+; DEBUG:            "line": 71,
+; DEBUG:            "name": "main.sharedLeft",
+; DEBUG-X86:        "parent_pc": 6
+; DEBUG-AARCH64:    "parent_pc": 0
+; DEBUG:            "parent": -1,
+; DEBUG:            "line": 71,
+; DEBUG:            "name": "main.sharedRight",
+; DEBUG-X86:        "parent_pc": 14
+; DEBUG-AARCH64:    "parent_pc": 12
+
 @main.sink = global i64 0
 
 define goabiinternal i64 @main.outer(i64 %x) !dbg !10 {
