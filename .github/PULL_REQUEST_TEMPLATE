@@ -2,6 +2,13 @@ This PR will be imported into Gerrit with the title and first
 comment (this text) used to generate the subject and body of
 the Gerrit change.
 
+<!--
+For a change that depends on an open GoALLC LLVM pull request, add an
+uncommented line such as:
+
+LLVM-PR: goallc/llvm-project#123
+-->
+
 **Please ensure you adhere to every item in this list.**
 
 More info can be found at https://go.dev/wiki/CommitMessage
