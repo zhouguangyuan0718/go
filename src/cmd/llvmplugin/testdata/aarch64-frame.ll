@@ -1,5 +1,85 @@
 target triple = "aarch64-apple-darwin-goobj"
 
+; OBJVIEW-LABEL: "name": "aarch64_pointer_and_code_live"
+; OBJVIEW: "locals": [[#LOCALS:]]
+; OBJVIEW: "kind": "pcsp"
+; OBJVIEW: "value": [[#LOCALS+8]]
+; OBJVIEW: "kind": "stack_map_index"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 2
+; OBJVIEW-NEXT: "num_bits": 2
+; OBJVIEW: "index": 0
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 1
+; OBJVIEW: "index": 1
+; OBJVIEW-NEXT: "set_bits": null
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "count": 2
+; OBJVIEW-NEXT: "num_bits": 2
+; OBJVIEW: "index": 0
+; OBJVIEW-NEXT: "set_bits": null
+; OBJVIEW: "index": 1
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 1
+
+; FRAME-TEXT-LABEL: TEXT aarch64_pointer_and_code_live(SB)
+; FRAME-TEXT: R_CALLARM64:runtime.morestack_noctxt{{.*}}PCDATA_StackMapIndex=0{{.*}}ArgsPointerMaps=01{{.*}}LocalsPointerMaps=00
+; FRAME-TEXT-NEXT: {{.*}}stack-growth safepoint{{.*}}map[0]{{.*}}ArgsPointerMaps=01{{.*}}LocalsPointerMaps=00
+; FRAME-TEXT: R_CALLIND{{.*}}PCDATA_StackMapIndex=1{{.*}}ArgsPointerMaps=00{{.*}}LocalsPointerMaps=01
+; FRAME-TEXT-NEXT: {{.*}}ordinary safepoint{{.*}}map[1]{{.*}}ArgsPointerMaps=00{{.*}}LocalsPointerMaps=01
+
+; OBJVIEW-LABEL: "name": "aarch64_abi0_pointer_result"
+; OBJVIEW: "args": 16
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 1
+; OBJVIEW-NEXT: "num_bits": 2
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "count": 1
+; OBJVIEW: "stack_map_index": 0
+; OBJVIEW-NEXT: "relocation_type": "R_CALLARM64"
+
+; OBJVIEW-LABEL: "name": "aarch64_stack_pointer_arg"
+; OBJVIEW: "args": 136
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 1
+; OBJVIEW-NEXT: "num_bits": 17
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "count": 1
+; OBJVIEW: "stack_map_index": 0
+; OBJVIEW-NEXT: "relocation_type": "R_CALLARM64"
+
+; OBJVIEW-LABEL: "name": "aarch64_subword_homes"
+; OBJVIEW: "args": 8
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 1
+; OBJVIEW-NEXT: "num_bits": 1
+; OBJVIEW: "set_bits": null
+; OBJVIEW: "stack_map_index": 0
+; OBJVIEW-NEXT: "relocation_type": "R_CALLARM64"
+
+; OBJVIEW-LABEL: "name": "aarch64_large_arg_home"
+; OBJVIEW: "args": 32776
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 1
+; OBJVIEW-NEXT: "num_bits": 4097
+; OBJVIEW: "set_bits": null
+; OBJVIEW: "stack_map_index": 0
+; OBJVIEW-NEXT: "relocation_type": "R_CALLARM64"
+
+; ASM: TEXT aarch64_subword_homes(SB)
+; ASM: MOVB R0, 8(RSP)
+; ASM: MOVH R1, 10(RSP)
+; ASM: MOVBU 8(RSP), R0
+; ASM: MOVHU 10(RSP), R1
+; ASM: TEXT aarch64_large_arg_home(SB)
+; ASM: ADD $16, RSP, R27
+; ASM: MOVD R0, 32760(R27)
+; ASM: MOVD 32760(R27), R0
+
 declare goabiinternal void @"runtime.GC"()
 
 ; Go indirect-call code words originate as uintptr values, not GC pointers.

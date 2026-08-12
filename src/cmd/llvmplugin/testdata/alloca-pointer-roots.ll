@@ -1,5 +1,121 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; IR-LABEL: define goabiinternal ptr @pointer_slot(
+; IR: "deopt"(i64 7, i64 1195461697, i64 15, i64 1, i64 1095520067, i64 11, ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 1, i64 64, i64 1, i64 1, i64 1095519299, i64 15)
+; IR-SAME: "gc-live"(ptr %slot)
+
+; IR-LABEL: define goabiinternal ptr @nested_whole_aggregate(
+; IR: "deopt"(i64 1195461697, i64 15, i64 1, i64 1095520067, i64 11, ptr %slot, i64 0, i64 48, i64 8, i64 8, i64 6, i64 64, i64 1, i64 41, i64 1095519299, i64 15)
+
+; IR-LABEL: define goabiinternal ptr @alloca_call_skip(
+; IR: "deopt"({{.*}}i64 1095520067{{.*}}ptr %slot{{.*}}i64 1095519299
+
+; IR-LABEL: define goabiinternal ptr @alloca_multiple_calls(
+; IR-COUNT-2: "deopt"({{.*}}i64 1095520067{{.*}}ptr %slot{{.*}}i64 1095519299
+; IR-NOT: store ptr null
+
+; IR-LABEL: define goabiinternal ptr @alloca_partial_initialization()
+; IR: call void @llvm.lifetime.start
+; IR-NEXT: call void @llvm.memset.inline
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot
+
+; IR-LABEL: define goabiinternal ptr @alloca_loop(
+; IR: "deopt"({{.*}}i64 1095520067{{.*}}ptr %slot{{.*}}i64 1095519299
+
+; IR-LABEL: define goabiinternal ptr @alloca_gep_address_across_call(
+; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 16{{.*}}i64 2{{.*}}i64 2{{.*}}i64 1095519299
+; IR: %result = load ptr, ptr %field
+; IR-NOT: %field.remat
+; IR-NOT: %field.relocated.merge
+
+; IR-LABEL: define goabiinternal void @alloca_direct_address_across_calls()
+; IR: "gc-live"(ptr %slot)
+; IR-COUNT-2: getelementptr inbounds i8, ptr %slot, i64 0
+; IR-NOT: .address.relocated.merge
+
+; IR-LABEL: define goabiinternal void @alloca_gep_value_across_calls()
+; IR: %field.remat{{[0-9]+}} = getelementptr inbounds %pointer_field, ptr %slot
+; IR: "gc-live"(ptr %slot)
+; IR: %field.remat = getelementptr inbounds %pointer_field, ptr %slot
+; IR-NOT: .remat.relocated.merge
+
+; IR-LABEL: define goabiinternal void @alloca_pointer_free_address_across_calls()
+; IR-NOT: "deopt"(
+; IR-NOT: "gc-live"(
+; IR-COUNT-2: getelementptr inbounds i8, ptr %slot, i64 0
+
+; IR-LABEL: define goabiinternal ptr @alloca_address_passed_to_callee(
+; IR: store ptr %pointer, ptr %slot
+; IR-NOT: store ptr null, ptr %slot
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot{{.*}}){{.*}}"gc-live"(ptr %slot)
+; IR: %slot.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+; IR-NOT: store ptr {{.*}}, ptr %slot
+
+; IR-LABEL: define goabiinternal void @alloca_marker_free_at_safepoint(
+; IR: i64 1095519299, i64 15), "gc-live"(ptr %pointer{{[,)]}}
+; IR: %pointer.relocated
+
+; IR-LABEL: define goabiinternal ptr @alloca_high_bitmap_word(
+; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 512{{.*}}i64 64{{.*}}i64 64{{.*}}i64 1{{.*}}i64 -9223372036854775808
+
+; IR-LABEL: define goabiinternal ptr @alloca_multiple_records(
+; IR: "deopt"({{.*}}i64 1, i64 1095520067{{.*}}ptr %left
+
+; IR-LABEL: define goabiinternal ptr @alloca_select_same_base(
+; IR: "deopt"({{.*}}ptr %slot
+; IR-SAME: "gc-live"(ptr %selected
+; IR: %selected.relocated
+
+; MIR-COUNT-31: STATEPOINT{{.*}}1195461697{{.*}}1095520067{{.*}}%{{(fixed-)?}}stack.{{[0-9]+}}
+; MIR-ALL-COUNT-34: STATEPOINT
+
+; O2-LABEL: define goabiinternal ptr @nested_whole_aggregate(
+; O2-NOT: alloca %nested
+; O2-LABEL: define goabiinternal ptr @alloca_call_skip(
+; O2: "deopt"({{.*}}i64 1095520067
+
+; OBJVIEW-LABEL: "name": "alloca_multiple_calls"
+; OBJVIEW-NOT: "kind": "stack_objects"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "set_bits": [
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "set_bits": null
+; OBJVIEW-LABEL: "name": "alloca_loop"
+
+; OBJVIEW-LABEL: "name": "alloca_direct_address_across_calls"
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "set_bits": [
+; OBJVIEW: "kind": "stack_objects"
+; OBJVIEW-LABEL: "name": "argument_home_address_across_calls"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "set_bits": [
+; OBJVIEW: "kind": "stack_objects"
+; OBJVIEW: "offset": 0
+; OBJVIEW: "size": 8
+; OBJVIEW: "ptr_bytes": 8
+; OBJVIEW-LABEL: "name": "argument_aggregate_home_address_across_calls"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0,
+; OBJVIEW-NEXT: 3,
+; OBJVIEW-NEXT: 5
+; OBJVIEW: "kind": "stack_objects"
+; OBJVIEW: "offset": 0
+; OBJVIEW: "size": 48
+; OBJVIEW: "ptr_bytes": 48
+; OBJVIEW: "name": "runtime.gcbits.2900000000000000"
+
+; OBJVIEW-LABEL: "name": "alloca_pointer_free_address_across_calls"
+; OBJVIEW-NOT: "kind": "stack_objects"
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "set_bits": null
+; OBJVIEW-LABEL: "name": "alloca_address_passed_to_callee"
+; OBJVIEW-NOT: "kind": "stack_objects"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "set_bits": [
+; OBJVIEW-LABEL: "name": "alloca_marker_free_at_safepoint"
+
 %nested = type { ptr, i64, [2 x { i32, ptr }] }
 %pointer_field = type { i64, ptr }
 %two_pointers = type { ptr, ptr }

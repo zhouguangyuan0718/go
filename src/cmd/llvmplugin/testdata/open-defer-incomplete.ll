@@ -1,5 +1,7 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; ERROR: GoALLC open-coded defer function is missing frame state metadata
+
 declare goabiinternal void @safepoint()
 
 define goabiinternal void @open_defer_missing_slots() #0 gc "goallc" {

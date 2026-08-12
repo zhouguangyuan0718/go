@@ -1,5 +1,33 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; OBJVIEW-LABEL: "name": "conditional_safepoint"
+; OBJVIEW: "size": [[#SIZE:]]
+; OBJVIEW: "kind": "unsafe_point"
+; OBJVIEW: "start": 0
+; OBJVIEW-NEXT: "end": [[#SIZE]]
+; OBJVIEW-NEXT: "value": -1
+; OBJVIEW: "kind": "stack_map_index"
+; OBJVIEW: "start": 0
+; OBJVIEW-NEXT: "end": [[#SAFEPOINT_START:]]
+; OBJVIEW-NEXT: "value": -1
+; OBJVIEW: "start": [[#SAFEPOINT_START]]
+; OBJVIEW-NEXT: "end": [[#MORESTACK_START:]]
+; OBJVIEW-NEXT: "value": 1
+; OBJVIEW: "start": [[#MORESTACK_START]]
+; OBJVIEW-NEXT: "end": [[#SIZE]]
+; OBJVIEW-NEXT: "value": 0
+; OBJVIEW: "kind": "locals_pointer_maps"
+; OBJVIEW: "count": 2
+; OBJVIEW: "index": 0
+; OBJVIEW-NEXT: "set_bits": null
+; OBJVIEW: "index": 1
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0
+; OBJVIEW: "call_offset": [[#SAFEPOINT_START+1]]
+; OBJVIEW: "stack_map_index": 1
+; OBJVIEW: "call_offset": [[#MORESTACK_START+1]]
+; OBJVIEW: "stack_map_index": 0
+
 declare goabiinternal void @callee()
 
 define goabiinternal i64 @conditional_safepoint(ptr %p, i1 %take_call) "go-stack-growth-statepoint" gc "goallc" {

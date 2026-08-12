@@ -1,5 +1,25 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; OBJVIEW-TEXT-LABEL: TEXT defer_edge(SB)
+; OBJVIEW-TEXT: R_CALL:runtime.deferreturn
+; OBJVIEW-TEXT-NEXT: {{.*}}ordinary safepoint{{.*}}map[{{[0-9]+}}]
+
+; OBJVIEW-TEXT-LABEL: TEXT defer_result(SB)
+; OBJVIEW-TEXT: FUNCDATA_LocalsPointerMaps count=3 bits=2 map[0]=00 map[1]=11 map[2]=10
+; OBJVIEW-TEXT-NOT: FUNCDATA_StackObjects
+; OBJVIEW-TEXT: R_CALL:runtime.deferproc
+; OBJVIEW-TEXT-NEXT: {{.*}}ordinary safepoint{{.*}}map[1]{{.*}}LocalsPointerMaps=11
+; OBJVIEW-TEXT: R_CALL:runtime.panicmem
+; OBJVIEW-TEXT-NEXT: {{.*}}ordinary safepoint{{.*}}map[2]{{.*}}LocalsPointerMaps=10
+; OBJVIEW-TEXT: R_CALL:runtime.deferreturn
+; OBJVIEW-TEXT-NEXT: {{.*}}ordinary safepoint{{.*}}map[2]{{.*}}LocalsPointerMaps=10
+
+; OBJVIEW-TEXT-LABEL: TEXT defer_wrapper(SB)
+
+; OBJVIEW-JSON-LABEL: "name": "defer_wrapper"
+; OBJVIEW-JSON: "func_id": 23
+; OBJVIEW-JSON-NEXT: "func_flags": 0
+
 declare goabiinternal void @runtime.deferproc()
 declare goabiinternal void @runtime.deferreturn()
 declare goabiinternal void @runtime.panicmem()

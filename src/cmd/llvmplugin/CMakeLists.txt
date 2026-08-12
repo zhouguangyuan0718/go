@@ -41,7 +41,6 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_program(GOALLC_LLC_EXECUTABLE
     NAMES llc
     HINTS "${LLVM_TOOLS_BINARY_DIR}"
@@ -52,6 +51,64 @@ if(BUILD_TESTING)
     HINTS "${LLVM_TOOLS_BINARY_DIR}"
     REQUIRED
   )
+  find_program(GOALLC_FILECHECK_EXECUTABLE
+    NAMES FileCheck
+    HINTS "${LLVM_TOOLS_BINARY_DIR}"
+    REQUIRED
+  )
+  find_program(GOALLC_NOT_EXECUTABLE
+    NAMES not
+    HINTS "${LLVM_TOOLS_BINARY_DIR}"
+    REQUIRED
+  )
+  find_program(GOALLC_BASH_EXECUTABLE NAMES bash REQUIRED)
+
+  # CTest does not model pipelines directly. Keep the shell glue here and put
+  # every assertion in the LLVM input next to the IR that it describes.
+  function(goallc_add_filecheck_test NAME CHECK_FILE CHECK_PREFIXES)
+    set(GOALLC_COMMAND_TEXT "")
+    foreach(GOALLC_COMMAND_ARG IN LISTS ARGN)
+      string(REPLACE "'" "'\"'\"'" GOALLC_QUOTED_ARG
+        "${GOALLC_COMMAND_ARG}")
+      string(APPEND GOALLC_COMMAND_TEXT " '${GOALLC_QUOTED_ARG}'")
+    endforeach()
+    string(REPLACE "'" "'\"'\"'" GOALLC_QUOTED_CHECK_FILE
+      "${CHECK_FILE}")
+    string(APPEND GOALLC_COMMAND_TEXT
+      " 2>&1 | '${GOALLC_FILECHECK_EXECUTABLE}'"
+      " --check-prefixes='${CHECK_PREFIXES}' '${GOALLC_QUOTED_CHECK_FILE}'")
+    add_test(
+      NAME "${NAME}"
+      COMMAND "${GOALLC_BASH_EXECUTABLE}" -o pipefail -c
+        "${GOALLC_COMMAND_TEXT}"
+    )
+  endfunction()
+
+  function(goallc_add_ir_filecheck_test NAME INPUT CHECK_PREFIXES)
+    goallc_add_filecheck_test(
+      "${NAME}" "${INPUT}" "${CHECK_PREFIXES}"
+      "${GOALLC_LLC_EXECUTABLE}"
+      ${ARGN}
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${INPUT}"
+    )
+  endfunction()
+
+  function(goallc_add_failure_filecheck_test NAME INPUT CHECK_PREFIXES)
+    goallc_add_filecheck_test(
+      "${NAME}" "${INPUT}" "${CHECK_PREFIXES}"
+      "${GOALLC_NOT_EXECUTABLE}"
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -goallc-pass-plugin-emit-ir
+      -filetype=null
+      -o -
+      "${INPUT}"
+    )
+  endfunction()
   add_test(
     NAME GoALLCStatepoints.Load
     COMMAND
@@ -111,14 +168,10 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/defer-edge.ll"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.OpenDefer
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-open-defer.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer.ll"
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.OpenDefer
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer.ll"
+    OPEN-DEFER
   )
 
   add_test(
@@ -132,41 +185,59 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer.ll"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.OpenDeferIncompleteFails
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer-incomplete.ll"
-      --contains
-        "GoALLC open-coded defer function is missing frame state metadata"
+  goallc_add_failure_filecheck_test(
+    GoALLCStatepoints.OpenDeferIncompleteFails
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer-incomplete.ll"
+    ERROR
   )
 
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.FunctionMarkerInlineOpt
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/function-marker-inline.ll"
+    INLINE-OPT
+    "${GOALLC_OPT_EXECUTABLE}"
+    -S "-passes=default<O2>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/function-marker-inline.ll"
+    -o -
+  )
+  set(GOALLC_FUNCTION_MARKER_PIPELINE
+    "'${GOALLC_OPT_EXECUTABLE}' -S '-passes=default<O2>'"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/function-marker-inline.ll' -o -"
+    " | '${GOALLC_LLC_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -goallc-pass-plugin-emit-ir -filetype=null -o - -"
+    " 2>&1"
+    " | '${GOALLC_FILECHECK_EXECUTABLE}' --check-prefix=INLINE-REWRITE"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/function-marker-inline.ll'")
+  string(JOIN "" GOALLC_FUNCTION_MARKER_PIPELINE
+    ${GOALLC_FUNCTION_MARKER_PIPELINE})
   add_test(
-    NAME GoALLCStatepoints.FunctionMarkerInline
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-function-marker-inline.py"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/function-marker-inline.ll"
+    NAME GoALLCStatepoints.FunctionMarkerInlineRewrite
+    COMMAND "${GOALLC_BASH_EXECUTABLE}" -o pipefail -c
+      "${GOALLC_FUNCTION_MARKER_PIPELINE}"
   )
 
+  set(GOALLC_POINTER_ADDRESS_PIPELINE
+    "'${GOALLC_OPT_EXECUTABLE}' -S '-passes=default<O2>' -o -"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/pointer-address-observation.ll'"
+    " | '${GOALLC_LLC_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -goallc-pass-plugin-emit-ir -filetype=null -o - - 2>&1"
+    " | '${GOALLC_FILECHECK_EXECUTABLE}' --check-prefix=REWRITE"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/pointer-address-observation.ll'")
+  string(JOIN "" GOALLC_POINTER_ADDRESS_PIPELINE
+    ${GOALLC_POINTER_ADDRESS_PIPELINE})
   add_test(
     NAME GoALLCStatepoints.PointerAddressObservation
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-pointer-address-observation.py"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/pointer-address-observation.ll"
+    COMMAND "${GOALLC_BASH_EXECUTABLE}" -o pipefail -c
+      "${GOALLC_POINTER_ADDRESS_PIPELINE}"
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.PointerAddressObservationO2
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/pointer-address-observation.ll"
+    O2
+    "${GOALLC_OPT_EXECUTABLE}" -S "-passes=default<O2>" -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/pointer-address-observation.ll"
   )
 
   add_test(
@@ -184,15 +255,24 @@ if(BUILD_TESTING)
       "go-stack-growth-statepoint"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.DebugInlineGoObj
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-debug-inline.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input "${CMAKE_CURRENT_SOURCE_DIR}/testdata/debug-inline.ll"
-  )
+  foreach(GOALLC_DEBUG_TARGET IN ITEMS X86 AArch64)
+    if(GOALLC_DEBUG_TARGET STREQUAL "X86")
+      set(GOALLC_DEBUG_TRIPLE x86_64-unknown-linux-goobj)
+      set(GOALLC_DEBUG_CHECK_PREFIX DEBUG-X86)
+    else()
+      set(GOALLC_DEBUG_TRIPLE aarch64-unknown-linux-goobj)
+      set(GOALLC_DEBUG_CHECK_PREFIX DEBUG-AARCH64)
+    endif()
+    add_test(
+      NAME GoALLCStatepoints.DebugInline${GOALLC_DEBUG_TARGET}GoObj
+      COMMAND "${GOALLC_LLC_EXECUTABLE}"
+        "-mtriple=${GOALLC_DEBUG_TRIPLE}"
+        "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+        -verify-machineinstrs -filetype=obj
+        -o "${CMAKE_CURRENT_BINARY_DIR}/debug-inline-${GOALLC_DEBUG_TARGET}.goobj"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/debug-inline.ll"
+    )
+  endforeach()
 
   add_test(
     NAME GoALLCStatepoints.ZeroLengthPointerArray
@@ -269,37 +349,44 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/supported-param-attrs.ll"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.CallOnlyPointersNotLive
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-call-only-liveness.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.CallOnlyPointersNotLive
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
+    IR
   )
 
   foreach(GOALLC_CALLIND_TARGET IN ITEMS X86 AArch64)
     if(GOALLC_CALLIND_TARGET STREQUAL "X86")
       set(GOALLC_CALLIND_TRIPLE "x86_64-unknown-linux-goobj")
-      set(GOALLC_DIRECT_CALL_RELOC 7)
     else()
       set(GOALLC_CALLIND_TRIPLE "aarch64-unknown-linux-goobj")
-      set(GOALLC_DIRECT_CALL_RELOC 9)
     endif()
     add_test(
-      NAME GoALLCStatepoints.${GOALLC_CALLIND_TARGET}IndirectCallRelocation
+      NAME GoALLCStatepoints.${GOALLC_CALLIND_TARGET}IndirectCallGoObj
       COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-call-relocations.py"
-        --llc "${GOALLC_LLC_EXECUTABLE}"
-        --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-        --input "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
-        --triple "${GOALLC_CALLIND_TRIPLE}"
-        --direct-reloc "${GOALLC_DIRECT_CALL_RELOC}"
-        --output
+        "${GOALLC_LLC_EXECUTABLE}"
+        "-mtriple=${GOALLC_CALLIND_TRIPLE}"
+        "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+        -verify-machineinstrs
+        -filetype=obj
+        -o
           "${CMAKE_CURRENT_BINARY_DIR}/${GOALLC_CALLIND_TARGET}-indirect.goobj"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
     )
+    if(GOALLC_OBJVIEW_EXECUTABLE)
+      goallc_add_filecheck_test(
+        GoALLCStatepoints.${GOALLC_CALLIND_TARGET}IndirectCallRelocation
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
+        "${GOALLC_CALLIND_TARGET}-OBJVIEW"
+        "${GOALLC_OBJVIEW_EXECUTABLE}" -format=text
+        "${CMAKE_CURRENT_BINARY_DIR}/${GOALLC_CALLIND_TARGET}-indirect.goobj"
+      )
+      set_tests_properties(
+        GoALLCStatepoints.${GOALLC_CALLIND_TARGET}IndirectCallRelocation
+        PROPERTIES
+        DEPENDS GoALLCStatepoints.${GOALLC_CALLIND_TARGET}IndirectCallGoObj
+      )
+    endif()
   endforeach()
 
   add_test(
@@ -317,15 +404,11 @@ if(BUILD_TESTING)
       "selected.relocated"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.DerivedPointerRematerialization
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-derived-pointer-rematerialization.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/derived-pointer-rematerialization.ll"
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.DerivedPointerRematerialization
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/derived-pointer-rematerialization.ll"
+    IR
+    -verify-machineinstrs
   )
 
   add_test(
@@ -404,75 +487,105 @@ if(BUILD_TESTING)
         "GOALLC_OBJVIEW_EXECUTABLE does not exist: "
         "${GOALLC_OBJVIEW_EXECUTABLE}")
     endif()
-    add_test(
-      NAME GoALLCStatepoints.DeferEdgeObjView
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-defer-edge.py"
-        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
-        --object "${CMAKE_CURRENT_BINARY_DIR}/defer-edge.goobj"
+    foreach(GOALLC_DEBUG_TARGET IN ITEMS X86 AArch64)
+      if(GOALLC_DEBUG_TARGET STREQUAL "X86")
+        set(GOALLC_DEBUG_CHECK_PREFIX DEBUG-X86)
+      else()
+        set(GOALLC_DEBUG_CHECK_PREFIX DEBUG-AARCH64)
+      endif()
+      goallc_add_filecheck_test(
+        GoALLCStatepoints.DebugInline${GOALLC_DEBUG_TARGET}ObjView
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/debug-inline.ll"
+        "DEBUG,${GOALLC_DEBUG_CHECK_PREFIX}"
+        "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+        "${CMAKE_CURRENT_BINARY_DIR}/debug-inline-${GOALLC_DEBUG_TARGET}.goobj"
+      )
+      set_tests_properties(
+        GoALLCStatepoints.DebugInline${GOALLC_DEBUG_TARGET}ObjView PROPERTIES
+        DEPENDS GoALLCStatepoints.DebugInline${GOALLC_DEBUG_TARGET}GoObj
+      )
+    endforeach()
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.DeferEdgeObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/defer-edge.ll"
+      OBJVIEW-TEXT
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -format=text
+      "${CMAKE_CURRENT_BINARY_DIR}/defer-edge.goobj"
     )
     set_tests_properties(GoALLCStatepoints.DeferEdgeObjView PROPERTIES
       DEPENDS GoALLCStatepoints.DeferEdgeGoObj
     )
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.DeferEdgeObjViewJSON
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/defer-edge.ll"
+      OBJVIEW-JSON
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/defer-edge.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.DeferEdgeObjViewJSON PROPERTIES
+      DEPENDS GoALLCStatepoints.DeferEdgeGoObj
+    )
 
-    add_test(
-      NAME GoALLCStatepoints.OpenDeferObjView
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-open-defer.py"
-        --llc "${GOALLC_LLC_EXECUTABLE}"
-        --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-        --input "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer.ll"
-        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.OpenDeferObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/open-defer.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/open-defer.goobj"
     )
     set_tests_properties(GoALLCStatepoints.OpenDeferObjView PROPERTIES
       DEPENDS GoALLCStatepoints.OpenDeferGoObj
     )
 
-    add_test(
-      NAME GoALLCStatepoints.MultipleCallsObjView
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-multiple-calls.py"
-        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
-        --object "${CMAKE_CURRENT_BINARY_DIR}/multiple-calls.goobj"
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.MultipleCallsObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/multiple-calls.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/multiple-calls.goobj"
     )
     set_tests_properties(GoALLCStatepoints.MultipleCallsObjView PROPERTIES
       DEPENDS GoALLCStatepoints.MultipleCallsGoObj
     )
 
-    add_test(
-      NAME GoALLCStatepoints.AArch64FrameObjView
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-aarch64-frame.py"
-        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
-        --object "${CMAKE_CURRENT_BINARY_DIR}/aarch64-frame.goobj"
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AArch64FrameObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aarch64-frame.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/aarch64-frame.goobj"
     )
     set_tests_properties(GoALLCStatepoints.AArch64FrameObjView PROPERTIES
       DEPENDS GoALLCStatepoints.AArch64FrameGoObj
     )
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AArch64FrameObjViewText
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aarch64-frame.ll"
+      "ASM,FRAME-TEXT"
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -format=text
+      "${CMAKE_CURRENT_BINARY_DIR}/aarch64-frame.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.AArch64FrameObjViewText PROPERTIES
+      DEPENDS GoALLCStatepoints.AArch64FrameGoObj
+    )
 
-    add_test(
-      NAME GoALLCStatepoints.ConditionalRelocationObjView
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-conditional-relocation.py"
-        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
-        --object "${CMAKE_CURRENT_BINARY_DIR}/conditional-relocation.goobj"
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.ConditionalRelocationObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/conditional-relocation.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/conditional-relocation.goobj"
     )
     set_tests_properties(GoALLCStatepoints.ConditionalRelocationObjView PROPERTIES
       DEPENDS GoALLCStatepoints.ConditionalRelocationGoObj
     )
 
-    add_test(
-      NAME GoALLCStatepoints.AggregateCallResultObjView
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-aggregate-call-result.py"
-        --objview "${GOALLC_OBJVIEW_EXECUTABLE}"
-        --object "${CMAKE_CURRENT_BINARY_DIR}/aggregate-call-result.goobj"
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AggregateCallResultObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-call-result-goobj.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/aggregate-call-result.goobj"
     )
     set_tests_properties(GoALLCStatepoints.AggregateCallResultObjView PROPERTIES
       DEPENDS GoALLCStatepoints.AggregateCallResultGoObj
@@ -494,16 +607,23 @@ if(BUILD_TESTING)
       "value\\.leaf\\.0\\.relocated"
   )
 
+  set(GOALLC_AGGREGATE_SCALARIZATION_PIPELINE
+    "'${GOALLC_LLC_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -goallc-pass-plugin-emit-ir -filetype=null -o -"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-scalarization.ll'"
+    " 2>&1"
+    " | '${GOALLC_OPT_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -S -passes=verify -o - -"
+    " | '${GOALLC_FILECHECK_EXECUTABLE}' --check-prefix=IR"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-scalarization.ll'")
+  string(JOIN "" GOALLC_AGGREGATE_SCALARIZATION_PIPELINE
+    ${GOALLC_AGGREGATE_SCALARIZATION_PIPELINE})
   add_test(
     NAME GoALLCStatepoints.AggregateScalarization
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-aggregate-scalarization.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-scalarization.ll"
+    COMMAND "${GOALLC_BASH_EXECUTABLE}" -o pipefail -c
+      "${GOALLC_AGGREGATE_SCALARIZATION_PIPELINE}"
   )
 
   add_test(
@@ -521,59 +641,112 @@ if(BUILD_TESTING)
       "call coldcc <2 x ptr> @llvm\\.experimental\\.gc\\.relocate\\.v2p0"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.AggregateScalableVectorFails
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-scalable-vector-unsupported.ll"
-      --contains
-      "do not support scalable vectors inside live pointer aggregates"
+  goallc_add_failure_filecheck_test(
+    GoALLCStatepoints.AggregateScalableVectorFails
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-scalable-vector-unsupported.ll"
+    ERROR
   )
 
-  set(GOALLC_ALLOCA_POINTER_ROOTS_EXTRA_ARGS)
-  if(GOALLC_OBJVIEW_EXECUTABLE)
-    list(APPEND GOALLC_ALLOCA_POINTER_ROOTS_EXTRA_ARGS
-      --objview "${GOALLC_OBJVIEW_EXECUTABLE}")
-  endif()
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.AllocaPointerRoots
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+    IR
+  )
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.AllocaPointerRootsAArch64
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+    IR
+    -mtriple=aarch64-unknown-linux-goobj
+    -frame-pointer=all
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.AllocaPointerRootsMIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+    MIR
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.AllocaPointerRootsMIRStatepointCount
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+    MIR-ALL
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
+  )
+  set(GOALLC_ALLOCA_O2_PIPELINE
+    "'${GOALLC_OPT_EXECUTABLE}' '-passes=default<O2>,verify' -S -o -"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll'"
+    " | '${GOALLC_LLC_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -goallc-pass-plugin-emit-ir -filetype=null -o - - 2>&1"
+    " | '${GOALLC_FILECHECK_EXECUTABLE}' --check-prefix=O2"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll'")
+  string(JOIN "" GOALLC_ALLOCA_O2_PIPELINE ${GOALLC_ALLOCA_O2_PIPELINE})
   add_test(
-    NAME GoALLCStatepoints.AllocaPointerRoots
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-alloca-pointer-roots.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
+    NAME GoALLCStatepoints.AllocaPointerRootsO2
+    COMMAND "${GOALLC_BASH_EXECUTABLE}" -o pipefail -c
+      "${GOALLC_ALLOCA_O2_PIPELINE}"
+  )
+  foreach(GOALLC_ALLOCA_TARGET IN ITEMS X86 AArch64)
+    if(GOALLC_ALLOCA_TARGET STREQUAL "X86")
+      set(GOALLC_ALLOCA_TRIPLE x86_64-unknown-linux-goobj)
+      set(GOALLC_ALLOCA_FRAME_ARGS)
+    else()
+      set(GOALLC_ALLOCA_TRIPLE aarch64-unknown-linux-goobj)
+      set(GOALLC_ALLOCA_FRAME_ARGS -frame-pointer=all)
+    endif()
+    add_test(
+      NAME GoALLCStatepoints.AllocaPointerRoots${GOALLC_ALLOCA_TARGET}GoObj
+      COMMAND "${GOALLC_LLC_EXECUTABLE}"
+        "-mtriple=${GOALLC_ALLOCA_TRIPLE}"
+        ${GOALLC_ALLOCA_FRAME_ARGS}
+        "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+        -verify-machineinstrs -filetype=obj
+        -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-pointer-roots-${GOALLC_ALLOCA_TARGET}.goobj"
         "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
-      ${GOALLC_ALLOCA_POINTER_ROOTS_EXTRA_ARGS}
-  )
-
-  add_test(
-    NAME GoALLCStatepoints.AllocaPointerRootsAArch64
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-alloca-pointer-roots.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --mtriple aarch64-unknown-linux-goobj
-      --input
+    )
+    if(GOALLC_OBJVIEW_EXECUTABLE)
+      goallc_add_filecheck_test(
+        GoALLCStatepoints.AllocaPointerRoots${GOALLC_ALLOCA_TARGET}ObjView
         "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
-      ${GOALLC_ALLOCA_POINTER_ROOTS_EXTRA_ARGS}
-  )
+        OBJVIEW
+        "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+        "${CMAKE_CURRENT_BINARY_DIR}/alloca-pointer-roots-${GOALLC_ALLOCA_TARGET}.goobj"
+      )
+      set_tests_properties(
+        GoALLCStatepoints.AllocaPointerRoots${GOALLC_ALLOCA_TARGET}ObjView
+        PROPERTIES
+        DEPENDS GoALLCStatepoints.AllocaPointerRoots${GOALLC_ALLOCA_TARGET}GoObj
+      )
+    endif()
+  endforeach()
 
-  add_test(
-    NAME GoALLCStatepoints.MalformedAllocaPointerMapsFail
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-alloca-ptrmap-malformed.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-  )
+  foreach(GOALLC_MALFORMED_PTRMAP_CASE IN ITEMS
+      bad-kind truncated bad-length duplicate overlap padding non-direct)
+    set(GOALLC_MALFORMED_PTRMAP_INPUT
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-ptrmap-malformed-${GOALLC_MALFORMED_PTRMAP_CASE}.ll")
+    goallc_add_filecheck_test(
+      "GoALLCStatepoints.MalformedAllocaPointerMap.${GOALLC_MALFORMED_PTRMAP_CASE}"
+      "${GOALLC_MALFORMED_PTRMAP_INPUT}"
+      ERROR
+      "${GOALLC_NOT_EXECUTABLE}"
+      --crash
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o /dev/null
+      "${GOALLC_MALFORMED_PTRMAP_INPUT}"
+    )
+  endforeach()
 
   add_test(
     NAME GoALLCStatepoints.PointerAllocaSelectSupported
@@ -585,74 +758,56 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-select-unsupported.ll"
   )
 
-  add_test(
-    NAME GoALLCStatepoints.NonEntryPointerAllocaFails
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-nonentry-unsupported.ll"
-      --contains
-      "require a single fixed entry-block pointer-containing alloca"
+  goallc_add_failure_filecheck_test(
+    GoALLCStatepoints.NonEntryPointerAllocaFails
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-nonentry-unsupported.ll"
+    ERROR
   )
 
-  add_test(
-    NAME GoALLCStatepoints.DynamicPointerAllocaFails
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-dynamic-unsupported.ll"
-      --contains
-      "require a single fixed entry-block pointer-containing alloca"
+  goallc_add_failure_filecheck_test(
+    GoALLCStatepoints.DynamicPointerAllocaFails
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-dynamic-unsupported.ll"
+    ERROR
   )
 
-  add_test(
-    NAME GoALLCStatepoints.RealignedPointerAllocaFails
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-realigned-unsupported.ll"
-      --contains
-      "do not support realigned pointer-containing allocas"
+  goallc_add_failure_filecheck_test(
+    GoALLCStatepoints.RealignedPointerAllocaFails
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-realigned-unsupported.ll"
+    ERROR
   )
 
-  add_test(
-    NAME GoALLCStatepoints.PointerVectorAllocaFails
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-statepoint-failure.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-vector-unsupported.ll"
-      --contains
-      "do not support pointer vectors in allocas"
+  goallc_add_failure_filecheck_test(
+    GoALLCStatepoints.PointerVectorAllocaFails
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-vector-unsupported.ll"
+    ERROR
   )
 
-  set(GOALLC_POINTER_ALLOCA_LIFETIME_EXTRA_ARGS)
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.PointerAllocaLifetimeSupported
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-unsupported.ll"
+    IR
+  )
+  add_test(
+    NAME GoALLCStatepoints.PointerAllocaLifetimeGoObj
+    COMMAND "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-pointer-lifetime.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-unsupported.ll"
+  )
   if(GOALLC_OBJVIEW_EXECUTABLE)
-    list(APPEND GOALLC_POINTER_ALLOCA_LIFETIME_EXTRA_ARGS
-      --objview "${GOALLC_OBJVIEW_EXECUTABLE}")
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.PointerAllocaLifetimeObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-unsupported.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/alloca-pointer-lifetime.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.PointerAllocaLifetimeObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.PointerAllocaLifetimeGoObj
+    )
   endif()
-  add_test(
-    NAME GoALLCStatepoints.PointerAllocaLifetimeSupported
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-alloca-pointer-lifetime.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-lifetime-unsupported.ll"
-      ${GOALLC_POINTER_ALLOCA_LIFETIME_EXTRA_ARGS}
-  )
 
   add_test(
     NAME GoALLCStatepoints.PathLocalPointerAllocaLifetime
@@ -723,16 +878,23 @@ if(BUILD_TESTING)
       "value\\.leaf\\.0\\.relocated\\.merge.* = phi ptr"
   )
 
+  set(GOALLC_AGGREGATE_CFG_PIPELINE
+    "'${GOALLC_LLC_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -goallc-pass-plugin-emit-ir -filetype=null -o -"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-cfg.ll'"
+    " 2>&1"
+    " | '${GOALLC_OPT_EXECUTABLE}'"
+    " '-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>'"
+    " -S -passes=verify -o - -"
+    " | '${GOALLC_FILECHECK_EXECUTABLE}' --check-prefix=IR"
+    " '${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-cfg.ll'")
+  string(JOIN "" GOALLC_AGGREGATE_CFG_PIPELINE
+    ${GOALLC_AGGREGATE_CFG_PIPELINE})
   add_test(
     NAME GoALLCStatepoints.AggregateCFGRewrite
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/check-aggregate-cfg.py"
-      --llc "${GOALLC_LLC_EXECUTABLE}"
-      --opt "${GOALLC_OPT_EXECUTABLE}"
-      --plugin "$<TARGET_FILE:GoALLCStatepoints>"
-      --input
-        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-cfg.ll"
+    COMMAND "${GOALLC_BASH_EXECUTABLE}" -o pipefail -c
+      "${GOALLC_AGGREGATE_CFG_PIPELINE}"
   )
 
   add_test(

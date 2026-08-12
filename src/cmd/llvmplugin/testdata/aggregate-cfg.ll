@@ -1,5 +1,59 @@
 target triple = "x86_64-unknown-linux-goobj"
 
+; IR-LABEL: define goabiinternal ptr @aggregate_diamond_call_skip(
+; IR: i64 -4232994149196383034
+; IR: phi ptr [ %value.leaf.0.relocated, %call ], [ %value.leaf.0, %skip ]
+; IR: insertvalue %pair poison, ptr %value.leaf.0.relocated.merge
+
+; IR-LABEL: define goabiinternal ptr @aggregate_branch_safepoints(
+; IR-COUNT-2: @llvm.experimental.gc.statepoint
+; IR: phi ptr [ %value.leaf.0.relocated{{[0-9]*}}, %left ], [ %value.leaf.0.relocated{{[0-9]*}}, %right ]
+
+; IR-LABEL: define goabiinternal ptr @aggregate_sequential_conditional(
+; IR: "gc-live"(ptr %value.leaf.0.relocated.merge
+; IR: phi ptr
+
+; IR-LABEL: define goabiinternal ptr @aggregate_natural_loop(
+; IR: header:
+; IR: phi ptr
+; IR: "gc-live"(ptr %value.leaf.0.relocated.merge
+
+; IR-LABEL: define goabiinternal ptr @aggregate_irreducible(
+; IR-COUNT-3: = phi ptr
+; IR: insertvalue %pair poison, ptr %value.leaf.0.relocated.merge
+
+; IR-LABEL: define goabiinternal ptr @aggregate_phi_edge_use(
+; IR: @llvm.experimental.gc.statepoint
+; IR-COUNT-3: insertvalue %pair
+; IR: %carried = phi %pair
+; IR: @llvm.experimental.gc.statepoint
+; IR: insertvalue %pair poison
+
+; IR-LABEL: define goabiinternal ptr @aggregate_phi_duplicate_edge(
+; IR: %[[PARTIAL:[-a-zA-Z$._0-9]+]] = insertvalue %pair poison
+; IR: %[[REBUILT:[-a-zA-Z$._0-9]+]] = insertvalue %pair %[[PARTIAL]]
+; IR: %carried = phi %pair [ %[[REBUILT]], %entry ], [ %[[REBUILT]], %entry ], [ %[[REBUILT]], %entry ]
+
+; IR-LABEL: define goabiinternal ptr @aggregate_call_result_conditional(
+; IR: call %pair @llvm.experimental.gc.result.{{[^(]+}}
+; IR: = phi ptr
+; IR: insertvalue %pair poison, ptr %value.leaf.0
+
+; IR-LABEL: define goabiinternal ptr @aggregate_call_result_loop(
+; IR: call %pair @llvm.experimental.gc.result.{{[^(]+}}
+; IR: = phi ptr
+; IR: insertvalue %pair poison, ptr %value.leaf.0
+
+; IR-LABEL: define goabiinternal ptr @aggregate_call_result_irreducible(
+; IR: call %pair @llvm.experimental.gc.result.{{[^(]+}}
+; IR: = phi ptr
+; IR: insertvalue %pair poison, ptr %value.leaf.0
+
+; IR-LABEL: define goabiinternal ptr @aggregate_multiple_safepoints(
+; IR: "gc-live"(ptr %value.leaf.0)
+; IR: "gc-live"(ptr %value.leaf.0.relocated{{[0-9]*}})
+; IR: "gc-live"(ptr %value.leaf.0.relocated{{[0-9]*}})
+
 %pair = type { ptr, i64 }
 
 declare goabiinternal void @safepoint()
