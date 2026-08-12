@@ -5,7 +5,17 @@ on:
     branches:
       - go1.27.master
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
   workflow_dispatch:
+    inputs:
+      llvm-pr:
+        description: Optional goallc/llvm-project PR number
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,12 +25,51 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  LLVM_RELEASE: goallc-llvm23.1.0-20260812T002702Z
-  LLVM_REVISION: d9a0149bdda5b9fb1f63bf5c8cd2dbe71d7bf523
+  PINNED_LLVM_RELEASE: goallc-llvm23.1.0-20260812T002702Z
+  PINNED_LLVM_REVISION: d9a0149bdda5b9fb1f63bf5c8cd2dbe71d7bf523
 
 jobs:
+  llvm-payload:
+    name: select LLVM payload
+    runs-on: ubuntu-22.04
+    timeout-minutes: 220
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      asset_prefix: ${{ steps.resolve.outputs.asset_prefix }}
+      revision: ${{ steps.resolve.outputs.revision }}
+      source: ${{ steps.resolve.outputs.source }}
+
+    steps:
+      - name: Check out Go
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve LLVM payload
+        id: resolve
+        run: |
+          .github/scripts/resolve-llvm-payload.py \
+            --event="$GITHUB_EVENT_PATH" \
+            --github-output="$GITHUB_OUTPUT" \
+            --pinned-release="$PINNED_LLVM_RELEASE" \
+            --pinned-revision="$PINNED_LLVM_REVISION"
+
+      - name: Summarize LLVM payload
+        env:
+          LLVM_PAYLOAD_MODE: ${{ steps.resolve.outputs.mode }}
+          LLVM_PAYLOAD_SOURCE: ${{ steps.resolve.outputs.source }}
+        run: |
+          {
+            echo '## LLVM payload selection'
+            echo
+            echo "- mode: $LLVM_PAYLOAD_MODE"
+            echo "- source: $LLVM_PAYLOAD_SOURCE"
+          } >>"$GITHUB_STEP_SUMMARY"
+
   linux:
     name: linux-${{ matrix.arch }}
+    needs: llvm-payload
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -32,7 +81,9 @@ jobs:
           - arch: arm64
             runner: ubuntu-22.04-arm
     env:
-      LLVM_ARCHIVE: goallc-llvm23.1.0-20260812T002702Z-linux-${{ matrix.arch }}.tar.zst
+      LLVM_RELEASE: ${{ needs.llvm-payload.outputs.release_tag }}
+      LLVM_REVISION: ${{ needs.llvm-payload.outputs.revision }}
+      LLVM_ARCHIVE: ${{ needs.llvm-payload.outputs.asset_prefix }}-linux-${{ matrix.arch }}.tar.zst
       LLVM_ROOT: ${{ github.workspace }}/.goallc/llvm
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
@@ -64,11 +115,11 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: goallc-go-linux-${{ matrix.arch }}-${{ github.sha }}
+          key: goallc-go-linux-${{ matrix.arch }}-${{ env.LLVM_REVISION }}-${{ github.sha }}
           restore-keys: |
             goallc-go-linux-${{ matrix.arch }}-
 
-      - name: Download pinned LLVM payload
+      - name: Download selected LLVM payload
         shell: bash
         run: |
           set -euo pipefail
@@ -84,6 +135,19 @@ jobs:
           mkdir -p "$LLVM_ROOT"
           tar --zstd -xf "$RUNNER_TEMP/$LLVM_ARCHIVE" \
             -C "$LLVM_ROOT" --strip-components=1
+
+      - name: Summarize selected LLVM payload
+        env:
+          LLVM_PAYLOAD_MODE: ${{ needs.llvm-payload.outputs.mode }}
+          LLVM_PAYLOAD_SOURCE: ${{ needs.llvm-payload.outputs.source }}
+        run: |
+          {
+            echo '## LLVM payload'
+            echo
+            echo "- mode: $LLVM_PAYLOAD_MODE"
+            echo "- source: $LLVM_PAYLOAD_SOURCE"
+            echo "- archive: $LLVM_ARCHIVE"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Validate LLVM payload
         shell: bash
