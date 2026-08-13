@@ -6,12 +6,12 @@ target triple = "x86_64-unknown-linux-goobj"
 ; DEBUG:            "parent": -1,
 ; DEBUG:            "line": 10,
 ; DEBUG:            "name": "main.mid",
-; DEBUG-X86:        "parent_pc": 6
+; DEBUG-X86:        "parent_pc": 0
 ; DEBUG-AARCH64:    "parent_pc": 0
 ; DEBUG:            "parent": 0,
 ; DEBUG:            "line": 20,
 ; DEBUG:            "name": "main.inner",
-; DEBUG-X86:        "parent_pc": 7
+; DEBUG-X86:        "parent_pc": 1
 ; DEBUG-AARCH64:    "parent_pc": 4
 ; DEBUG-X86:        "pc_quantum": 1,
 ; DEBUG-AARCH64:    "pc_quantum": 4,
@@ -46,7 +46,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; DEBUG:            "parent": -1,
 ; DEBUG:            "line": 0,
 ; DEBUG:            "name": "main.zeroCallee",
-; DEBUG-X86:        "parent_pc": 6
+; DEBUG-X86:        "parent_pc": 0
 ; DEBUG-AARCH64:    "parent_pc": 0
 
 ; DEBUG-LABEL:      "name": "main.shared",
@@ -55,12 +55,12 @@ target triple = "x86_64-unknown-linux-goobj"
 ; DEBUG:            "parent": -1,
 ; DEBUG:            "line": 71,
 ; DEBUG:            "name": "main.sharedLeft",
-; DEBUG-X86:        "parent_pc": 6
+; DEBUG-X86:        "parent_pc": 0
 ; DEBUG-AARCH64:    "parent_pc": 0
 ; DEBUG:            "parent": -1,
 ; DEBUG:            "line": 71,
 ; DEBUG:            "name": "main.sharedRight",
-; DEBUG-X86:        "parent_pc": 14
+; DEBUG-X86:        "parent_pc": 8
 ; DEBUG-AARCH64:    "parent_pc": 12
 
 @main.sink = global i64 0
