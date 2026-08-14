@@ -580,7 +580,12 @@ func (lfc *LLVMFuncContext) currentG(v *Value) llvm.Value {
 	}
 
 	i64 := GlobalCtxt.Int64Type()
-	registerName := GlobalCtxt.MetadataAsValue(GlobalCtxt.MDString(register))
+	// llvm.read_register requires a metadata node whose first operand is the
+	// register-name string. A bare MDString passes IR verification but crashes
+	// SelectionDAG's intrinsic lowering when it casts the operand to MDNode.
+	registerName := GlobalCtxt.MetadataAsValue(GlobalCtxt.MDNode([]llvm.Metadata{
+		GlobalCtxt.MDString(register),
+	}))
 	sig := llvm.FunctionType(i64, []llvm.Type{registerName.Type()}, false)
 	fn := getOrInsertLLVMIntrinsic("llvm.read_register.i64", sig)
 	raw := lfc.b.CreateCall(sig, fn, []llvm.Value{registerName}, v.String()+".register")
@@ -943,9 +948,8 @@ func (lfc *LLVMFuncContext) cgoUnsafeArgAddress(name *ir.Name, llvmName string) 
 	return lfc.b.CreateGEP(GlobalCtxt.Int8Type(), lfc.ABI0FrameBase, []llvm.Value{index}, llvmName+".frame")
 }
 
-func markLLVMGCLeaf(fn, call llvm.Value) {
+func markLLVMGCLeafCall(call llvm.Value) {
 	attr := GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, "")
-	fn.AddFunctionAttr(attr)
 	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, attr)
 }
 
@@ -1065,11 +1069,10 @@ func (lfc *LLVMFuncContext) llvmRuntimeMemmove(dst, src, length llvm.Value) llvm
 		ReturnType:          GlobalCtxt.VoidType(),
 		ClosureContextIndex: -1,
 	}
-	fn := getOrInsertLLVMFunction("runtime.memmove", sig, goABIInternalCallConv)
-	attachGoObjABISymbolRef(fn, "runtime.memmove", obj.ABIInternal)
+	fn := getOrInsertLLVMABISymbolRef("runtime.memmove", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{dst, src, length}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	markLLVMGCLeaf(fn, call)
+	markLLVMGCLeafCall(call)
 	return call
 }
 
@@ -1125,11 +1128,10 @@ func (lfc *LLVMFuncContext) llvmMemEq(v *Value) llvm.Value {
 		ResultCount:         1,
 		ClosureContextIndex: -1,
 	}
-	fn := getOrInsertLLVMFunction("runtime.memequal", sig, goABIInternalCallConv)
-	attachGoObjABISymbolRef(fn, "runtime.memequal", obj.ABIInternal)
+	fn := getOrInsertLLVMABISymbolRef("runtime.memequal", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{left, right, size}, v.String())
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	markLLVMGCLeaf(fn, call)
+	markLLVMGCLeafCall(call)
 	return call
 }
 
@@ -1538,18 +1540,18 @@ func (lfc *LLVMFuncContext) FinishPhi() {
 }
 
 func (lfc *LLVMFuncContext) paramForArg(v *Value) llvm.Value {
-	param, typ := lfc.paramForArgNameAndType(v, v.Aux.(*ir.Name))
+	param, typ := lfc.paramForArgNameAndType(v.Aux.(*ir.Name))
 	return lfc.llvmValueFromABI(v, param, typ, v.Type, v.String()+".arg")
 }
 
-func (lfc *LLVMFuncContext) paramForArgNameAndType(v *Value, name *ir.Name) (llvm.Value, *types.Type) {
+func (lfc *LLVMFuncContext) paramForArgNameAndType(name *ir.Name) (llvm.Value, *types.Type) {
 	key := llvmLocalKeyForName(name)
 	for i, param := range lfc.F.OwnAux.ABIInfo().InParams() {
 		if param.Name != nil && llvmLocalKeyForName(param.Name) == key {
 			return lfc.LF.Param(i), lfc.F.OwnAux.TypeOfArg(int64(i))
 		}
 	}
-	v.Fatalf("could not find LLVM parameter for %v", name)
+	lfc.F.fe.Fatalf(name.Pos(), "could not find LLVM parameter for %v", name)
 	return llvm.Value{}, nil
 }
 
@@ -1865,6 +1867,15 @@ func llvmStaticCallSignature(v *Value, aux *AuxCall, sig llvmFuncSignature) llvm
 	if aux.NArgs() != wantArgs || aux.NResults() != 0 {
 		v.Fatalf("%s has unexpected raw call signature: %d arguments, %d results", aux.Fn.Name, aux.NArgs(), aux.NResults())
 	}
+	// Runtime implementations may call a function that also has a compiler
+	// builtin entry (notably newproc) through its ordinary typed Go signature.
+	// Only the compiler-created form uses raw uintptr carriers and needs pointer
+	// restoration.
+	for i := int64(0); i < pointerArgs; i++ {
+		if typ := aux.TypeOfArg(i); typ == nil || !typ.IsUintptr() {
+			return sig
+		}
+	}
 	for i := int64(0); i < pointerArgs; i++ {
 		if int(i) >= len(v.Args)-1 || v.Args[i].Type == nil {
 			v.Fatalf("argument %d to %s is not pointer-shaped", i, aux.Fn.Name)
@@ -1879,9 +1890,6 @@ func llvmStaticCallSignature(v *Value, aux *AuxCall, sig llvmFuncSignature) llvm
 			v.Args[i].Op == OpAddr && v.Args[i].Type.IsUintptr()
 		if !pointerShaped && !writeBarrierTypeAddr {
 			v.Fatalf("argument %d to %s is not pointer-shaped", i, aux.Fn.Name)
-		}
-		if typ := aux.TypeOfArg(i); typ == nil || !typ.IsUintptr() {
-			v.Fatalf("argument %d to %s is not raw uintptr", i, aux.Fn.Name)
 		}
 	}
 	params := append([]llvm.Type(nil), sig.Type.ParamTypes()...)
@@ -1903,8 +1911,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 
 	sig := llvmStaticCallSignature(v, aux, llvmSignature(aux))
 	cc := llvmCallConv(aux.ABI().Which())
-	fn := getOrInsertLLVMFunction(aux.Fn.Name, sig, cc)
-	attachGoObjSymbolRef(fn, aux.Fn)
+	fn := getOrInsertLLVMFunctionRef(aux.Fn, sig, cc)
 	// AMD64 rewrites some Move and Eq operations to static runtime calls before
 	// LLVM emission. Keep the same leaf contract as the dedicated LLVM lowering
 	// paths so RewriteStatepointsForGC does not turn these raw helpers into
@@ -1931,7 +1938,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	configureLLVMCall(call, sig)
 	lfc.materializeAddressedResults(v, call, aux)
 	if llvmGCLeaf {
-		markLLVMGCLeaf(fn, call)
+		markLLVMGCLeafCall(call)
 	}
 	return call
 }
@@ -2084,8 +2091,7 @@ func (lfc *LLVMFuncContext) panicBounds(v *Value) llvm.Value {
 		Type:       llvm.FunctionType(GlobalCtxt.VoidType(), []llvm.Type{x.Type(), y.Type()}, false),
 		ReturnType: GlobalCtxt.VoidType(),
 	}
-	fn := getOrInsertLLVMFunction(llvmBoundsPanicNames[kind], sig, goABIInternalCallConv)
-	attachGoObjABISymbolRef(fn, llvmBoundsPanicNames[kind], obj.ABIInternal)
+	fn := getOrInsertLLVMABISymbolRef(llvmBoundsPanicNames[kind], obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{x, y}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
 	return call
@@ -2822,10 +2828,17 @@ func (lfc *LLVMFuncContext) CompileBlock(BB *Block, values []*Value) {
 		lfc.b.CreateUnreachable()
 	case BlockJumpTable:
 		index := lfc.GenLV(BB.Controls[0])
-		table := lfc.b.CreateSwitch(index, lfc.BBs[BB.Succs[0].Block().ID], len(BB.Succs))
+		// BlockJumpTable's control is already proven to be in range, and every
+		// Go SSA edge is represented by one indexed successor. A real successor
+		// as LLVM's default would add an extra CFG edge and make PHIs on a
+		// repeated target have one too few incoming values.
+		defaultBlock := GlobalCtxt.AddBasicBlock(lfc.LF, BB.String()+".jump.default")
+		table := lfc.b.CreateSwitch(index, defaultBlock, len(BB.Succs))
 		for i, succ := range BB.Succs {
 			table.AddCase(llvm.ConstInt(index.Type(), uint64(i), false), lfc.BBs[succ.Block().ID])
 		}
+		lfc.b.SetInsertPointAtEnd(defaultBlock)
+		lfc.b.CreateUnreachable()
 	default:
 		BB.Func.fe.Fatalf(BB.Pos, "unsupported SSA block kind in LLVM lowering: %s", BB.Kind)
 	}
@@ -2841,8 +2854,7 @@ func (lfc *LLVMFuncContext) emitOpenDeferRecovery() {
 		ReturnType:          GlobalCtxt.VoidType(),
 		ClosureContextIndex: -1,
 	}
-	deferReturn := getOrInsertLLVMFunction("runtime.deferreturn", deferReturnSig, goABIInternalCallConv)
-	attachGoObjABISymbolRef(deferReturn, "runtime.deferreturn", obj.ABIInternal)
+	deferReturn := getOrInsertLLVMABISymbolRef("runtime.deferreturn", obj.ABIInternal, deferReturnSig, goABIInternalCallConv)
 
 	lfc.b.SetInsertPointAtEnd(lfc.OpenDeferRecovery)
 	call := lfc.b.CreateCall(deferReturnSig.Type, deferReturn, nil, "")
@@ -3108,21 +3120,12 @@ func LLVMCompile(f *Func) {
 			}
 			if (v.Op == OpClosureCall || v.Op == OpClosureLECall) && len(v.Args) >= 2 {
 				code := v.Args[0]
-				switch code.Op {
-				case OpLoad:
-					if !code.Type.IsUintptr() || code.Uses != 1 {
-						v.Fatalf("closure call code pointer is not a single-use uintptr load")
-					}
-					if len(code.Args) == 0 || code.Args[0] != v.Args[1] {
-						v.Fatalf("closure call code pointer was not loaded from its funcval context")
-					}
+				if code.Op == OpLoad {
+					// A nil func value faults while loading its code word. Record
+					// loads only to preserve that behavior in LLVM; ClosureCall
+					// itself already defines the code/context contract and does not
+					// constrain how either value was produced.
 					FCtxt.ClosureCodeLoads[code.ID] = true
-				case OpAddr:
-					if !code.Type.IsUintptr() {
-						v.Fatalf("direct closure call code address has type %v", code.Type)
-					}
-				default:
-					v.Fatalf("closure call code pointer has unsupported form %s", code.Op)
 				}
 			} else if v.Op == OpClosureCall || v.Op == OpClosureLECall {
 				v.Fatalf("closure call has %d SSA arguments, want at least code, context, and memory", len(v.Args))
@@ -3245,8 +3248,22 @@ func LLVMCompile(f *Func) {
 		init.SetAlignment(int(name.Type().Alignment()))
 		init.SetVolatile(true)
 	}
-	var parameterHomes []*Value
+	var parameterHomes []*ir.Name
 	var parameterLifetimeSlots []llvmStackSlot
+	if cgoUnsafeArgs {
+		// Reuse the ordinary parameter-home path established for the modeled
+		// ABI0 frame. CgoUnsafeArgs exposes the complete contiguous input area
+		// through one parameter address, so every non-empty input needs a home
+		// even when Go SSA contains no OpLocalAddr for it.
+		for _, param := range inParams {
+			if param.Name == nil || param.Type.Size() == 0 {
+				continue
+			}
+			if _, created := preallocateLocal(param.Name, param.Name.Sym().Name+".cgo"); created {
+				parameterHomes = append(parameterHomes, param.Name)
+			}
+		}
+	}
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
 			if v.Op != OpLocalAddr || v.Uses == 0 {
@@ -3258,7 +3275,7 @@ func LLVMCompile(f *Func) {
 				continue
 			}
 			if name.Class == ir.PPARAM {
-				parameterHomes = append(parameterHomes, v)
+				parameterHomes = append(parameterHomes, name)
 				if name.Type().HasPointers() && !cgoUnsafeArgs {
 					parameterLifetimeSlots = append(parameterLifetimeSlots, FCtxt.Locals[key])
 				}
@@ -3359,16 +3376,17 @@ func LLVMCompile(f *Func) {
 	// incoming register piece separately and addresses stack-assigned parameters
 	// in their incoming slots. The full aggregate store makes any existing piece
 	// loads and stores redundant and lets normal LLVM memory optimization remove
-	// them. A future optimization may bind wholly stack-assigned parameters
-	// directly to their incoming fixed stack slots.
+	// them. Store the physical ABI carrier directly through the opaque pointer:
+	// reconstructing its semantic named aggregate first obscures the formal
+	// argument store from SelectionDAG and prevents a wholly stack-assigned
+	// parameter home from being folded back to its incoming fixed stack slot.
 	FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[f.Entry.ID])
-	for _, v := range parameterHomes {
-		name, key := llvmLocalName(v)
+	for _, name := range parameterHomes {
+		key := llvmLocalKeyForName(name)
 		slot := FCtxt.Locals[key]
-		param, paramType := FCtxt.paramForArgNameAndType(v, name)
-		param = FCtxt.llvmValueFromABI(v, param, paramType, slot.Type, v.String()+".home")
-		if param.Type() != getLLVMType(slot.Type) {
-			v.Fatalf("parameter home changes LLVM representation")
+		param, paramType := FCtxt.paramForArgNameAndType(name)
+		if paramType.Size() != slot.Type.Size() || param.Type() != getLLVMABIType(slot.Type) {
+			f.fe.Fatalf(name.Pos(), "parameter home has incompatible physical ABI carrier")
 		}
 		init := FCtxt.b.CreateStore(param, slot.Value)
 		init.SetAlignment(int(slot.Type.Alignment()))
@@ -3558,6 +3576,7 @@ func InitModule(pkg *types.Pkg) {
 	currentLLVMDataLowerer = newLLVMDataLowerer(make(map[*obj.LSym]bool))
 	goObjCompilerUsed = nil
 	goObjCompilerUsedNames = make(map[string]bool)
+	emitLateGoObjBuiltinDeclarations()
 	initLLVMDebugInfo(pkg)
 }
 
@@ -3596,6 +3615,10 @@ func addGoObjConfigMetadata(pkg *types.Pkg) {
 	if pkg.Name == "main" {
 		main = "1"
 	}
+	std := "0"
+	if base.Ctxt.Std {
+		std = "1"
+	}
 	config := GlobalCtxt.MDNode([]llvm.Metadata{
 		GlobalCtxt.MDString("goallc.goobj"),
 		GlobalCtxt.MDString(buildcfg.GOOS),
@@ -3607,6 +3630,7 @@ func addGoObjConfigMetadata(pkg *types.Pkg) {
 		GlobalCtxt.MDString(pkg.Path),
 		GlobalCtxt.MDString(main),
 		GlobalCtxt.MDString(shared),
+		GlobalCtxt.MDString(std),
 		GlobalCtxt.MDNode(experimentMetadata),
 	})
 	CurrentModule.AddNamedMetadataOperand("goobj.config", config)
