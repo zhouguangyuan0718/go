@@ -21,12 +21,6 @@ import (
 
 const llvmStdlibPolicyEnv = "GOALLC_RUN_LLVM_STDLIB"
 
-// A package is only a required LLVM standard library test after it survives
-// multiple independent test processes. The processes share the isolated build
-// cache below, so this repeats runtime qualification without recompiling every
-// package from scratch.
-const llvmStdlibWhitelistRuns = 3
-
 type llvmStdlibTestSet struct {
 	Whitelist         map[string]string            `json:"whitelist"`
 	Blacklist         map[string]string            `json:"blacklist"`
@@ -34,7 +28,7 @@ type llvmStdlibTestSet struct {
 }
 
 type llvmStdlibPolicy struct {
-	EntryPackage llvmStdlibTestSet `json:"entry_package"`
+	Packages llvmStdlibTestSet `json:"packages"`
 }
 
 type llvmStdlibClass uint8
@@ -192,7 +186,7 @@ func validateLLVMStdlibPolicy(t *testing.T, packages map[string]bool, set llvmSt
 
 func TestLLVMStdlibPolicy(t *testing.T) {
 	packages := llvmStdlibPackages(t)
-	validateLLVMStdlibPolicy(t, packages, readLLVMStdlibPolicy(t).EntryPackage)
+	validateLLVMStdlibPolicy(t, packages, readLLVMStdlibPolicy(t).Packages)
 }
 
 func TestClassifyLLVMStdlibPackage(t *testing.T) {
@@ -234,6 +228,32 @@ func TestEffectiveLLVMStdlibTestSet(t *testing.T) {
 	}
 }
 
+func llvmStdlibDependencyPackages(t *testing.T, packages map[string]bool, name string) []string {
+	t.Helper()
+	cmd := testenv.Command(t, llvmStdlibGoTool(t), "list", "-deps", "-f={{.ImportPath}}", name)
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=", "GOROOT="+testenv.GOROOT(t))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list dependencies for standard library package %q: %v\n%s", name, err, out)
+	}
+	seen := make(map[string]bool)
+	var dependencies []string
+	for _, dependency := range strings.Fields(string(out)) {
+		if !packages[dependency] {
+			t.Fatalf("dependency-closure package %q has non-standard dependency %q", name, dependency)
+		}
+		if !seen[dependency] {
+			seen[dependency] = true
+			dependencies = append(dependencies, dependency)
+		}
+	}
+	if !seen[name] {
+		t.Fatalf("dependency closure for %q does not contain the package itself", name)
+	}
+	sort.Strings(dependencies)
+	return dependencies
+}
+
 func TestLLVMStdlib(t *testing.T) {
 	if os.Getenv(llvmStdlibPolicyEnv) != "1" {
 		t.Skipf("set %s=1 to run the LLVM standard library package policy", llvmStdlibPolicyEnv)
@@ -247,18 +267,25 @@ func TestLLVMStdlib(t *testing.T) {
 	}
 
 	packages := llvmStdlibPackages(t)
-	policySet := readLLVMStdlibPolicy(t).EntryPackage
+	policySet := readLLVMStdlibPolicy(t).Packages
 	validateLLVMStdlibPolicy(t, packages, policySet)
 	set := effectiveLLVMStdlibTestSet(policySet, platform)
 	configureLLVMTestToolchain(t)
 	toolexec := llvmToolexec(t, "default<O2>")
+	runtimeToolexec := llvmToolexecWithNativePackages(t, "default<O2>", "runtime_test", "runtime.test")
 
 	whitelist := make([]string, 0, len(set.Whitelist))
 	for name := range set.Whitelist {
 		whitelist = append(whitelist, name)
 	}
 	sort.Strings(whitelist)
-	t.Logf("LLVM standard library entry-package policy: %d white, %d black (%d packages)", len(whitelist), len(packages)-len(whitelist), len(packages))
+	t.Logf("LLVM standard library dependency-closure policy: %d white, %d black (%d packages)", len(whitelist), len(packages)-len(whitelist), len(packages))
+
+	dependencyPackages := make(map[string][]string, len(whitelist))
+	for _, name := range whitelist {
+		dependencyPackages[name] = llvmStdlibDependencyPackages(t, packages, name)
+		t.Logf("LLVM stdlib dependency closure: package=%q packages=%d", name, len(dependencyPackages[name]))
+	}
 
 	knownBlacklist := make([]string, 0, len(set.Blacklist)-1)
 	for name := range set.Blacklist {
@@ -279,33 +306,52 @@ func TestLLVMStdlib(t *testing.T) {
 	cache := t.TempDir()
 	for _, name := range whitelist {
 		t.Run(name, func(t *testing.T) {
-			for run := 1; run <= llvmStdlibWhitelistRuns; run++ {
-				ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 5*time.Minute)
-				cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t),
-					"test",
-					"-count=1",
-					"-timeout=2m",
-					"-toolexec="+toolexec,
-					fmt.Sprintf("-gcflags=%s=-enablellvm -llvmironly", name),
-					name,
-				)
-				cmd.Env = append(os.Environ(),
-					"GOENV=off",
-					"GOFLAGS=",
-					"GOROOT="+testenv.GOROOT(t),
-					"GOCACHE="+cache,
-				)
-				out, err := cmd.CombinedOutput()
-				ctxErr := ctx.Err()
-				cancel()
-				if err != nil {
-					if ctxErr != nil {
-						t.Fatalf("LLVM stdlib whitelist result: TIMEOUT package=%q run=%d/%d: %v\n%s", name, run, llvmStdlibWhitelistRuns, ctxErr, out)
-					}
-					t.Fatalf("LLVM stdlib whitelist result: FAIL package=%q run=%d/%d: %v\n%s", name, run, llvmStdlibWhitelistRuns, err, out)
-				}
-				t.Logf("LLVM stdlib whitelist result: PASS package=%q run=%d/%d", name, run, llvmStdlibWhitelistRuns)
+			compilePackages := dependencyPackages[name]
+			packageToolexec := toolexec
+			testTimeout := "2m"
+			processTimeout := 5 * time.Minute
+			if name == "runtime" {
+				testTimeout = "5m"
+				processTimeout = 8 * time.Minute
+				// runtime_test and the generated runtime.test main are test
+				// scaffolding rather than part of the qualified runtime closure.
+				packageToolexec = runtimeToolexec
 			}
+			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), processTimeout)
+			args := []string{
+				"test",
+				"-count=1",
+				"-timeout=" + testTimeout,
+				"-toolexec=" + packageToolexec,
+			}
+			if name == "runtime" {
+				// LLVM GoObj does not yet emit the complete per-function
+				// DWARF carrier set expected by the Go linker. Runtime
+				// qualification currently covers code generation, GoObj,
+				// linking, and execution, but not debug information.
+				args = append(args, "-ldflags=-w")
+			}
+			for _, compilePackage := range compilePackages {
+				args = append(args, fmt.Sprintf("-gcflags=%s=-enablellvm -llvmironly", compilePackage))
+			}
+			args = append(args, name)
+			cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t), args...)
+			cmd.Env = append(os.Environ(),
+				"GOENV=off",
+				"GOFLAGS=",
+				"GOROOT="+testenv.GOROOT(t),
+				"GOCACHE="+cache,
+			)
+			out, err := cmd.CombinedOutput()
+			ctxErr := ctx.Err()
+			cancel()
+			if err != nil {
+				if ctxErr != nil {
+					t.Fatalf("LLVM stdlib whitelist result: TIMEOUT package=%q: %v\n%s", name, ctxErr, out)
+				}
+				t.Fatalf("LLVM stdlib whitelist result: FAIL package=%q: %v\n%s", name, err, out)
+			}
+			t.Logf("LLVM stdlib whitelist result: PASS package=%q", name)
 		})
 	}
 }
