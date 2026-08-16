@@ -350,6 +350,32 @@ if(BUILD_TESTING)
   )
 
   goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.TypedByVal
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
+    IR
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.TypedByValMIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
+    MIR
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
+  )
+  add_test(
+    NAME GoALLCStatepoints.TypedByValGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/typed-byval.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
+  )
+  goallc_add_ir_filecheck_test(
     GoALLCStatepoints.CallOnlyPointersNotLive
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
     IR
@@ -514,6 +540,17 @@ if(BUILD_TESTING)
     )
     set_tests_properties(GoALLCStatepoints.GoObjStackMaps PROPERTIES
       DEPENDS GoALLCStatepoints.GoObj
+    )
+
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.TypedByValObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/typed-byval.goobj"
+    )
+    set_tests_properties(GoALLCStatepoints.TypedByValObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.TypedByValGoObj
     )
 
     goallc_add_filecheck_test(
