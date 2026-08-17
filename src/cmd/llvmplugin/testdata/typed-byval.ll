@@ -1,22 +1,38 @@
 target triple = "x86_64-unknown-linux-goobj"
 
 %pointer_pair = type { ptr, ptr }
+@pointer = external global i8
 
 ; IR-LABEL: define goabiinternal void @pure_ssa_call_slot(
-; A pure SSA value needs an ordinary source alloca for byval. The existing
-; pointer-alloca machinery describes it at the statepoint; there is no
-; byval-call-slot classifier or initializer analysis.
+; A pure SSA value needs an addressable source for byval. The shared CodeGen
+; predicate proves that this alloca lives only until the one byval call, so it
+; is not modeled as a caller-local GC object.
 ; IR: call goabiinternal token {{.*}} @llvm.experimental.gc.statepoint
 ; IR-SAME: ptr byval(ptr) align 8 %argument.home.address
-; IR-SAME: i64 1095520067{{.*}}ptr %argument.home
+; IR-SAME: i32 0, i32 0)
 
 ; MIR-LABEL: name: pure_ssa_call_slot
-; The ordinary register-argument home optimization may coalesce the source
-; alloca with %argument's fixed home. The byval call still performs a normal
-; store into its outgoing stack argument slot.
+; The initializing store is forwarded directly into the outgoing byval slot;
+; no local source object survives instruction selection.
 ; MIR: stack: []
 ; MIR: ADJCALLSTACKDOWN64 80
 ; MIR: MOV64mr %{{[0-9]+}}, 1, $noreg, 0, $noreg
+; MIR: STATEPOINT {{.*}}@consume_pointer
+
+; IR-LABEL: define goabiinternal void @intervening_call_slot(
+; A carrier initialized before another call cannot be mapped onto a future
+; outgoing argument area. It remains an ordinary pointer-containing stack
+; object at both safepoints.
+; IR: %argument.home = alloca ptr, align 8
+; IR: elementtype(void ()) @safepoint
+; IR: "deopt"({{.*}}ptr %argument.home
+; IR: elementtype(void (i64, i64, i64, i64, i64, i64, i64, i64, i64, ptr)) @consume_pointer
+; IR: "deopt"({{.*}}ptr %argument.home
+
+; MIR-LABEL: name: intervening_call_slot
+; MIR: stack:
+; MIR-NEXT: - { id: 0, name: argument.home, type: default, offset: 0, size: 8
+; MIR: STATEPOINT {{.*}}@safepoint
 ; MIR: STATEPOINT {{.*}}@consume_pointer
 
 ; IR-LABEL: define goabiinternal ptr @incoming_pointer_home(
@@ -90,6 +106,17 @@ define goabiinternal void @pure_ssa_call_slot(ptr %argument) #0 gc "goallc" {
 entry:
   %argument.home = alloca ptr, align 8
   store ptr %argument, ptr %argument.home, align 8
+  call goabiinternal void @consume_pointer(
+      i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8,
+      ptr byval(ptr) align 8 %argument.home)
+  ret void
+}
+
+define goabiinternal void @intervening_call_slot() #0 gc "goallc" {
+entry:
+  %argument.home = alloca ptr, align 8
+  store ptr @pointer, ptr %argument.home, align 8
+  call goabiinternal void @safepoint()
   call goabiinternal void @consume_pointer(
       i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8,
       ptr byval(ptr) align 8 %argument.home)

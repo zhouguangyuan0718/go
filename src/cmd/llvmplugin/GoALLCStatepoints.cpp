@@ -13,6 +13,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/BinaryFormat/GoObj.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/GoCallingConv.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
@@ -1255,6 +1256,8 @@ Error collectPointerAllocas(
   const DataLayout &DL = F.getDataLayout();
   for (Instruction &I : instructions(F)) {
     auto *Alloca = dyn_cast<AllocaInst>(&I);
+    if (Alloca && isSingleByValCallCarrier(*Alloca, DL))
+      continue;
     if (!Alloca || !containsPointer(Alloca->getAllocatedType()))
       continue;
     auto *ArraySize = dyn_cast<ConstantInt>(Alloca->getArraySize());
