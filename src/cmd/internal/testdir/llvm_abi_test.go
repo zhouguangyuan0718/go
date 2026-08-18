@@ -192,10 +192,10 @@ func runLLVMAArch64ABIDifferentialTest(t *testing.T, gorootTestDir string) {
 		}
 	}
 	for _, pattern := range []string{
-		`(?s)define goabiinternal \{ ptr, i64 \} @main\.liveScalarStackArgument.*?"gc-live"\(ptr %pointer\).*?gc\.relocate`,
-		`(?s)define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerSequenceStackArguments.*?"gc-live"\(ptr %second, ptr %first\).*?gc\.relocate`,
-		`(?s)define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerAggregateStackArgument.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
-		`(?s)define goabiinternal \{ i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, ptr, ptr \} @main\.pointerAggregateBothOverflow.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, i64 \} @main\.liveScalarStackArgument.*?ptr byval\(ptr\) align 8 %pointer.*?load ptr, ptr %pointer.*?"gc-live"\(ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerSequenceStackArguments.*?ptr byval\(ptr\) align 8 %first.*?ptr byval\(ptr\) align 8 %second.*?load ptr, ptr %first.*?load ptr, ptr %second.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, ptr, i64 \} @main\.livePointerAggregateStackArgument.*?ptr byval\(%main\.pointerStackAggregate\) align 8 %value.*?load %main\.pointerStackAggregate, ptr %value.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, ptr, ptr \} @main\.pointerAggregateBothOverflow.*?ptr byval\(%main\.pointerStackAggregate\) align 8 %value.*?load %main\.pointerStackAggregate, ptr %value.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
 	} {
 		if !regexp.MustCompile(pattern).Match(rewrittenIR) {
 			t.Fatalf("rewritten GoALLC ABI IR does not match %q", pattern)
@@ -208,10 +208,9 @@ func runLLVMAArch64ABIDifferentialTest(t *testing.T, gorootTestDir string) {
 	runLLVMABICommand(t, rewrittenIR, opt,
 		"-load-pass-plugin="+plugin, "-passes=verify", "-disable-output", "-")
 
-	// The runtime wrapper applies its configured LLVM optimization pipeline
-	// before llc. In particular, InstCombine removes the field-by-field bridge
-	// between physical ABI carriers and semantic named aggregates, allowing
-	// stack-assigned pointer arguments to remain in their canonical fixed homes.
+	// Match the production optimization pipeline before checking the final
+	// lowering. Loaded pointers deliberately use ordinary statepoint spill slots;
+	// this test does not require the optional fixed-home reuse optimization.
 	optimizedLLVMIR := llvmArchive + ".opt.ll"
 	runLLVMABICommand(t, nil, opt, "-passes=default<O2>", "-S", llvmIR,
 		"-o", optimizedLLVMIR)
@@ -220,10 +219,10 @@ func runLLVMAArch64ABIDifferentialTest(t *testing.T, gorootTestDir string) {
 		"-load-pass-plugin="+plugin, "-stop-after=finalize-isel",
 		"-o", "-", optimizedLLVMIR)
 	for _, pattern := range []string{
-		`(?s)name:\s+main\.liveScalarStackArgument.*?fixedStack:.*?offset:\s+8.*?isImmutable:\s+false.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0`,
-		`(?s)name:\s+main\.livePointerSequenceStackArguments.*?fixedStack:.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.2[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.[02].*?LDRXui\s+%fixed-stack\.[02]`,
-		`(?s)name:\s+main\.livePointerAggregateStackArgument.*?fixedStack:.*?id:\s+2.*?size:\s+24.*?isAliased:\s+true.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.1[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.1`,
-		`(?s)name:\s+main\.pointerAggregateBothOverflow.*?fixedStack:.*?id:\s+4.*?size:\s+24.*?isAliased:\s+true.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.3[^\n]*%fixed-stack\.2.*?LDRXui\s+%fixed-stack\.2.*?LDRXui\s+%fixed-stack\.3.*?STRXui[^\n]*%fixed-stack\.0.*?STRXui[^\n]*%fixed-stack\.1`,
+		`(?s)name:\s+main\.liveScalarStackArgument.*?fixedStack:.*?offset:\s+8.*?size:\s+8.*?isAliased:\s+true.*?stack:\s+.*?size:\s+8.*?LDRXui\s+%fixed-stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STATEPOINT[^\n]*1, 8, %stack\.[0-9]+, 0.*?LDRXui\s+%stack\.[0-9]+`,
+		`(?s)name:\s+main\.livePointerSequenceStackArguments.*?fixedStack:.*?offset:\s+24.*?offset:\s+8.*?stack:\s+.*?size:\s+8.*?size:\s+8.*?LDRXui\s+%fixed-stack\.[0-9]+.*?LDRXui\s+%fixed-stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STATEPOINT[^\n]*1, 8, %stack\.[0-9]+, 0[^\n]*1, 8, %stack\.[0-9]+, 0.*?LDRXui\s+%stack\.[0-9]+.*?LDRXui\s+%stack\.[0-9]+`,
+		`(?s)name:\s+main\.livePointerAggregateStackArgument.*?fixedStack:.*?offset:\s+8.*?size:\s+24.*?isAliased:\s+true.*?stack:\s+.*?size:\s+8.*?size:\s+8.*?LDRXui\s+%fixed-stack\.[0-9]+.*?LDRXui\s+%fixed-stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STATEPOINT[^\n]*1, 8, %stack\.[0-9]+, 0[^\n]*1, 8, %stack\.[0-9]+, 0.*?LDRXui\s+%stack\.[0-9]+.*?LDRXui\s+%stack\.[0-9]+`,
+		`(?s)name:\s+main\.pointerAggregateBothOverflow.*?fixedStack:.*?offset:\s+8.*?size:\s+24.*?isAliased:\s+true.*?stack:\s+.*?size:\s+8.*?size:\s+8.*?LDRXui\s+%fixed-stack\.[0-9]+.*?LDRXui\s+%fixed-stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STATEPOINT[^\n]*1, 8, %stack\.[0-9]+, 0[^\n]*1, 8, %stack\.[0-9]+, 0.*?LDRXui\s+%stack\.[0-9]+.*?LDRXui\s+%stack\.[0-9]+`,
 	} {
 		if !regexp.MustCompile(pattern).Match(machineIR) {
 			t.Fatalf("GoALLC ABI MIR does not match %q", pattern)
@@ -260,55 +259,53 @@ func runLLVMAArch64ABIDifferentialTest(t *testing.T, gorootTestDir string) {
 		},
 		{
 			name: "mixedABI", args: 152, pointerBits: []int{2, 4, 18},
-			nativeArgsMaps: [][]int{{2, 4, 18}, nil},
-			// The explicit panicmem paths keep the still-needed parameter
-			// homes in LocalsPointerMaps through locals-only alloca records.
-			goallcArgsMaps:  [][]int{{2, 4, 18}, {2}},
+			nativeArgsMaps:  [][]int{{2, 4, 18}, nil},
+			goallcArgsMaps:  [][]int{{2, 4, 18}, nil},
 			nativeStackMaps: []int32{-1, 0, -1},
 			goallcStackMaps: []int32{-1, 1, -1, 1},
-			goallcQueryMaps: [][]int{{2, 4, 18}, {2}, {2}, {2}, {2}},
+			goallcQueryMaps: [][]int{{2, 4, 18}, nil, nil, nil, nil},
 		},
 		{
 			name: "liveScalarStackArgument", args: 136, pointerBits: []int{0},
 			nativeArgsMaps:  [][]int{{0}, nil},
-			goallcArgsMaps:  [][]int{{0}},
+			goallcArgsMaps:  [][]int{{0}, nil},
 			nativeStackMaps: []int32{-1, 0, -1},
-			goallcStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 1, -1},
 			checkFullMaps:   true,
 			nativeLocals:    8,
-			goallcLocals:    24,
+			goallcLocals:    40,
 			nativeLocalMaps: [][]int{nil, nil},
-			goallcLocalMaps: [][]int{nil},
+			goallcLocalMaps: [][]int{nil, {3}},
 			nativeQueries:   []int32{0, -1},
-			goallcQueries:   []int32{-1, 0},
+			goallcQueries:   []int32{-1, 1},
 		},
 		{
 			name: "livePointerSequenceStackArguments", args: 152, pointerBits: []int{0, 2},
 			nativeArgsMaps:  [][]int{{0, 2}, nil},
-			goallcArgsMaps:  [][]int{{0, 2}},
+			goallcArgsMaps:  [][]int{{0, 2}, nil},
 			nativeStackMaps: []int32{-1, 0, -1},
-			goallcStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 1, -1},
 			checkFullMaps:   true,
 			nativeLocals:    8,
-			goallcLocals:    24,
+			goallcLocals:    40,
 			nativeLocalMaps: [][]int{nil, nil},
-			goallcLocalMaps: [][]int{nil},
+			goallcLocalMaps: [][]int{nil, {2, 3}},
 			nativeQueries:   []int32{0, -1},
-			goallcQueries:   []int32{-1, 0},
+			goallcQueries:   []int32{-1, 1},
 		},
 		{
 			name: "livePointerAggregateStackArgument", args: 136, pointerBits: []int{0, 2},
 			nativeArgsMaps:  [][]int{{0, 2}, nil},
-			goallcArgsMaps:  [][]int{{0, 2}},
+			goallcArgsMaps:  [][]int{{0, 2}, nil},
 			nativeStackMaps: []int32{-1, 0, -1},
-			goallcStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 1, -1},
 			checkFullMaps:   true,
 			nativeLocals:    8,
-			goallcLocals:    24,
+			goallcLocals:    40,
 			nativeLocalMaps: [][]int{nil, nil},
-			goallcLocalMaps: [][]int{nil},
+			goallcLocalMaps: [][]int{nil, {2, 3}},
 			nativeQueries:   []int32{0, -1},
-			goallcQueries:   []int32{-1, 0},
+			goallcQueries:   []int32{-1, 1},
 		},
 		{
 			name: "growPointer", args: 16, pointerBits: []int{0},
@@ -341,23 +338,23 @@ func runLLVMAArch64ABIDifferentialTest(t *testing.T, gorootTestDir string) {
 		{
 			name: "bothOverflow", args: 168, pointerBits: []int{2, 6, 20},
 			nativeArgsMaps:  [][]int{{2, 6, 20}, nil},
-			goallcArgsMaps:  [][]int{{2, 6, 20}, {2}, nil},
+			goallcArgsMaps:  [][]int{{2, 6, 20}, nil, nil},
 			nativeStackMaps: []int32{-1, 0, 1, -1},
 			goallcStackMaps: []int32{-1, 1, -1, 2},
 		},
 		{
 			name: "pointerAggregateBothOverflow", args: 152, pointerBits: []int{0, 2},
 			nativeArgsMaps:  [][]int{{0, 2}, nil},
-			goallcArgsMaps:  [][]int{{0, 2}},
+			goallcArgsMaps:  [][]int{{0, 2}, nil},
 			nativeStackMaps: []int32{-1, 0, -1},
-			goallcStackMaps: []int32{-1, 0, -1},
+			goallcStackMaps: []int32{-1, 1, -1},
 			checkFullMaps:   true,
 			nativeLocals:    8,
-			goallcLocals:    136,
+			goallcLocals:    152,
 			nativeLocalMaps: [][]int{nil, nil},
-			goallcLocalMaps: [][]int{nil},
+			goallcLocalMaps: [][]int{nil, {16, 17}},
 			nativeQueries:   []int32{0, -1},
-			goallcQueries:   []int32{-1, 0},
+			goallcQueries:   []int32{-1, 1},
 		},
 		{
 			name: "requireAggregate", args: 40, pointerBits: []int{4},
@@ -450,8 +447,8 @@ func runLLVMAMD64ArgsPointerMapDifferentialTest(t *testing.T, gorootTestDir stri
 		"-load-pass-plugin="+plugin, "-goallc-pass-plugin-emit-ir",
 		"-filetype=null", "-o", "-", goallcIR)
 	for _, pattern := range []string{
-		`(?s)define goabiinternal ptr @p\.liveScalarStackArgument.*?"gc-live"\(ptr %pointer\).*?gc\.relocate`,
-		`(?s)define goabiinternal \{ ptr, ptr \} @p\.liveAggregateStackArgument.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal ptr @p\.liveScalarStackArgument.*?ptr byval\(ptr\) align 8 %pointer.*?load ptr, ptr %pointer.*?"gc-live"\(ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, ptr \} @p\.liveAggregateStackArgument.*?ptr byval\(%p\.pointerAggregate\) align 8 %value.*?load %p\.pointerAggregate, ptr %value.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
 	} {
 		if !regexp.MustCompile(pattern).Match(rewrittenIR) {
 			t.Fatalf("rewritten amd64 IR does not match %q", pattern)
@@ -459,10 +456,15 @@ func runLLVMAMD64ArgsPointerMapDifferentialTest(t *testing.T, gorootTestDir stri
 	}
 	runLLVMABICommand(t, rewrittenIR, opt, "-load-pass-plugin="+plugin,
 		"-passes=verify", "-disable-output", "-")
+	// Match the production pipeline before checking ordinary statepoint spills.
+	// Loaded pointers are not reused from byval homes in this change.
+	optimizedGoallcIR := goallcArchive + ".opt.ll"
+	runLLVMABICommand(t, nil, opt, "-passes=default<O2>", "-S", goallcIR,
+		"-o", optimizedGoallcIR)
 
 	machineIR := runLLVMABICommand(t, nil, llc,
 		"-load-pass-plugin="+plugin, "-stop-after=prolog-epilog",
-		"-o", "-", goallcIR)
+		"-o", "-", optimizedGoallcIR)
 	morestackName, ok := goobj.BuiltinSymbolName("runtime.morestack_noctxt", 0)
 	if !ok {
 		t.Fatal("runtime.morestack_noctxt ABI0 is absent from the builtin table")
@@ -476,10 +478,10 @@ func runLLVMAMD64ArgsPointerMapDifferentialTest(t *testing.T, gorootTestDir stri
 			`STATEPOINT -[0-9]+,[^\n]*\$rsp, 0,[^\n]*\$rsp, 8,`,
 		},
 		"p.liveScalarStackArgument": {
-			`STATEPOINT -[0-9]+,[^\n]*\$rsp, 72,`,
+			`STATEPOINT -[0-9]+,[^\n]*\$rsp, 0,`,
 		},
 		"p.liveAggregateStackArgument": {
-			`STATEPOINT -[0-9]+,[^\n]*\$rsp, 56,[^\n]*\$rsp, 72,`,
+			`STATEPOINT -[0-9]+,[^\n]*\$rsp, 0,[^\n]*\$rsp, 8,`,
 		},
 	}
 	for name, patterns := range machinePatterns {
@@ -498,7 +500,7 @@ func runLLVMAMD64ArgsPointerMapDifferentialTest(t *testing.T, gorootTestDir stri
 	}
 
 	runLLVMABICommand(t, nil, llc, "-load-pass-plugin="+plugin,
-		"-filetype=obj", goallcIR, "-o", goallcObject)
+		"-filetype=obj", optimizedGoallcIR, "-o", goallcObject)
 	// Check the instructions from the GoObj artifact used below, rather than
 	// llc's diagnostic assembly-text output.
 	goallcDisassembly := runLLVMABICommand(t, nil, goTool, "tool", "objdump", goallcObject)
@@ -506,8 +508,8 @@ func runLLVMAMD64ArgsPointerMapDifferentialTest(t *testing.T, gorootTestDir stri
 		`(?s)TEXT p\.initializedPointerResult.*?MOVQ\s+AX, 0x48\(BP\)`,
 		`(?s)TEXT p\.partiallyInitializedAggregateResult.*?MOVQ\s+CX, 0x40\(BP\)`,
 		`(?s)TEXT p\.partiallyInitializedAggregateResult.*?MOVQ\s+AX, 0x50\(BP\)`,
-		`(?s)TEXT p\.liveScalarStackArgument.*?R_CALL:p\.safepoint.*?MOVQ\s+0x48\(BP\), AX`,
-		`(?s)TEXT p\.liveAggregateStackArgument.*?R_CALL:p\.safepoint.*?MOVQ\s+0x48\(BP\), BX.*?MOVQ\s+0x38\(BP\), AX`,
+		`(?s)TEXT p\.liveScalarStackArgument.*?R_CALL:p\.safepoint.*?MOVQ\s+0\(SP\), AX`,
+		`(?s)TEXT p\.liveAggregateStackArgument.*?R_CALL:p\.safepoint.*?MOVQ\s+0x8\(SP\), BX.*?MOVQ\s+0\(SP\), AX`,
 	} {
 		if !regexp.MustCompile(pattern).Match(goallcDisassembly) {
 			t.Fatalf("GoALLC amd64 object disassembly does not match %q", pattern)
@@ -549,17 +551,17 @@ func runLLVMAMD64ArgsPointerMapDifferentialTest(t *testing.T, gorootTestDir stri
 		},
 		{
 			name: "liveScalarStackArgument", args: 136, entryBits: []int{7},
-			goallcLocals: 8, goallcArgs: [][]int{{7}}, goallcMaps: [][]int{nil},
-			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 0, -1},
-			nativeQueries: []int32{0, -1}, goallcQueries: []int32{0, -1},
-			nativePCSP: []int32{0, 8, 0}, goallcPCSP: []int32{0, 8, 0},
+			goallcLocals: 16, goallcArgs: [][]int{{7}, nil}, goallcMaps: [][]int{nil, {1}},
+			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 1, -1},
+			nativeQueries: []int32{0, -1}, goallcQueries: []int32{1, -1},
+			nativePCSP: []int32{0, 8, 0}, goallcPCSP: []int32{0, 8, 16, 8, 0},
 		},
 		{
 			name: "liveAggregateStackArgument", args: 136, entryBits: []int{5, 7},
-			goallcLocals: 8, goallcArgs: [][]int{{5, 7}}, goallcMaps: [][]int{nil},
-			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 0, -1},
-			nativeQueries: []int32{0, -1}, goallcQueries: []int32{0, -1},
-			nativePCSP: []int32{0, 8, 0}, goallcPCSP: []int32{0, 8, 0},
+			goallcLocals: 24, goallcArgs: [][]int{{5, 7}, nil}, goallcMaps: [][]int{nil, {1, 2}},
+			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 1, -1},
+			nativeQueries: []int32{0, -1}, goallcQueries: []int32{1, -1},
+			nativePCSP: []int32{0, 8, 0}, goallcPCSP: []int32{0, 8, 24, 8, 0},
 		},
 	}
 	for _, tc := range cases {
@@ -641,8 +643,8 @@ func runLLVMABIArgsPointerMapSourceTest(t *testing.T, gorootTestDir, llc, opt, p
 		"-load-pass-plugin="+plugin, "-goallc-pass-plugin-emit-ir",
 		"-filetype=null", "-o", "-", goallcIR)
 	for _, pattern := range []string{
-		`(?s)define goabiinternal ptr @p\.liveScalarStackArgument.*?"gc-live"\(ptr %pointer\).*?gc\.relocate`,
-		`(?s)define goabiinternal \{ ptr, ptr \} @p\.liveAggregateStackArgument.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal ptr @p\.liveScalarStackArgument.*?ptr byval\(ptr\) align 8 %pointer.*?load ptr, ptr %pointer.*?"gc-live"\(ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
+		`(?s)define goabiinternal \{ ptr, ptr \} @p\.liveAggregateStackArgument.*?ptr byval\(%p\.pointerAggregate\) align 8 %value.*?load %p\.pointerAggregate, ptr %value.*?"gc-live"\(ptr %[[:alnum:]$._-]+, ptr %[[:alnum:]$._-]+\).*?gc\.relocate`,
 	} {
 		if !regexp.MustCompile(pattern).Match(rewrittenIR) {
 			t.Fatalf("rewritten source IR does not match %q", pattern)
@@ -658,8 +660,8 @@ func runLLVMABIArgsPointerMapSourceTest(t *testing.T, gorootTestDir, llc, opt, p
 		"-load-pass-plugin="+plugin, "-stop-after=finalize-isel",
 		"-o", "-", optimizedGoallcIR)
 	for _, pattern := range []string{
-		`(?s)name:\s+p\.liveScalarStackArgument.*?fixedStack:.*?isImmutable:\s+false.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0`,
-		`(?s)name:\s+p\.liveAggregateStackArgument.*?fixedStack:.*?id:\s+2.*?size:\s+24.*?isAliased:\s+true.*?stack:\s+\[\].*?STATEPOINT[^\n]*%fixed-stack\.1[^\n]*%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.0.*?LDRXui\s+%fixed-stack\.1`,
+		`(?s)name:\s+p\.liveScalarStackArgument.*?fixedStack:.*?offset:\s+8.*?isAliased:\s+true.*?stack:\s+.*?size:\s+8.*?LDRXui\s+%fixed-stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STATEPOINT[^\n]*%stack\.[0-9]+.*?LDRXui\s+%stack\.[0-9]+`,
+		`(?s)name:\s+p\.liveAggregateStackArgument.*?fixedStack:.*?offset:\s+8.*?size:\s+24.*?isAliased:\s+true.*?stack:\s+.*?size:\s+8.*?size:\s+8.*?LDRXui\s+%fixed-stack\.[0-9]+.*?LDRXui\s+%fixed-stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STRXui[^\n]*%stack\.[0-9]+.*?STATEPOINT[^\n]*%stack\.[0-9]+[^\n]*%stack\.[0-9]+.*?LDRXui\s+%stack\.[0-9]+.*?LDRXui\s+%stack\.[0-9]+`,
 	} {
 		if !regexp.MustCompile(pattern).Match(machineIR) {
 			t.Fatalf("source MIR does not match %q", pattern)
@@ -704,19 +706,19 @@ func runLLVMABIArgsPointerMapSourceTest(t *testing.T, gorootTestDir, llc, opt, p
 		},
 		{
 			name: "liveScalarStackArgument", args: 136, entryBits: []int{0},
-			nativeLocals: 8, goallcLocals: 8,
-			nativeArgs: [][]int{{0}, nil}, goallcArgs: [][]int{{0}},
-			nativeMaps: [][]int{nil, nil}, goallcMaps: [][]int{nil},
-			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 0, -1},
-			nativeQueries: []int32{0, -1}, goallcQueries: []int32{-1, 0},
+			nativeLocals: 8, goallcLocals: 24,
+			nativeArgs: [][]int{{0}, nil}, goallcArgs: [][]int{{0}, nil},
+			nativeMaps: [][]int{nil, nil}, goallcMaps: [][]int{nil, {1}},
+			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 1, -1},
+			nativeQueries: []int32{0, -1}, goallcQueries: []int32{-1, 1},
 		},
 		{
 			name: "liveAggregateStackArgument", args: 136, entryBits: []int{0, 2},
-			nativeLocals: 8, goallcLocals: 8,
-			nativeArgs: [][]int{{0, 2}, nil}, goallcArgs: [][]int{{0, 2}},
-			nativeMaps: [][]int{nil, nil}, goallcMaps: [][]int{nil},
-			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 0, -1},
-			nativeQueries: []int32{0, -1}, goallcQueries: []int32{-1, 0},
+			nativeLocals: 8, goallcLocals: 24,
+			nativeArgs: [][]int{{0, 2}, nil}, goallcArgs: [][]int{{0, 2}, nil},
+			nativeMaps: [][]int{nil, nil}, goallcMaps: [][]int{nil, {0, 1}},
+			nativePCData: []int32{-1, 0, -1}, goallcPCData: []int32{-1, 1, -1},
+			nativeQueries: []int32{0, -1}, goallcQueries: []int32{-1, 1},
 		},
 	}
 	for _, tc := range cases {

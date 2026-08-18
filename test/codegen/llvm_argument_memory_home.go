@@ -12,12 +12,6 @@ type llvmArgumentStrings3 struct {
 
 type llvmArgumentStringArray [2]string
 
-// A register-assigned parameter that Go SSA can use directly remains an LLVM
-// SSA value and does not acquire a memory home.
-func llvmDirectRegisterArgument(x int) int {
-	return x + 1
-}
-
 // llvmArgumentStrings3 fits wholly in the ABIInternal integer-register budget
 // but is too large for Go SSA's aggregate-value limit. LLVM gives only this
 // memory-backed parameter a complete local home instead of reconstructing its
@@ -42,25 +36,57 @@ func llvmRegisterArgumentMemoryHome(x llvmArgumentStrings3) int {
 	return len(x.a) + len(x.b) + len(x.c)
 }
 
-// Non-trivial arrays are assigned wholly to the ABI stack. Their Go SSA
-// LocalAddr uses the same local-home initialization instead of reading an
-// uninitialized alloca.
+// Non-trivial arrays are assigned wholly to the ABI stack. Typed byval exposes
+// that incoming Go parameter copy directly, so LocalAddr needs no second local
+// home or aggregate reconstruction.
 //
-// LLVM-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome([2 x { ptr, i64 }] %x)
-// LLVM: [[STACK_HOME:%.*]] = alloca [2 x { ptr, i64 }], align 8
-// LLVM: store [2 x { ptr, i64 }] %x, ptr [[STACK_HOME]], align 8
+// LLVM-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome(ptr byval([2 x { ptr, i64 }]) align 8 %x)
+// LLVM-NOT: alloca
+// LLVM: getelementptr i8, ptr %x, i64 0
+// LLVM: getelementptr i8, ptr %x, i64 16
+// LLVM: load { ptr, i64 }
+// LLVM: load { ptr, i64 }
 // LLVM: ret i64
 //
-// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome([2 x { ptr, i64 }] %x)
+// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmStackArgumentMemoryHome(ptr{{.*}}byval([2 x { ptr, i64 }]) align 8{{.*}} %x)
 // LLVM-OPT-NOT: alloca
-// LLVM-OPT: extractvalue [2 x { ptr, i64 }] %x, 0
-// LLVM-OPT: extractvalue [2 x { ptr, i64 }] %x, 1
+// LLVM-OPT: getelementptr {{.*}}ptr %x, i64 8
+// LLVM-OPT: load i64
+// LLVM-OPT: getelementptr {{.*}}ptr %x, i64 24
+// LLVM-OPT: load i64
 // LLVM-OPT: ret i64
+//
+//go:noinline
+func llvmStackArgumentMemoryHome(x llvmArgumentStringArray) int {
+	return len(x[0]) + len(x[1])
+}
+
+// A stack-assigned value that already resides in memory is the byval source
+// directly. The frontend must not load the complete aggregate and materialize
+// a second temporary object before the call.
+//
+// LLVM-LABEL: define goabiinternal i64 @codegen.llvmForwardStackArgumentMemory(ptr byval([2 x { ptr, i64 }]) align 8 %x)
+// LLVM-NOT: alloca
+// LLVM: call goabiinternal i64 @codegen.llvmStackArgumentMemoryHome(ptr byval([2 x { ptr, i64 }]) align 8 %x)
+// LLVM: ret i64
+//
+// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmForwardStackArgumentMemory(ptr{{.*}}byval([2 x { ptr, i64 }]) align 8{{.*}} %x)
+// LLVM-OPT-NOT: alloca
+// LLVM-OPT: call goabiinternal i64 @codegen.llvmStackArgumentMemoryHome(ptr{{.*}}byval([2 x { ptr, i64 }]) align 8{{.*}} %x)
+// LLVM-OPT: ret i64
+//
+//go:noinline
+func llvmForwardStackArgumentMemory(x llvmArgumentStringArray) int {
+	return llvmStackArgumentMemoryHome(x)
+}
+
+// A register-assigned parameter that Go SSA can use directly remains an LLVM
+// SSA value and does not acquire a memory home.
 //
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmDirectRegisterArgument(i64 %x)
 // LLVM-NOT: alloca
 // LLVM: add i64 %x, 1
 // LLVM: ret i64
-func llvmStackArgumentMemoryHome(x llvmArgumentStringArray) int {
-	return len(x[0]) + len(x[1])
+func llvmDirectRegisterArgument(x int) int {
+	return x + 1
 }
