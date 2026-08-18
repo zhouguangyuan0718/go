@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -498,13 +500,13 @@ func llvmDataSymbolKindSupported(kind objabi.SymKind) bool {
 	}
 }
 
-func llvmDataType(s *obj.LSym) llvm.Type {
-	fields := llvmDataFields(s, nil, nil)
+func llvmDataType(s *obj.LSym, contents []byte) llvm.Type {
+	fields := llvmDataFields(s, contents, nil, nil)
 	return GlobalCtxt.ConstStruct(fields, true).Type()
 }
 
-func llvmDataInitializer(s *obj.LSym, globals map[*obj.LSym]llvm.Value, data map[*obj.LSym]bool) llvm.Value {
-	fields := llvmDataFields(s, globals, data)
+func llvmDataInitializer(s *obj.LSym, contents []byte, globals map[*obj.LSym]llvm.Value, data map[*obj.LSym]bool) llvm.Value {
+	fields := llvmDataFields(s, contents, globals, data)
 	return GlobalCtxt.ConstStruct(fields, true)
 }
 
@@ -512,13 +514,17 @@ func llvmDataInitializer(s *obj.LSym, globals map[*obj.LSym]llvm.Value, data map
 // frontend's exact layout while relocation slots retain their LLVM constants.
 // Using a packed aggregate is necessary because descriptors contain 32-bit
 // offsets adjacent to pointer-sized fields.
-func llvmDataFields(s *obj.LSym, globals map[*obj.LSym]llvm.Value, data map[*obj.LSym]bool) []llvm.Value {
-	dataSize := int(s.Size)
-	if dataSize < len(s.P) {
-		dataSize = len(s.P)
+func llvmDataFields(s *obj.LSym, contents []byte, globals map[*obj.LSym]llvm.Value, data map[*obj.LSym]bool) []llvm.Value {
+	dataSize64 := s.Size
+	if dataSize64 < int64(len(contents)) {
+		dataSize64 = int64(len(contents))
 	}
+	if dataSize64 < 0 || uint64(dataSize64) > uint64(^uint(0)>>1) {
+		base.Fatalf("invalid LLVM data symbol size %d for %s", dataSize64, s.Name)
+	}
+	dataSize := int(dataSize64)
 	bytes := make([]byte, dataSize)
-	copy(bytes, s.P)
+	copy(bytes, contents)
 	relocs := llvmDataStorageRelocs(s)
 	sort.Slice(relocs, func(i, j int) bool { return relocs[i].Off < relocs[j].Off })
 
@@ -547,6 +553,61 @@ func llvmDataFields(s *obj.LSym, globals map[*obj.LSym]llvm.Value, data map[*obj
 		fields = append(fields, llvmDataBytes(nil))
 	}
 	return fields
+}
+
+func (l *llvmDataLowerer) dataBytes(s *obj.LSym) []byte {
+	if s.File() == nil {
+		return s.P
+	}
+	if data, ok := l.fileData[s]; ok {
+		return data
+	}
+	data, err := readLLVMFileData(s)
+	if err != nil {
+		base.Fatalf("reading file-backed LLVM data symbol %s: %v", s.Name, err)
+	}
+	l.fileData[s] = data
+	return data
+}
+
+// readLLVMFileData materializes the same file-backed LSym bytes that the
+// native Go object writer streams into its object. LLVM constants require the
+// complete initializer in memory, so validate both metadata sizes and the
+// actual EOF while reading it once for the lowerer's type and initializer.
+func readLLVMFileData(s *obj.LSym) ([]byte, error) {
+	file := s.File()
+	if file == nil {
+		return s.P, nil
+	}
+	if s.P != nil {
+		return nil, fmt.Errorf("file-backed symbol also has %d inline bytes", len(s.P))
+	}
+	if file.Size != s.Size {
+		return nil, fmt.Errorf("file metadata length %d does not match symbol size %d", file.Size, s.Size)
+	}
+	if file.Size < 0 || uint64(file.Size) > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("invalid file length %d", file.Size)
+	}
+	f, err := os.Open(file.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data := make([]byte, int(file.Size))
+	if _, err := io.ReadFull(f, data); err != nil {
+		return nil, fmt.Errorf("copy %s: expected %d bytes: %w", file.Name, file.Size, err)
+	}
+	var extra [1]byte
+	n, err := io.ReadFull(f, extra[:])
+	switch {
+	case n == 0 && err == io.EOF:
+		return data, nil
+	case err == nil:
+		return nil, fmt.Errorf("copy %s: file is longer than expected %d bytes", file.Name, file.Size)
+	default:
+		return nil, fmt.Errorf("copy %s after %d bytes: %w", file.Name, file.Size, err)
+	}
 }
 
 func llvmDataBytes(b []byte) llvm.Value {
