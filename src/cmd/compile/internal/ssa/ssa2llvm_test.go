@@ -7,6 +7,8 @@
 package ssa
 
 import (
+	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -179,6 +181,74 @@ func TestLLVMGoObjCompilerUsedOnlyKeepsExternalDataRoots(t *testing.T) {
 	}
 	if strings.Contains(used, "@test.ordinary.local") {
 		t.Fatalf("ordinary local GoObj data is unnecessarily compiler-used: %s", used)
+	}
+}
+
+func TestLLVMFileBackedDataLowering(t *testing.T) {
+	payload := append(bytes.Repeat([]byte("file-backed-data-"), 80), []byte("GOALLC_FILE_END")...)
+	path := t.TempDir() + "/payload"
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &obj.LSym{Name: "test.file.backed", Type: objabi.SRODATA, Size: int64(len(payload))}
+	file := s.NewFileInfo()
+	file.Name = path
+	file.Size = int64(len(payload))
+	lowerer := newLLVMDataLowerer(map[*obj.LSym]bool{s: true})
+
+	module := GlobalCtxt.NewModule("file_backed_data")
+	t.Cleanup(module.Dispose)
+	g := llvm.AddGlobal(module, lowerer.dataType(s), s.Name)
+	g.SetInitializer(lowerer.dataInitializer(s, map[*obj.LSym]llvm.Value{s: g}))
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("LLVM verifier rejected file-backed data: %v\n%s", err, module.String())
+	}
+
+	ir := module.String()
+	if strings.Contains(ir, "zeroinitializer") {
+		t.Fatalf("file-backed LLVM data was lowered as zeros:\n%s", ir)
+	}
+	if !strings.Contains(ir, "GOALLC_FILE_END") {
+		t.Fatalf("file-backed LLVM data lost its payload:\n%s", ir)
+	}
+}
+
+func TestReadLLVMFileDataRejectsLengthMismatches(t *testing.T) {
+	path := t.TempDir() + "/payload"
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newSymbol := func(symbolSize, fileSize int64) *obj.LSym {
+		s := &obj.LSym{Name: "test.file.backed", Type: objabi.SRODATA, Size: symbolSize}
+		file := s.NewFileInfo()
+		file.Name = path
+		file.Size = fileSize
+		return s
+	}
+	for _, tc := range []struct {
+		name       string
+		symbolSize int64
+		fileSize   int64
+		want       string
+	}{
+		{name: "metadata", symbolSize: 5, fileSize: 4, want: "metadata length 4 does not match symbol size 5"},
+		{name: "short", symbolSize: 6, fileSize: 6, want: "expected 6 bytes"},
+		{name: "long", symbolSize: 4, fileSize: 4, want: "longer than expected 4 bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := readLLVMFileData(newSymbol(tc.symbolSize, tc.fileSize))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("readLLVMFileData error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+
+	s := newSymbol(5, 5)
+	s.P = []byte("12345")
+	if _, err := readLLVMFileData(s); err == nil || !strings.Contains(err.Error(), "also has 5 inline bytes") {
+		t.Fatalf("readLLVMFileData inline/file conflict error = %v", err)
 	}
 }
 

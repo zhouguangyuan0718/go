@@ -166,6 +166,7 @@
       "llvm_range_statepoint_gc.go": "wide array range derives each element from a relocatable base across repeated statepoints and stack growth",
       "llvm_memeq.go": "raw memory equality for true, false, different-length, and offset substring inputs",
       "llvm_move.go": "overlap-safe, aligned, and runtime-helper memory moves",
+      "llvm_file_backed_embed.go": "large string and byte-slice go:embed data preserve file-backed LSym bytes and storage semantics through LLVM GoObj linking and execution",
       "llvm_private_string.go": "frontend private string constant materialization, GoObj linking, and execution",
       "llvm_zero_sized_symbols.go": "zero-value strings and zero-sized interface data through GoObj linking and execution",
       "llvm_slicemask.go": "slice start, middle, and zero-capacity end boundary semantics",
