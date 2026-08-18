@@ -92,27 +92,38 @@ func runLLVMAllocaStatepointTest(t *testing.T, gorootTestDir string) {
 	parameterInputFunction := llvmAllocaIRFunction(t, inputIR,
 		"p.parameterAcrossSafepoints")
 	for _, pattern := range []string{
-		`define goabiinternal void @p\.parameterAcrossSafepoints\(%p\.pointerLocal %value\)`,
-		`alloca %p\.pointerLocal, align 8`,
-		`call void @llvm\.lifetime\.start\.p0\(ptr %v[0-9]+\)`,
-		`store %p\.pointerLocal %value, ptr %v[0-9]+, align 8`,
+		`define goabiinternal void @p\.parameterAcrossSafepoints\(ptr byval\(%p\.pointerLocal\) align 8 %value\)`,
+		`call goabiinternal void @p\.mutateLocal\(ptr %value, i8 0\)`,
+		`call goabiinternal void @p\.safepoint\(\)`,
+		`call goabiinternal void @p\.mutateLocal\(ptr %value, i8 1\)`,
 	} {
 		if !regexp.MustCompile(pattern).Match(parameterInputFunction) {
 			t.Fatalf("input parameter-home IR does not match %q\n%s",
 				pattern, parameterInputFunction)
 		}
 	}
+	for _, forbidden := range []string{"alloca %p.pointerLocal", "llvm.lifetime.start", "store %p.pointerLocal"} {
+		if bytes.Contains(parameterInputFunction, []byte(forbidden)) {
+			t.Fatalf("input parameter-home IR retained %q\n%s",
+				forbidden, parameterInputFunction)
+		}
+	}
 	stackParameterInputFunction := llvmAllocaIRFunction(t, inputIR,
 		"p.stackParameterAcrossSafepoints")
 	for _, pattern := range []string{
-		`define goabiinternal void @p\.stackParameterAcrossSafepoints\(\[2 x ptr\] %value\)`,
-		`alloca \[2 x ptr\], align 8`,
-		`call void @llvm\.lifetime\.start\.p0\(ptr %v[0-9]+\)`,
-		`store \[2 x ptr\] %value, ptr %v[0-9]+, align 8`,
+		`define goabiinternal void @p\.stackParameterAcrossSafepoints\(ptr byval\(\[2 x ptr\]\) align 8 %value\)`,
+		`call goabiinternal void @p\.mutatePointerArray\(ptr %value\)`,
+		`call goabiinternal void @p\.safepoint\(\)`,
 	} {
 		if !regexp.MustCompile(pattern).Match(stackParameterInputFunction) {
 			t.Fatalf("input stack-parameter-home IR does not match %q\n%s",
 				pattern, stackParameterInputFunction)
+		}
+	}
+	for _, forbidden := range []string{"alloca [2 x ptr]", "llvm.lifetime.start", "store [2 x ptr]"} {
+		if bytes.Contains(stackParameterInputFunction, []byte(forbidden)) {
+			t.Fatalf("input stack-parameter-home IR retained %q\n%s",
+				forbidden, stackParameterInputFunction)
 		}
 	}
 

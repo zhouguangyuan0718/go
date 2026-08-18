@@ -39,6 +39,7 @@ type LLVMFuncContext struct {
 	b                 llvm.Builder
 	ReturnType        llvm.Type
 	ResultCount       int
+	Params            []llvmParamSignature
 }
 
 // SSA may clone an ir.Name while retaining the same logical source
@@ -96,8 +97,15 @@ type llvmFuncSignature struct {
 	Type                llvm.Type
 	ReturnType          llvm.Type
 	ResultCount         int
+	Params              []llvmParamSignature
 	HasClosureContext   bool
 	ClosureContextIndex int
+}
+
+type llvmParamSignature struct {
+	ValueType llvm.Type
+	Alignment int
+	ByVal     bool
 }
 
 func llvmCallConv(which obj.ABI) llvm.CallConv {
@@ -165,9 +173,23 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 	}
 
 	params := make([]llvm.Type, 0, aux.NArgs())
+	paramSignatures := make([]llvmParamSignature, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
-		param := getLLVMABIType(aux.TypeOfArg(i))
-		params = append(params, param)
+		goType := aux.TypeOfArg(i)
+		valueType := getLLVMABIType(goType)
+		paramType := valueType
+		param := llvmParamSignature{ValueType: valueType}
+		assignment := aux.ABIInfo().InParam(int(i))
+		if len(assignment.Registers) == 0 && goType.Size() != 0 {
+			if goType.Alignment() <= 0 {
+				base.Fatalf("invalid alignment %d for stack argument %d of type %v", goType.Alignment(), i, goType)
+			}
+			param.ByVal = true
+			param.Alignment = int(goType.Alignment())
+			paramType = GlobalCtxt.PointerType(0)
+		}
+		params = append(params, paramType)
+		paramSignatures = append(paramSignatures, param)
 	}
 
 	results := make([]llvm.Type, 0, aux.NResults())
@@ -189,6 +211,7 @@ func llvmSignature(aux *AuxCall) llvmFuncSignature {
 		Type:                llvm.FunctionType(ret, params, false),
 		ReturnType:          ret,
 		ResultCount:         len(results),
+		Params:              paramSignatures,
 		ClosureContextIndex: -1,
 	}
 }
@@ -208,6 +231,14 @@ func llvmNestAttribute() llvm.Attribute {
 		base.Fatalf("LLVM does not provide the nest parameter attribute")
 	}
 	return GlobalCtxt.CreateEnumAttribute(kind, 0)
+}
+
+func llvmByValAttribute(t llvm.Type) llvm.Attribute {
+	kind := llvm.AttributeKindID("byval")
+	if kind == 0 {
+		base.Fatalf("LLVM does not provide the byval parameter attribute")
+	}
+	return GlobalCtxt.CreateTypeAttribute(kind, t)
 }
 
 func llvmNullPointerIsValidAttribute() llvm.Attribute {
@@ -231,6 +262,13 @@ func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallCon
 	if sig.ResultCount > 1 {
 		fn.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goResultsTupleAttr, ""))
 	}
+	for i, param := range sig.Params {
+		if !param.ByVal {
+			continue
+		}
+		fn.AddAttributeAtIndex(i+1, llvmByValAttribute(param.ValueType))
+		fn.Param(i).SetParamAlignment(param.Alignment)
+	}
 	if sig.HasClosureContext {
 		// LLVM parameter attribute indexes are one-based. The closure context
 		// is deliberately excluded from the Go ABI argument layout by the
@@ -242,6 +280,13 @@ func configureLLVMFunction(fn llvm.Value, sig llvmFuncSignature, cc llvm.CallCon
 func configureLLVMCall(call llvm.Value, sig llvmFuncSignature) {
 	if sig.ResultCount > 1 {
 		call.AddCallSiteAttribute(llvmAttributeFunctionIndex, GlobalCtxt.CreateStringAttribute(goResultsTupleAttr, ""))
+	}
+	for i, param := range sig.Params {
+		if !param.ByVal {
+			continue
+		}
+		call.AddCallSiteAttribute(i+1, llvmByValAttribute(param.ValueType))
+		call.SetInstrParamAlignment(i+1, param.Alignment)
 	}
 }
 
@@ -1552,11 +1597,62 @@ func (lfc *LLVMFuncContext) paramForArgNameAndType(name *ir.Name) (llvm.Value, *
 	key := llvmLocalKeyForName(name)
 	for i, param := range lfc.F.OwnAux.ABIInfo().InParams() {
 		if param.Name != nil && llvmLocalKeyForName(param.Name) == key {
-			return lfc.LF.Param(i), lfc.F.OwnAux.TypeOfArg(int64(i))
+			value := lfc.LF.Param(i)
+			if lfc.Params[i].ByVal {
+				value = lfc.b.CreateLoad(lfc.Params[i].ValueType, value, name.Sym().Name+".byval")
+				value.SetAlignment(lfc.Params[i].Alignment)
+			}
+			return value, lfc.F.OwnAux.TypeOfArg(int64(i))
 		}
 	}
 	lfc.F.fe.Fatalf(name.Pos(), "could not find LLVM parameter for %v", name)
 	return llvm.Value{}, nil
+}
+
+func (lfc *LLVMFuncContext) llvmByValCallArgument(v, argValue *Value, index int, logical *types.Type, param llvmParamSignature) llvm.Value {
+	if !param.ByVal || logical.Size() == 0 {
+		v.Fatalf("argument %d is not a non-empty byval parameter", index)
+	}
+
+	// Preserve an existing Go memory source when no memory effect separates its
+	// load from the call. Ordinary LLVM byval lowering will copy these bytes
+	// into the callee's Go ABI stack home; manufacturing an intermediate
+	// aggregate value and a second alloca would only obscure that source from
+	// ordinary memcpy forwarding. A different memory state requires the SSA
+	// value path below so later argument evaluation cannot change the snapshot.
+	if types.Identical(argValue.Type, logical) &&
+		(argValue.Op == OpLoad || argValue.Op == OpDereference) && len(argValue.Args) != 0 &&
+		argValue.MemoryArg() == v.MemoryArg() {
+		address := lfc.GenLV(argValue.Args[0])
+		if address.Type().TypeKind() != llvm.PointerTypeKind {
+			v.Fatalf("byval argument %d has non-pointer source address", index)
+		}
+		return address
+	}
+
+	value := lfc.GenLV(argValue)
+	value = lfc.llvmValueToABI(v, value, argValue.Type, logical, param.ValueType, fmt.Sprintf("%s.arg%d", v, index))
+	if value.Type() != param.ValueType {
+		v.Fatalf("byval argument %d has incompatible LLVM value type", index)
+	}
+
+	// LLVM byval takes an address. A pure SSA value therefore needs a canonical
+	// source object in IR. It is intentionally an ordinary alloca-backed byval
+	// source: generic DAG combines may fold individual copies, while ordinary
+	// byval copy semantics remain the correctness path.
+	entryBuilder := GlobalCtxt.NewBuilder()
+	defer entryBuilder.Dispose()
+	entry := lfc.LF.EntryBasicBlock()
+	if first := entry.FirstInstruction(); first.IsNil() {
+		entryBuilder.SetInsertPointAtEnd(entry)
+	} else {
+		entryBuilder.SetInsertPointBefore(first)
+	}
+	address := entryBuilder.CreateAlloca(param.ValueType, fmt.Sprintf("%s.arg%d.byval", v, index))
+	address.SetAlignment(param.Alignment)
+	store := lfc.b.CreateStore(value, address)
+	store.SetAlignment(param.Alignment)
+	return address
 }
 
 func (lfc *LLVMFuncContext) registerArgument(v *Value) llvm.Value {
@@ -1915,9 +2011,17 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 		aux.Fn == ir.Syms.Memmove || aux.Fn == ir.Syms.Memequal
 	args := make([]llvm.Value, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
-		arg := lfc.GenLV(v.Args[i])
-		if arg.Type() != sig.Type.ParamTypes()[i] {
-			arg = lfc.llvmValueToABI(v, arg, v.Args[i].Type, aux.TypeOfArg(i), sig.Type.ParamTypes()[i], fmt.Sprintf("%s.arg%d", v, i))
+		var arg llvm.Value
+		if sig.Params[i].ByVal {
+			arg = lfc.llvmByValCallArgument(v, v.Args[i], int(i), aux.TypeOfArg(i), sig.Params[i])
+		} else {
+			arg = lfc.GenLV(v.Args[i])
+			if arg.Type() != sig.Type.ParamTypes()[i] {
+				arg = lfc.llvmValueToABI(v, arg, v.Args[i].Type, aux.TypeOfArg(i), sig.Type.ParamTypes()[i], fmt.Sprintf("%s.arg%d", v, i))
+			}
+		}
+		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
+			v.Fatalf("argument %d to %s has incompatible LLVM type", i, aux.Fn.Name)
 		}
 		args = append(args, arg)
 	}
@@ -1964,9 +2068,15 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	}
 	args := make([]llvm.Value, 0, aux.NArgs())
 	for i := int64(0); i < aux.NArgs(); i++ {
-		arg := lfc.GenLV(v.Args[argStart+int(i)])
-		if arg.Type() != sig.Type.ParamTypes()[i] {
-			arg = lfc.llvmValueToABI(v, arg, v.Args[argStart+int(i)].Type, aux.TypeOfArg(i), sig.Type.ParamTypes()[i], fmt.Sprintf("%s.arg%d", v, i))
+		argValue := v.Args[argStart+int(i)]
+		var arg llvm.Value
+		if sig.Params[i].ByVal {
+			arg = lfc.llvmByValCallArgument(v, argValue, int(i), aux.TypeOfArg(i), sig.Params[i])
+		} else {
+			arg = lfc.GenLV(argValue)
+			if arg.Type() != sig.Type.ParamTypes()[i] {
+				arg = lfc.llvmValueToABI(v, arg, argValue.Type, aux.TypeOfArg(i), sig.Type.ParamTypes()[i], fmt.Sprintf("%s.arg%d", v, i))
+			}
 		}
 		if got, want := arg.Type(), sig.Type.ParamTypes()[i]; got != want {
 			v.Fatalf("argument %d to indirect call has incompatible LLVM type", i)
@@ -2999,6 +3109,7 @@ func LLVMCompile(f *Func) {
 		b:                 GlobalCtxt.NewBuilder(),
 		ReturnType:        sig.ReturnType,
 		ResultCount:       sig.ResultCount,
+		Params:            sig.Params,
 	}
 	defer FCtxt.b.Dispose()
 
@@ -3232,6 +3343,39 @@ func LLVMCompile(f *Func) {
 		FCtxt.Locals[key] = slot
 		return slot, true
 	}
+	// A typed byval parameter already denotes the callee-private Go ABI stack
+	// copy. Bind addressable parameter uses directly to that incoming home;
+	// creating a second alloca and copying the value again would defeat the ABI
+	// model.
+	for i, param := range sig.Params {
+		if !param.ByVal {
+			continue
+		}
+		// CgoUnsafeArgs exposes one parameter address as the base of the
+		// complete contiguous ABI0 input/result frame. A typed byval argument
+		// denotes only its own object, so keep addressable uses on the existing
+		// llvm.go.abi0.frame-derived view below. The physical incoming home is
+		// still the same slot and therefore needs no initialization copy.
+		if cgoUnsafeArgs {
+			continue
+		}
+		assignment := inParams[i]
+		if len(assignment.Registers) != 0 {
+			f.fe.Fatalf(f.Entry.Pos, "LLVM byval parameter %d was assigned Go registers", i)
+		}
+		if assignment.Name == nil {
+			continue
+		}
+		goType := f.OwnAux.TypeOfArg(int64(i))
+		if goType.Size() == 0 || !types.Identical(goType, assignment.Name.Type()) {
+			f.fe.Fatalf(assignment.Name.Pos(), "invalid Go type for LLVM byval parameter %v", assignment.Name)
+		}
+		key := llvmLocalKeyForName(assignment.Name)
+		if _, exists := FCtxt.Locals[key]; exists {
+			f.fe.Fatalf(assignment.Name.Pos(), "duplicate LLVM byval parameter home %v", assignment.Name)
+		}
+		FCtxt.Locals[key] = llvmStackSlot{Value: FCtxt.LF.Param(i), Type: assignment.Name.Type()}
+	}
 	// Escape analysis names the pointer to a heap-backed result &result. SSA can
 	// keep that pointer only in a register, but panic recovery needs the same
 	// stable, whole-function local-slot semantics as an ordinary named result.
@@ -3276,6 +3420,12 @@ func LLVMCompile(f *Func) {
 				continue
 			}
 			if _, created := preallocateLocal(param.Name, param.Name.Sym().Name+".cgo"); created {
+				// Keep an explicit IR data dependence between every formal input
+				// and the complete frame address passed to C. Per-argument byval
+				// semantics cannot describe CgoUnsafeArgs' permitted access beyond
+				// the first parameter object into adjacent arguments/results. The
+				// two addresses lower to the same incoming fixed home, so target
+				// copy folding may remove the physical self-copy.
 				parameterHomes = append(parameterHomes, param.Name)
 			}
 		}

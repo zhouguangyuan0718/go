@@ -33,6 +33,8 @@ frameInfo:
   stackSize:       0
   maxAlignment:    8
   hasCalls:        true
+  goABIStackArgsSize: 0
+  goABIArgSize:    16
 machineFunctionInfo:
   hasRedZone:      false
   stackSizeZPR:    0

@@ -257,16 +257,14 @@ entry:
 }
 
 define goabiinternal void @argument_aggregate_home_address_across_calls(
-    %nested %value) gc "goallc" {
+    ptr byval(%nested) align 8 %value.home) gc "goallc" {
 entry:
-  ; The split aggregate parameter still has one complete fixed home and one
+  ; Typed byval is the complete incoming Go ABI home. It needs no second
+  ; alloca or parameter copy, while its pointer layout still contributes one
   ; argp-relative StackObject covering all ABI pieces and padding.
-  %slot = alloca %nested, align 8
-  call void @llvm.lifetime.start.p0(i64 48, ptr %slot)
-  store %nested %value, ptr %slot, align 8
-  call goabiinternal void @observe_stack_address(ptr %slot)
+  call goabiinternal void @observe_stack_address(ptr %value.home)
   call goabiinternal void @safepoint()
-  call goabiinternal void @observe_stack_address(ptr %slot)
+  call goabiinternal void @observe_stack_address(ptr %value.home)
   ret void
 }
 

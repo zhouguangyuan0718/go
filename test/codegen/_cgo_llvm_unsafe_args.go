@@ -10,34 +10,52 @@ package codegen
 func llvmCgoUnsafeSink(*uintptr)
 
 // LLVM-LABEL: define goabi0 i64 @"codegen.llvmCgoUnsafeFrame<ABI0>"(
-// LLVM-SAME: i64 %p, i64 %q) #[[NOINLINE:[0-9]+]] gc "goallc"
+// LLVM-SAME: ptr byval(i64) align 8 %p, ptr byval(i64) align 8 %q) #[[NOINLINE:[0-9]+]] gc "goallc"
 // LLVM-NOT: alloca
 // LLVM: [[FRAME:%.*]] = {{.*}}call ptr @llvm.go.abi0.frame()
 // LLVM-NOT: llvm.addressofreturnaddress
 // LLVM-NOT: llvm.sponentry
 // LLVM: [[Q:%.*]] = getelementptr i8, ptr [[FRAME]], i64 8
 // LLVM: [[RESULT:%.*]] = getelementptr i8, ptr [[FRAME]], i64 16
-// LLVM: store i64 %p, ptr [[FRAME]]
-// LLVM: store i64 %q, ptr [[Q]]
+// LLVM: [[P_VALUE:%.*]] = load i64, ptr %p
+// LLVM: store i64 [[P_VALUE]], ptr [[FRAME]]
+// LLVM: [[Q_VALUE:%.*]] = load i64, ptr %q
+// LLVM: store i64 [[Q_VALUE]], ptr [[Q]]
 // LLVM: {{.*}}call goabiinternal void @codegen.llvmCgoUnsafeSink(ptr{{.*}} [[FRAME]])
 // LLVM: {{%.*}} = load i64, ptr [[RESULT]]
-// LLVM: attributes #[[NOINLINE]] = { {{.*}}noinline
 // LLVM-OPT-LABEL: define goabi0 i64 @"codegen.llvmCgoUnsafeFrame<ABI0>"(
-// LLVM-OPT-SAME: i64 %p, i64 %q) {{.*}}#[[OPT_NOINLINE:[0-9]+]] gc "goallc"
+// LLVM-OPT-SAME: ptr{{.*}}byval(i64) align 8{{.*}} %p, ptr{{.*}}byval(i64) align 8{{.*}} %q) {{.*}}#[[OPT_NOINLINE:[0-9]+]] gc "goallc"
 // LLVM-OPT-NOT: alloca
 // LLVM-OPT: [[OPT_FRAME:%.*]] = {{.*}}call ptr @llvm.go.abi0.frame()
 // LLVM-OPT-NOT: llvm.addressofreturnaddress
 // LLVM-OPT-NOT: llvm.sponentry
 // LLVM-OPT: [[OPT_Q:%.*]] = getelementptr i8, ptr [[OPT_FRAME]], i64 8
 // LLVM-OPT: [[OPT_RESULT:%.*]] = getelementptr i8, ptr [[OPT_FRAME]], i64 16
-// LLVM-OPT: store i64 %p, ptr [[OPT_FRAME]]
-// LLVM-OPT: store i64 %q, ptr [[OPT_Q]]
+// LLVM-OPT: [[OPT_P_VALUE:%.*]] = load i64, ptr %p
+// LLVM-OPT: store i64 [[OPT_P_VALUE]], ptr [[OPT_FRAME]]
+// LLVM-OPT: [[OPT_Q_VALUE:%.*]] = load i64, ptr %q
+// LLVM-OPT: store i64 [[OPT_Q_VALUE]], ptr [[OPT_Q]]
 // LLVM-OPT: {{.*}}call goabiinternal void @codegen.llvmCgoUnsafeSink(ptr{{.*}} [[OPT_FRAME]])
 // LLVM-OPT: {{%.*}} = load i64, ptr [[OPT_RESULT]]
-// LLVM-OPT: attributes #[[OPT_NOINLINE]] = { {{.*}}noinline
 //
 //go:cgo_unsafe_args
 func llvmCgoUnsafeFrame(p, q uintptr) (r uintptr) {
 	llvmCgoUnsafeSink(&p)
 	return
+}
+
+// LLVM-LABEL: define goabiinternal i64 @codegen.llvmCgoUnsafeCall()
+// LLVM: store i64 1, ptr [[CALL_P:%[^, ]+]]
+// LLVM: store i64 2, ptr [[CALL_Q:%[^, ]+]]
+// LLVM: {{%.*}} = {{(tail )?}}call goabi0 i64 @"codegen.llvmCgoUnsafeFrame<ABI0>"(
+// LLVM-SAME: ptr byval(i64) align 8 [[CALL_P]], ptr byval(i64) align 8 [[CALL_Q]])
+// LLVM: attributes #[[NOINLINE]] = { {{.*}}noinline
+// LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmCgoUnsafeCall()
+// LLVM-OPT: store i64 1, ptr [[OPT_CALL_P:%[^, ]+]]
+// LLVM-OPT: store i64 2, ptr [[OPT_CALL_Q:%[^, ]+]]
+// LLVM-OPT: {{%.*}} = {{(tail )?}}call goabi0 i64 @"codegen.llvmCgoUnsafeFrame<ABI0>"(
+// LLVM-OPT-SAME: ptr {{.*}}byval(i64) align 8{{.*}} [[OPT_CALL_P]], ptr {{.*}}byval(i64) align 8{{.*}} [[OPT_CALL_Q]])
+// LLVM-OPT: attributes #[[OPT_NOINLINE]] = { {{.*}}noinline
+func llvmCgoUnsafeCall() uintptr {
+	return llvmCgoUnsafeFrame(1, 2)
 }
