@@ -120,7 +120,20 @@ if(BUILD_TESTING)
   )
   set_tests_properties(GoALLCStatepoints.Load PROPERTIES
     PASS_REGULAR_EXPRESSION
-      "GoALLCStatepoints: ran pre-codegen pipeline for"
+      "GoALLCStatepoints: ran late pre-isel pipeline for"
+  )
+
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.AnalysisInvalidation
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
+    ANALYSIS-INVALIDATION
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -mtriple=x86_64-unknown-linux-gnu
+    -debug-pass=Structure
+    -filetype=null
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/statepoint.ll"
   )
 
   add_test(
@@ -376,7 +389,7 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
   )
   goallc_add_ir_filecheck_test(
-    GoALLCStatepoints.CallOnlyPointersNotLive
+    GoALLCStatepoints.IndirectCallRewrite
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
     IR
   )
@@ -707,6 +720,59 @@ if(BUILD_TESTING)
     -mtriple=aarch64-unknown-linux-goobj
     -frame-pointer=all
   )
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.DirectAllocaMemoryRewrite
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/direct-alloca-memory.ll"
+    IR
+  )
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.FixedFrameBaseRewrite
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"
+    IR
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.FixedFrameBaseMIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"
+    MIR
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"
+  )
+  add_test(
+    NAME GoALLCStatepoints.FixedFrameBaseGoObj
+    COMMAND "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/fixed-frame-base.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"
+  )
+  if(GOALLC_OBJVIEW_EXECUTABLE)
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.FixedFrameBaseObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/fixed-frame-base.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.FixedFrameBaseObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.FixedFrameBaseGoObj
+    )
+  endif()
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.DirectAllocaMemoryMIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/direct-alloca-memory.ll"
+    MIR
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/direct-alloca-memory.ll"
+  )
   goallc_add_filecheck_test(
     GoALLCStatepoints.AllocaPointerRootsMIR
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-roots.ll"
@@ -778,7 +844,8 @@ if(BUILD_TESTING)
   endforeach()
 
   foreach(GOALLC_MALFORMED_PTRMAP_CASE IN ITEMS
-      bad-kind truncated bad-length duplicate overlap padding non-direct)
+      bad-kind truncated bad-length duplicate overlap padding non-direct
+      contents-live)
     set(GOALLC_MALFORMED_PTRMAP_INPUT
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-ptrmap-malformed-${GOALLC_MALFORMED_PTRMAP_CASE}.ll")
     goallc_add_filecheck_test(
@@ -972,7 +1039,7 @@ if(BUILD_TESTING)
   )
   set_tests_properties(GoALLCStatepoints.ConditionalPhiEdgeUseRewrite PROPERTIES
     PASS_REGULAR_EXPRESSION
-      "selected = phi ptr \\[ %p\\.relocated, %call \\]"
+      "selected = phi ptr \\[ %p\\.relocated, %call\\.statepoint\\.cont \\]"
   )
 
   add_test(

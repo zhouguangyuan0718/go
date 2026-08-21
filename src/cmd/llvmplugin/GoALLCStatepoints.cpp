@@ -15,6 +15,7 @@
 #include "llvm/BinaryFormat/GoObj.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/GoCallingConv.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
@@ -25,10 +26,12 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Statepoint.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include <limits>
@@ -142,6 +145,18 @@ enum class LivenessKind {
   DerivedPointers,
 };
 
+// Classify how a frame-derived address participates in IR. Address derivations
+// and bookkeeping remain structurally tied to the frame object. Terminal
+// memory uses can be rebuilt immediately at the access. Every other use treats
+// the address as an ordinary SSA pointer value and needs relocation liveness.
+enum class FrameAddressUseKind {
+  Derivation,
+  TerminalMemory,
+  LifetimeOrDebug,
+  FakeUse,
+  FirstClass,
+};
+
 bool isGoCallingConv(CallingConv::ID CC) {
   return CC == CallingConv::GoABIInternal || CC == CallingConv::GoABI0;
 }
@@ -163,6 +178,11 @@ bool isRelocatablePointerType(Type *Ty) {
     return true;
   auto *VT = dyn_cast<FixedVectorType>(Ty);
   return VT && VT->getElementType()->isPointerTy();
+}
+
+bool isDirectFrameAddressDerivation(const Instruction &I) {
+  return isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
+         isa<AddrSpaceCastInst>(I);
 }
 
 const AllocaInst *rematerializableAllocaBase(const Value *V) {
@@ -232,27 +252,43 @@ Value *rematerializableDerivedBase(Value *V) {
       rematerializableDerivedBase(static_cast<const Value *>(V)));
 }
 
-bool isDirectFrameAddressUse(const Use &U) {
+FrameAddressUseKind classifyFrameAddressUse(const Use &U) {
   auto *I = dyn_cast<Instruction>(U.getUser());
   if (!I)
-    return false;
-  if (isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
-      isa<AddrSpaceCastInst>(I))
-    return true;
+    return FrameAddressUseKind::FirstClass;
+  if (isDirectFrameAddressDerivation(*I))
+    return FrameAddressUseKind::Derivation;
   if (auto *Load = dyn_cast<LoadInst>(I))
-    return &U == &Load->getOperandUse(LoadInst::getPointerOperandIndex());
+    return &U == &Load->getOperandUse(LoadInst::getPointerOperandIndex())
+               ? FrameAddressUseKind::TerminalMemory
+               : FrameAddressUseKind::FirstClass;
   if (auto *Store = dyn_cast<StoreInst>(I))
-    return &U == &Store->getOperandUse(StoreInst::getPointerOperandIndex());
+    return &U == &Store->getOperandUse(StoreInst::getPointerOperandIndex())
+               ? FrameAddressUseKind::TerminalMemory
+               : FrameAddressUseKind::FirstClass;
   if (auto *RMW = dyn_cast<AtomicRMWInst>(I))
-    return &U == &RMW->getOperandUse(AtomicRMWInst::getPointerOperandIndex());
+    return &U == &RMW->getOperandUse(AtomicRMWInst::getPointerOperandIndex())
+               ? FrameAddressUseKind::TerminalMemory
+               : FrameAddressUseKind::FirstClass;
   if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(I))
-    return &U ==
-           &CmpXchg->getOperandUse(AtomicCmpXchgInst::getPointerOperandIndex());
-  if (auto *Intrinsic = dyn_cast<IntrinsicInst>(I))
-    return Intrinsic->isLifetimeStartOrEnd() ||
-           Intrinsic->getIntrinsicID() == Intrinsic::fake_use ||
-           isa<DbgInfoIntrinsic>(Intrinsic);
-  return false;
+    return &U == &CmpXchg->getOperandUse(
+                     AtomicCmpXchgInst::getPointerOperandIndex())
+               ? FrameAddressUseKind::TerminalMemory
+               : FrameAddressUseKind::FirstClass;
+  if (auto *Mem = dyn_cast<MemIntrinsic>(I)) {
+    if (U.get() == Mem->getRawDest())
+      return FrameAddressUseKind::TerminalMemory;
+    if (auto *Transfer = dyn_cast<MemTransferInst>(Mem);
+        Transfer && U.get() == Transfer->getRawSource())
+      return FrameAddressUseKind::TerminalMemory;
+  }
+  if (auto *Intrinsic = dyn_cast<IntrinsicInst>(I)) {
+    if (Intrinsic->isLifetimeStartOrEnd() || isa<DbgInfoIntrinsic>(Intrinsic))
+      return FrameAddressUseKind::LifetimeOrDebug;
+    if (Intrinsic->getIntrinsicID() == Intrinsic::fake_use)
+      return FrameAddressUseKind::FakeUse;
+  }
+  return FrameAddressUseKind::FirstClass;
 }
 
 Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
@@ -272,7 +308,7 @@ Error canonicalizeDirectAllocaAddresses(
     SmallVector<Use *, 8> FirstClassUses;
     SmallVector<IntrinsicInst *, 4> LifetimeStarts;
     for (Use &U : Address->uses())
-      if (!isDirectFrameAddressUse(U))
+      if (classifyFrameAddressUse(U) == FrameAddressUseKind::FirstClass)
         FirstClassUses.push_back(&U);
     if (FirstClassUses.empty())
       continue;
@@ -340,16 +376,18 @@ bool isTrackedValue(const Value *V, LivenessKind Kind) {
     return isRelocatablePointerType(Ty) && !isStaticAllocaAddress(V) &&
            !rematerializableDerivedBase(V);
   case LivenessKind::AllocaAddresses:
-    // Direct memory operations retain their FrameIndex identity through
-    // SelectionDAG and must not enter relocation SSA. Under register pressure,
-    // a relocated address PHI can be spilled into an ordinary non-root slot;
-    // that cached address then points at the old Go stack after growth.
-    // canonicalizeDirectAllocaAddresses rebuilds every first-class use at its
-    // use point, so only those local values need address liveness here.
+    // Direct memory addresses must not enter relocation SSA. Under register
+    // pressure, a relocated address PHI can be spilled into an ordinary
+    // non-root slot; that cached address then points at the old Go stack after
+    // growth. rematerializeDirectFixedFrameMemoryUses rebuilds every terminal
+    // memory address at its use, while canonicalizeDirectAllocaAddresses does
+    // the same for first-class uses. Only those first-class local values need
+    // relocation liveness here.
     return Ty->isPointerTy() && !isa<AllocaInst>(V) &&
            isStaticAllocaAddress(V) &&
            llvm::any_of(V->uses(), [](const Use &U) {
-             return !isDirectFrameAddressUse(U);
+             return classifyFrameAddressUse(U) ==
+                    FrameAddressUseKind::FirstClass;
            });
   case LivenessKind::DerivedPointers:
     return rematerializableDerivedBase(V) != nullptr;
@@ -554,9 +592,8 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
     Value *LeafValue =
         Inserted && isa<UndefValue, PoisonValue>(Inserted)
             ? Inserted
-            : Builder.CreateExtractValue(
-                  &Aggregate, Leaf.Indices,
-                  leafName(Aggregate, Leaf.Indices));
+            : Builder.CreateExtractValue(&Aggregate, Leaf.Indices,
+                                         leafName(Aggregate, Leaf.Indices));
     Values.push_back(LeafValue);
   }
   return Values;
@@ -821,50 +858,46 @@ bool addressNeedsStackObject(Value &Base) {
     Value *Address = Worklist.pop_back_val();
     if (!Seen.insert(Address).second)
       continue;
-    for (User *U : Address->users()) {
-      auto *I = dyn_cast<Instruction>(U);
+    for (Use &U : Address->uses()) {
+      auto *I = dyn_cast<Instruction>(U.getUser());
       if (!I)
         return true;
 
-      if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<FreezeInst>(I))
-        // A merged/frozen address is tracked as an independent scalar root.
-        // It needs StackObject metadata so the runtime can discover and scan
-        // the alloca dynamically when that root points into this frame.
-        return true;
-      if (isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
-          isa<AddrSpaceCastInst>(I)) {
+      switch (classifyFrameAddressUse(U)) {
+      case FrameAddressUseKind::Derivation:
         if (!I->getType()->isPointerTy())
           return true;
         Worklist.push_back(I);
         continue;
-      }
-      if (auto *Load = dyn_cast<LoadInst>(I)) {
-        if (Load->getPointerOperand() != Address || Load->isAtomic() ||
-            Load->isVolatile())
-          return true;
-        continue;
-      }
-      if (auto *Store = dyn_cast<StoreInst>(I)) {
-        if (Store->getPointerOperand() != Address ||
-            Store->getValueOperand() == Address || Store->isAtomic() ||
-            Store->isVolatile())
-          return true;
-        continue;
-      }
-      if (isa<ICmpInst>(I))
-        continue;
-      if (auto *Intrinsic = dyn_cast<IntrinsicInst>(I)) {
-        if (Intrinsic->isLifetimeStartOrEnd() ||
-            Intrinsic->getIntrinsicID() == Intrinsic::fake_use ||
-            isa<DbgInfoIntrinsic>(Intrinsic) || isa<MemIntrinsic>(Intrinsic))
+      case FrameAddressUseKind::TerminalMemory:
+        if (auto *Load = dyn_cast<LoadInst>(I)) {
+          if (Load->isAtomic() || Load->isVolatile())
+            return true;
           continue;
+        }
+        if (auto *Store = dyn_cast<StoreInst>(I)) {
+          if (Store->isAtomic() || Store->isVolatile())
+            return true;
+          continue;
+        }
+        if (isa<MemIntrinsic>(I))
+          continue;
+        // Atomic read-modify-write operations expose the frame object.
+        return true;
+      case FrameAddressUseKind::LifetimeOrDebug:
+      case FrameAddressUseKind::FakeUse:
+        continue;
+      case FrameAddressUseKind::FirstClass:
+        if (isa<ICmpInst>(I))
+          continue;
+        // A merged/frozen address is tracked as an independent scalar root.
+        // It needs StackObject metadata so the runtime can discover and scan
+        // the alloca dynamically when that root points into this frame.
+        // Passing, storing, returning, converting, inline asm, and every other
+        // ordinary SSA use likewise make the address observable.
         return true;
       }
-      // Passing the address to even a captures(none), readonly, or GC-leaf
-      // call makes memory observable during the call. Storing/returning it,
-      // ptrtoint, inline asm, and every unknown use are likewise stack-object
-      // cases.
-      return true;
+      llvm_unreachable("unknown frame address use kind");
     }
   }
   return false;
@@ -899,12 +932,6 @@ Error collectPointerAllocaLifetimeMarkers(
   return Error::success();
 }
 
-bool isPointerAddressDerivation(const Instruction &I) {
-  return isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
-         isa<AddrSpaceCastInst>(I) || isa<PHINode>(I) || isa<SelectInst>(I) ||
-         isa<FreezeInst>(I);
-}
-
 void collectPointerAllocaAddressUses(PointerAllocaRecord &Record) {
   SmallVector<Value *, 16> Worklist{Record.Alloca};
   SmallPtrSet<Value *, 16> SeenAddresses;
@@ -913,13 +940,14 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record) {
     Value *Address = Worklist.pop_back_val();
     if (!SeenAddresses.insert(Address).second)
       continue;
-    for (User *U : Address->users()) {
-      auto *I = dyn_cast<Instruction>(U);
+    for (Use &U : Address->uses()) {
+      auto *I = dyn_cast<Instruction>(U.getUser());
       if (!I) {
         Record.ActivityUnclear = true;
         continue;
       }
-      if (isPointerAddressDerivation(*I)) {
+      FrameAddressUseKind Kind = classifyFrameAddressUse(U);
+      if (Kind == FrameAddressUseKind::Derivation) {
         if (!I->getType()->isPointerTy()) {
           Record.ActivityUnclear = true;
           continue;
@@ -932,10 +960,13 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record) {
           Worklist.push_back(I);
         continue;
       }
-      if (auto *Intrinsic = dyn_cast<IntrinsicInst>(I)) {
-        if (Intrinsic->isLifetimeStartOrEnd() || isa<DbgInfoIntrinsic>(I))
-          continue;
-      }
+      if (Kind == FrameAddressUseKind::LifetimeOrDebug)
+        continue;
+      if (Kind == FrameAddressUseKind::FirstClass &&
+          isa<PHINode, SelectInst, FreezeInst>(I))
+        // A merged/frozen address is an independent scalar root. Its liveness
+        // does not make every possible incoming alloca's contents active.
+        continue;
       if (SeenUses.insert(I).second)
         Record.AddressUses.push_back(I);
     }
@@ -1228,8 +1259,7 @@ Error promoteAllocasToWholeFunctionLifetime(
       // GoObj has no hosted memset fallback. Keep this fixed-size entry
       // initialization inline so lowering cannot split later allocas away
       // from the entry block while expanding an unavailable libcall.
-      Builder.CreateMemSetInline(Alloca, Alloca->getAlign(),
-                                 Builder.getInt8(0),
+      Builder.CreateMemSetInline(Alloca, Alloca->getAlign(), Builder.getInt8(0),
                                  Builder.getInt64(ByteSize));
     Alloca->setMetadata(
         StackColoringNoMergeMD,
@@ -1313,9 +1343,9 @@ Error collectPointerAllocas(
     Alloca->setMetadata(GoDeferResultMD, nullptr);
     bool IsOpenDeferSlot = OpenDefer && OpenDefer->Slots == Alloca;
     // Do not override the ordinary structural StackObject classification for
-    // open-defer state. A matching gc-live base still makes GoObj expand this
-    // layout into LocalsPointerMaps; an unmatched callsite follows the same
-    // StackObject rule as every other address-observable alloca.
+    // open-defer state. Its explicit per-call contents-live bit makes GoObj
+    // expand this layout into LocalsPointerMaps; an inactive callsite follows
+    // the same StackObject rule as every other address-observable alloca.
     bool NeedsStackObject = addressNeedsStackObject(*Alloca);
     PointerAllocas.push_back({Alloca, NeedsStackObject, *DeferResult,
                               IsOpenDeferSlot, ByteSize,
@@ -1408,15 +1438,27 @@ Error validateSafepoint(const SafepointRecord &Record) {
       return createStringError(
           std::errc::not_supported,
           "GoALLC statepoints require typed, aligned byval only on Go calls");
+    if (Call.paramHasAttr(I, Attribute::GoRet) &&
+        (!isGoCallingConv(Call.getCallingConv()) ||
+         !Call.getArgOperand(I)->getType()->isPointerTy() ||
+         !Call.getParamGoRetType(I) ||
+         !Call.getParamAttr(I, "goretindex").isValid() ||
+         !Call.getParamAlign(I)))
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC statepoints require indexed, typed, aligned goret only on "
+          "Go calls");
     for (Attribute Attr : Call.getAttributes().getParamAttrs(I)) {
       // These non-ABI attributes remain valid after LLVM's generic
       // RewriteStatepointsForGC pass and are natively accepted by both the
       // statepoint verifier and SelectionDAG call lowering. O2 commonly
       // infers them on otherwise ordinary runtime calls. Keep ABI-affecting
-      // attributes fail closed except for nest and typed byval, whose Go ABI
-      // lowering is covered separately.
+      // attributes fail closed except for nest and the typed Go ABI memory
+      // carriers, whose lowering is covered separately.
       if (!Attr.hasAttribute(Attribute::Nest) &&
           !Attr.hasAttribute(Attribute::ByVal) &&
+          !Attr.hasAttribute(Attribute::GoRet) &&
+          !Attr.hasAttribute("goretindex") &&
           !Attr.hasAttribute(Attribute::Captures) &&
           !Attr.hasAttribute(Attribute::ReadNone) &&
           !Attr.hasAttribute(Attribute::ReadOnly) &&
@@ -1441,6 +1483,7 @@ Error validateSafepoint(const SafepointRecord &Record) {
 void appendAllocaPtrMapDeoptOperands(
     IRBuilder<> &Builder, ArrayRef<const PointerAllocaRecord *> Allocas,
     ArrayRef<const PointerByValRecord *> ByVals,
+    const SmallPtrSetImpl<Value *> &LiveContents,
     SmallVectorImpl<Value *> &Deopt) {
   if (Allocas.empty() && ByVals.empty())
     return;
@@ -1449,9 +1492,9 @@ void appendAllocaPtrMapDeoptOperands(
   // record-count, and END.
   uint64_t ProtocolLength = 4;
   for (const PointerAllocaRecord *Alloca : Allocas)
-    ProtocolLength += 10 + Alloca->BitmapWords.size();
+    ProtocolLength += 11 + Alloca->BitmapWords.size();
   for (const PointerByValRecord *ByVal : ByVals)
-    ProtocolLength += 10 + ByVal->BitmapWords.size();
+    ProtocolLength += 11 + ByVal->BitmapWords.size();
 
   auto AppendConstant = [&](uint64_t Value) {
     Deopt.push_back(ConstantInt::get(Builder.getInt64Ty(), Value));
@@ -1462,7 +1505,7 @@ void appendAllocaPtrMapDeoptOperands(
   auto AppendRecord = [&](Value *Base, uint64_t ByteSize, uint64_t Alignment,
                           uint64_t BitCount, ArrayRef<uint64_t> BitmapWords) {
     AppendConstant(GoObj::AllocaPtrMapRecordTag);
-    AppendConstant(10 + BitmapWords.size());
+    AppendConstant(11 + BitmapWords.size());
     Deopt.push_back(Base);
     AppendConstant(0); // First contract version describes the whole object.
     AppendConstant(ByteSize);
@@ -1470,6 +1513,11 @@ void appendAllocaPtrMapDeoptOperands(
     AppendConstant(
         Builder.GetInsertBlock()->getModule()->getDataLayout().getPointerSize(
             0));
+    // gc-live also carries direct frame bases needed only to rematerialize an
+    // address after stack growth. Keep object-content liveness independent so
+    // GoObj never mistakes that relocate-only operand for a LocalsPointerMaps
+    // root.
+    AppendConstant(LiveContents.contains(Base));
     AppendConstant(BitCount);
     AppendConstant(GoObj::AllocaPtrMapBitmapWordBits);
     AppendConstant(BitmapWords.size());
@@ -1508,6 +1556,7 @@ void appendOpenDeferDeoptOperands(IRBuilder<> &Builder,
 Error rewriteCall(SafepointRecord &Record,
                   ArrayRef<const PointerAllocaRecord *> PointerAllocas,
                   ArrayRef<const PointerByValRecord *> PointerByVals,
+                  const SmallPtrSetImpl<Value *> &LiveContents,
                   const std::optional<OpenDeferInfo> &OpenDefer) {
   CallInst *Call = Record.Call;
 
@@ -1525,7 +1574,7 @@ Error rewriteCall(SafepointRecord &Record,
   // deliberately remains the final self-describing suffix for compatibility.
   appendOpenDeferDeoptOperands(Builder, OpenDefer, Deopt);
   appendAllocaPtrMapDeoptOperands(Builder, PointerAllocas, PointerByVals,
-                                  Deopt);
+                                  LiveContents, Deopt);
   Record.Statepoint = Builder.CreateGCStatepointCall(
       Record.ID, 0, Callee, CallArgs,
       Deopt.empty() ? std::nullopt
@@ -1578,6 +1627,22 @@ void eraseOriginalCalls(ArrayRef<SafepointRecord> Records) {
   }
 }
 
+void splitStatepointContinuations(ArrayRef<SafepointRecord> Records) {
+  // Do this only after every call has been rewritten and erased, so CFG
+  // mutation cannot affect the liveness sets consumed by rewriteCall. Keep
+  // each statepoint and all values derived from its token in distinct basic
+  // blocks: SelectionDAG performs local CSE while lowering one block, and the
+  // explicit edge puts gc.result and gc.relocate in a fresh local CSE scope.
+  for (const SafepointRecord &Record : Records) {
+    Instruction *Continuation = Record.Statepoint->getNextNode();
+    assert(Continuation && "statepoint must have a continuation instruction");
+    BasicBlock *StatepointBlock = Record.Statepoint->getParent();
+    StatepointBlock->splitBasicBlock(Continuation->getIterator(),
+                                     StatepointBlock->getName() +
+                                         ".statepoint.cont");
+  }
+}
+
 Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
                             Instruction *InsertBefore) {
   SmallVector<Instruction *, 4> Chain;
@@ -1605,11 +1670,73 @@ Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
   return NewOperand;
 }
 
+void rematerializeDirectFixedFrameMemoryUses(
+    Function &F, DominatorTree &DT, ArrayRef<SafepointRecord> Records) {
+  // CodeGenPrepare can share one large-offset GEP between several later memory
+  // accesses. After statepoint continuations have been split, rebuild the
+  // complete address chain at every terminal access so SelectionDAG cannot
+  // carry a pre-growth physical stack address into the continuation block. Use
+  // the latest dominating relocate when the fixed frame base is GC-live; a
+  // non-pointer frame object has no relocate and is rebuilt from its original
+  // FrameIndex base. Typed byval/goret homes follow the same rule.
+  SmallVector<std::pair<Value *, Value *>, 32> Addresses;
+  for (Instruction &I : instructions(F))
+    if (isStaticAllocaAddress(&I))
+      Addresses.push_back({&I, rematerializableAllocaBase(&I)});
+  for (Argument &Arg : F.args())
+    if (Arg.hasByValAttr() || Arg.hasGoRetAttr())
+      Addresses.push_back({&Arg, &Arg});
+
+  SmallVector<WeakTrackingVH, 32> DeadAddresses;
+
+  for (const auto &AddressAndBase : Addresses) {
+    Value *Address = AddressAndBase.first;
+    Value *Base = AddressAndBase.second;
+    SmallVector<Use *, 8> MemoryUses;
+    for (Use &U : Address->uses())
+      if (classifyFrameAddressUse(U) == FrameAddressUseKind::TerminalMemory)
+        MemoryUses.push_back(&U);
+
+    for (Use *U : MemoryUses) {
+      auto *UsePoint = cast<Instruction>(U->getUser());
+      Value *CurrentBase = Base;
+      for (const SafepointRecord &Record : Records) {
+        auto Relocate = llvm::find_if(Record.Relocates, [&](CallInst *Call) {
+          return cast<GCRelocateInst>(Call)->getDerivedPtr() == Base;
+        });
+        if (Relocate == Record.Relocates.end() ||
+            !DT.dominates(*Relocate, UsePoint))
+          continue;
+        if (CurrentBase == Base || DT.dominates(CurrentBase, *Relocate))
+          CurrentBase = *Relocate;
+      }
+
+      if (Address == Base && CurrentBase == Base)
+        continue;
+
+      Value *UseAddress =
+          Address == Base
+              ? CurrentBase
+              : rematerializeAddress(Address, Base, CurrentBase, UsePoint);
+      U->set(UseAddress);
+    }
+    if (!MemoryUses.empty())
+      if (auto *I = dyn_cast<Instruction>(Address); I && !isa<AllocaInst>(I))
+        DeadAddresses.push_back(I);
+  }
+
+  // Delete from leaves toward their bases. Weak handles make recursive deletion
+  // safe even when removing one terminal chain also removes a shared ancestor.
+  for (WeakTrackingVH &Handle : llvm::reverse(DeadAddresses))
+    if (auto *I = dyn_cast_or_null<Instruction>(Handle))
+      RecursivelyDeleteTriviallyDeadInstructions(I);
+}
+
 void repairRelocationSSA(Function &F, DominatorTree &DT,
                          ArrayRef<SafepointRecord> Records) {
   // Each ordinary relocated pointer and each rematerialized fixed-object
   // derived address is a new reaching definition of its original SSA value.
-  // Static allocas and typed byval arguments are themselves fixed frame
+  // Static allocas and typed byval/goret arguments are themselves fixed frame
   // addresses: SelectionDAG rematerializes either from its frame index at each
   // use, so replacing the original IR value with a gc.relocate chain would
   // turn later statepoints into ordinary pointer spills.
@@ -1619,7 +1746,8 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
       auto *Relocate = cast<GCRelocateInst>(RelocateCall);
       Value *Original = Relocate->getDerivedPtr();
       auto *Arg = dyn_cast<Argument>(Original);
-      if (!isa<AllocaInst>(Original) && !(Arg && Arg->hasByValAttr()))
+      if (!isa<AllocaInst>(Original) &&
+          !(Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr())))
         Definitions[Original].push_back(RelocateCall);
     }
 
@@ -1833,20 +1961,22 @@ Error rewriteFunction(Function &F) {
     return Err;
   for (SafepointRecord &Record : llvm::reverse(Records)) {
     SmallVector<const PointerAllocaRecord *, 8> AllocaRecords;
+    SmallPtrSet<Value *, 8> LiveContents;
     for (const PointerAllocaRecord &Alloca : PointerAllocas) {
       // A recovered panic resumes outside LLVM's explicit CFG. The frontend
       // marks named result homes whose contents must therefore remain visible
       // to Go's stack scanner at every possible suspension call.
-      bool IsActive = Alloca.DeferResult || Alloca.OpenDeferSlot ||
-                      Record.Live.contains(Alloca.Alloca) ||
-                      isPointerAllocaActiveAt(Alloca, *Record.Call);
-      if (IsActive)
+      bool ContentsLive = Alloca.DeferResult || Alloca.OpenDeferSlot ||
+                          isPointerAllocaActiveAt(Alloca, *Record.Call);
+      if (ContentsLive) {
         Record.Live.insert(Alloca.Alloca);
+        LiveContents.insert(Alloca.Alloca);
+      }
       // Address-observable layouts are function-wide metadata, so carry them
-      // at every ordinary statepoint. A matching direct gc-live base means the
-      // contents are live at this call; an unmatched occurrence lets GoObj
-      // infer the function-level StackObject set.
-      if (IsActive || Alloca.NeedsStackObject)
+      // at every ordinary statepoint. The independent contents-live bit says
+      // whether the object contributes roots at this call; an inactive record
+      // lets GoObj infer the function-level StackObject set.
+      if (ContentsLive || Alloca.NeedsStackObject)
         AllocaRecords.push_back(&Alloca);
     }
     SmallVector<const PointerByValRecord *, 4> ByValRecords;
@@ -1855,15 +1985,27 @@ Error rewriteFunction(Function &F) {
       // object. Standard SSA liveness decides when its contents contribute to
       // this call's ArgsPointerMaps. If its address is observable, carry the
       // layout at every call so GoObj can also infer the function-level
-      // StackObject from an unmatched gc-live base.
+      // StackObject from an inactive contents record.
       bool IsActive = Record.Live.contains(ByVal.Base);
+      if (IsActive) {
+        LiveContents.insert(ByVal.Base);
+      }
       if (IsActive || ByVal.NeedsStackObject)
         ByValRecords.push_back(&ByVal);
     }
-    if (Error Err = rewriteCall(Record, AllocaRecords, ByValRecords, OpenDefer))
+    if (Error Err = rewriteCall(Record, AllocaRecords, ByValRecords,
+                                LiveContents, OpenDefer))
       return Err;
   }
   eraseOriginalCalls(Records);
+  splitStatepointContinuations(Records);
+  // splitStatepointContinuations changes the CFG after liveness and
+  // object-activity analysis.
+  // The direct-memory and general relocation repairs use this tree, and the
+  // latter promotes temporary merge slots, so rebuild it for the new
+  // continuation blocks.
+  DT.recalculate(F);
+  rematerializeDirectFixedFrameMemoryUses(F, DT, Records);
   repairRelocationSSA(F, DT, Records);
   return Error::success();
 }
@@ -1950,16 +2092,26 @@ Error lowerPointerAddressObservations(Module &M) {
 
 } // namespace
 
-Error goallc::rewriteStatepoints(Module &M, TargetMachine &) {
+Error goallc::prepareStatepointModule(Module &M) {
   if (Error Err = lowerPointerAddressObservations(M))
     return Err;
   if (Error Err = materializeFunctionMarkerRelocs(M))
     return Err;
+  return Error::success();
+}
+
+Error goallc::rewriteStatepoints(Function &F, TargetMachine &) {
+  if (F.isDeclaration() || !isGoCallingConv(F.getCallingConv()) || !F.hasGC() ||
+      F.getGC() != GoALLCGCName)
+    return Error::success();
+  return rewriteFunction(F);
+}
+
+Error goallc::rewriteStatepoints(Module &M, TargetMachine &TM) {
+  if (Error Err = prepareStatepointModule(M))
+    return Err;
   for (Function &F : M) {
-    if (F.isDeclaration() || !isGoCallingConv(F.getCallingConv()) ||
-        !F.hasGC() || F.getGC() != GoALLCGCName)
-      continue;
-    if (Error Err = rewriteFunction(F))
+    if (Error Err = rewriteStatepoints(F, TM))
       return Err;
   }
   if (verifyModule(M, &errs()))
