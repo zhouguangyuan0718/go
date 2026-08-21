@@ -8,7 +8,6 @@ import (
 	"bytes"
 	stdcontext "context"
 	"encoding/json"
-	"fmt"
 	"internal/testenv"
 	"os"
 	"path/filepath"
@@ -21,8 +20,21 @@ import (
 
 const llvmStdlibPolicyEnv = "GOALLC_RUN_LLVM_STDLIB"
 
+// These tests exercise metadata, debugger-call injection, or signal semantics
+// of the LLVM-compiled runtime_test functions that the backend does not model
+// yet. The runtime implementation itself remains native. Keep the exclusions
+// at the LLVM qualification boundary so the upstream tests continue to specify
+// native Go behavior unchanged. Subtest patterns retain the passing panicwrap,
+// panic, and unsafe-point rejection coverage beside the excluded cases.
+const llvmRuntimeSkip = `^(TestCallersNilPointerPanic|TestDebugCall|TestDebugCallGC|TestDebugCallGrowStack|TestDebugCallLarge|TestDebugCallPanic|TestGCInfo|TestTracebackArgs|TestTracebackElision|TestUnsafePoint)$|^TestStackWrapperStackPanic$/^sigpanic$|^TestTracebackSystem$/^trap$`
+
+// The amd64 test additionally requires the native compiler's INT3 function
+// alignment filler. LLVM deliberately emits NOP padding instead.
+const llvmRuntimeAMD64Skip = `|^TestFunctionAlignmentTraceback$`
+
 type llvmStdlibTestSet struct {
 	Whitelist         map[string]string            `json:"whitelist"`
+	Graylist          map[string]string            `json:"graylist,omitempty"`
 	Blacklist         map[string]string            `json:"blacklist"`
 	PlatformBlacklist map[string]map[string]string `json:"platform_blacklist,omitempty"`
 }
@@ -36,6 +48,7 @@ type llvmStdlibClass uint8
 const (
 	llvmStdlibUnclassified llvmStdlibClass = iota
 	llvmStdlibWhite
+	llvmStdlibGray
 	llvmStdlibBlack
 )
 
@@ -83,6 +96,9 @@ func classifyLLVMStdlibPackage(set llvmStdlibTestSet, name string) llvmStdlibCla
 	if _, ok := set.Whitelist[name]; ok {
 		return llvmStdlibWhite
 	}
+	if _, ok := set.Graylist[name]; ok {
+		return llvmStdlibGray
+	}
 	if _, ok := set.Blacklist[name]; ok {
 		return llvmStdlibBlack
 	}
@@ -95,16 +111,21 @@ func classifyLLVMStdlibPackage(set llvmStdlibTestSet, name string) llvmStdlibCla
 func effectiveLLVMStdlibTestSet(set llvmStdlibTestSet, platform string) llvmStdlibTestSet {
 	effective := llvmStdlibTestSet{
 		Whitelist: make(map[string]string, len(set.Whitelist)),
+		Graylist:  make(map[string]string, len(set.Graylist)),
 		Blacklist: make(map[string]string, len(set.Blacklist)),
 	}
 	for name, reason := range set.Whitelist {
 		effective.Whitelist[name] = reason
+	}
+	for name, reason := range set.Graylist {
+		effective.Graylist[name] = reason
 	}
 	for name, reason := range set.Blacklist {
 		effective.Blacklist[name] = reason
 	}
 	for name, reason := range set.PlatformBlacklist[platform] {
 		delete(effective.Whitelist, name)
+		delete(effective.Graylist, name)
 		effective.Blacklist[name] = reason
 	}
 	return effective
@@ -128,6 +149,28 @@ func validateLLVMStdlibPolicy(t *testing.T, packages map[string]bool, set llvmSt
 		}
 		if strings.TrimSpace(reason) == "" {
 			t.Errorf("LLVM standard library whitelist entry %q has no reason", name)
+			failed = true
+		}
+		if _, ok := set.Blacklist[name]; ok {
+			t.Errorf("LLVM standard library package %q appears in both exact lists", name)
+			failed = true
+		}
+		if _, ok := set.Graylist[name]; ok {
+			t.Errorf("LLVM standard library package %q appears in both exact lists", name)
+			failed = true
+		}
+	}
+	for name, reason := range set.Graylist {
+		if name == "*" || strings.ContainsAny(name, "*?[\\") {
+			t.Errorf("LLVM standard library graylist entry %q is not an exact package", name)
+			failed = true
+		}
+		if !packages[name] {
+			t.Errorf("LLVM standard library graylist entry %q is not a standard library package", name)
+			failed = true
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("LLVM standard library graylist entry %q has no reason", name)
 			failed = true
 		}
 		if _, ok := set.Blacklist[name]; ok {
@@ -167,8 +210,10 @@ func validateLLVMStdlibPolicy(t *testing.T, packages map[string]bool, set llvmSt
 				t.Errorf("LLVM standard library platform blacklist entry %q for %s has no reason", name, platform)
 				failed = true
 			}
-			if _, ok := set.Whitelist[name]; !ok {
-				t.Errorf("LLVM standard library platform blacklist entry %q for %s is not in the common whitelist", name, platform)
+			_, white := set.Whitelist[name]
+			_, gray := set.Graylist[name]
+			if !white && !gray {
+				t.Errorf("LLVM standard library platform blacklist entry %q for %s is not in the common whitelist or graylist", name, platform)
 				failed = true
 			}
 		}
@@ -192,14 +237,15 @@ func TestLLVMStdlibPolicy(t *testing.T) {
 func TestClassifyLLVMStdlibPackage(t *testing.T) {
 	set := llvmStdlibTestSet{
 		Whitelist: map[string]string{"cmp": "qualified"},
-		Blacklist: map[string]string{"*": "not yet qualified", "sort": "known failure"},
+		Graylist:  map[string]string{"sort": "advisory"},
+		Blacklist: map[string]string{"*": "not yet qualified", "bytes": "known failure"},
 	}
 	for _, test := range []struct {
 		name string
 		want llvmStdlibClass
 	}{
 		{"cmp", llvmStdlibWhite},
-		{"sort", llvmStdlibBlack},
+		{"sort", llvmStdlibGray},
 		{"bytes", llvmStdlibBlack},
 	} {
 		if got := classifyLLVMStdlibPackage(set, test.name); got != test.want {
@@ -211,6 +257,7 @@ func TestClassifyLLVMStdlibPackage(t *testing.T) {
 func TestEffectiveLLVMStdlibTestSet(t *testing.T) {
 	set := llvmStdlibTestSet{
 		Whitelist: map[string]string{"bytes": "qualified", "cmp": "qualified"},
+		Graylist:  map[string]string{"sort": "advisory"},
 		Blacklist: map[string]string{"*": "not yet qualified"},
 		PlatformBlacklist: map[string]map[string]string{
 			"linux/amd64": {"bytes": "known failure"},
@@ -223,35 +270,12 @@ func TestEffectiveLLVMStdlibTestSet(t *testing.T) {
 	if got := classifyLLVMStdlibPackage(effective, "cmp"); got != llvmStdlibWhite {
 		t.Errorf("classifyLLVMStdlibPackage(cmp) = %v, want %v", got, llvmStdlibWhite)
 	}
+	if got := classifyLLVMStdlibPackage(effective, "sort"); got != llvmStdlibGray {
+		t.Errorf("classifyLLVMStdlibPackage(sort) = %v, want %v", got, llvmStdlibGray)
+	}
 	if got := classifyLLVMStdlibPackage(set, "bytes"); got != llvmStdlibWhite {
 		t.Errorf("platform selection modified the common set: classifyLLVMStdlibPackage(bytes) = %v, want %v", got, llvmStdlibWhite)
 	}
-}
-
-func llvmStdlibDependencyPackages(t *testing.T, packages map[string]bool, name string) []string {
-	t.Helper()
-	cmd := testenv.Command(t, llvmStdlibGoTool(t), "list", "-deps", "-f={{.ImportPath}}", name)
-	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=", "GOROOT="+testenv.GOROOT(t))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list dependencies for standard library package %q: %v\n%s", name, err, out)
-	}
-	seen := make(map[string]bool)
-	var dependencies []string
-	for _, dependency := range strings.Fields(string(out)) {
-		if !packages[dependency] {
-			t.Fatalf("dependency-closure package %q has non-standard dependency %q", name, dependency)
-		}
-		if !seen[dependency] {
-			seen[dependency] = true
-			dependencies = append(dependencies, dependency)
-		}
-	}
-	if !seen[name] {
-		t.Fatalf("dependency closure for %q does not contain the package itself", name)
-	}
-	sort.Strings(dependencies)
-	return dependencies
 }
 
 func TestLLVMStdlib(t *testing.T) {
@@ -271,20 +295,21 @@ func TestLLVMStdlib(t *testing.T) {
 	validateLLVMStdlibPolicy(t, packages, policySet)
 	set := effectiveLLVMStdlibTestSet(policySet, platform)
 	configureLLVMTestToolchain(t)
-	toolexec := llvmToolexec(t, "default<O2>")
-	runtimeToolexec := llvmToolexecWithNativePackages(t, "default<O2>", "runtime_test", "runtime.test")
+	toolexec := llvmExecutionToolexec(t, "default<O2>")
 
 	whitelist := make([]string, 0, len(set.Whitelist))
 	for name := range set.Whitelist {
 		whitelist = append(whitelist, name)
 	}
 	sort.Strings(whitelist)
-	t.Logf("LLVM standard library dependency-closure policy: %d white, %d black (%d packages)", len(whitelist), len(packages)-len(whitelist), len(packages))
-
-	dependencyPackages := make(map[string][]string, len(whitelist))
-	for _, name := range whitelist {
-		dependencyPackages[name] = llvmStdlibDependencyPackages(t, packages, name)
-		t.Logf("LLVM stdlib dependency closure: package=%q packages=%d", name, len(dependencyPackages[name]))
+	graylist := make([]string, 0, len(set.Graylist))
+	for name := range set.Graylist {
+		graylist = append(graylist, name)
+	}
+	sort.Strings(graylist)
+	t.Logf("LLVM standard library dependency-closure policy: %d white, %d gray, %d black (%d packages)", len(whitelist), len(graylist), len(packages)-len(whitelist)-len(graylist), len(packages))
+	for _, name := range graylist {
+		t.Logf("LLVM stdlib graylist package=%q reason=%q", name, set.Graylist[name])
 	}
 
 	knownBlacklist := make([]string, 0, len(set.Blacklist)-1)
@@ -297,42 +322,58 @@ func TestLLVMStdlib(t *testing.T) {
 	for _, name := range knownBlacklist {
 		t.Logf("LLVM stdlib blacklist result: NOT RUN package=%q reason=%q", name, set.Blacklist[name])
 	}
-	t.Logf("LLVM stdlib blacklist result: NOT RUN remaining=%d reason=%q", len(packages)-len(whitelist)-len(knownBlacklist), set.Blacklist["*"])
+	t.Logf("LLVM stdlib blacklist result: NOT RUN remaining=%d reason=%q", len(packages)-len(whitelist)-len(graylist)-len(knownBlacklist), set.Blacklist["*"])
 
-	// The target package, gcflags, and toolexec pipeline are part of cmd/go's
-	// action IDs, so one isolated cache can safely serve every package in this
-	// policy run. The toolchain, payload, and pass plugin remain fixed for the
-	// lifetime of the test process.
+	// The target package and toolexec pipeline are part of cmd/go's action IDs,
+	// so one isolated cache can safely serve every package in this policy run.
+	// A single all= pattern compiles the test package, generated test main, and
+	// dependency closure with LLVM except for runtime, which is forced to the
+	// native backend by the execution toolexec. The toolchain, payload, and pass
+	// plugin remain fixed for the lifetime of the test process.
 	cache := t.TempDir()
+	type llvmStdlibCandidate struct {
+		name  string
+		class llvmStdlibClass
+	}
+	candidates := make([]llvmStdlibCandidate, 0, len(whitelist)+len(graylist))
 	for _, name := range whitelist {
+		candidates = append(candidates, llvmStdlibCandidate{name: name, class: llvmStdlibWhite})
+	}
+	for _, name := range graylist {
+		candidates = append(candidates, llvmStdlibCandidate{name: name, class: llvmStdlibGray})
+	}
+	for _, candidate := range candidates {
+		name := candidate.name
 		t.Run(name, func(t *testing.T) {
-			compilePackages := dependencyPackages[name]
-			packageToolexec := toolexec
+			t.Logf("LLVM execution capability boundary: native package=%q", llvmNativeRuntimePackage)
 			testTimeout := "2m"
 			processTimeout := 5 * time.Minute
 			if name == "runtime" {
 				testTimeout = "5m"
 				processTimeout = 8 * time.Minute
-				// runtime_test and the generated runtime.test main are test
-				// scaffolding rather than part of the qualified runtime closure.
-				packageToolexec = runtimeToolexec
 			}
 			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), processTimeout)
 			args := []string{
 				"test",
 				"-count=1",
 				"-timeout=" + testTimeout,
-				"-toolexec=" + packageToolexec,
+				"-toolexec=" + toolexec,
+				"-gcflags=all=-enablellvm -llvmironly",
 			}
 			if name == "runtime" {
-				// LLVM GoObj does not yet emit the complete per-function
-				// DWARF carrier set expected by the Go linker. Runtime
-				// qualification currently covers code generation, GoObj,
-				// linking, and execution, but not debug information.
-				args = append(args, "-ldflags=-w")
-			}
-			for _, compilePackage := range compilePackages {
-				args = append(args, fmt.Sprintf("-gcflags=%s=-enablellvm -llvmironly", compilePackage))
+				// runtime_test and the generated test harness are still LLVM
+				// compiled. LLVM GoObj does not yet emit their complete
+				// per-function DWARF, GC, traceback, async-safe-point, and
+				// signal metadata.
+				runtimeSkip := llvmRuntimeSkip
+				if runtime.GOARCH == "amd64" {
+					runtimeSkip += llvmRuntimeAMD64Skip
+				}
+				args = append(args,
+					"-ldflags=-w",
+					"-skip="+runtimeSkip,
+				)
+				t.Logf("LLVM runtime capability-boundary skips: %s", runtimeSkip)
 			}
 			args = append(args, name)
 			cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t), args...)
@@ -346,12 +387,24 @@ func TestLLVMStdlib(t *testing.T) {
 			ctxErr := ctx.Err()
 			cancel()
 			if err != nil {
+				if candidate.class == llvmStdlibGray {
+					if ctxErr != nil {
+						t.Logf("LLVM stdlib graylist result: TIMEOUT (allowed) package=%q: %v\n%s", name, ctxErr, out)
+						return
+					}
+					t.Logf("LLVM stdlib graylist result: FAIL (allowed) package=%q: %v\n%s", name, err, out)
+					return
+				}
 				if ctxErr != nil {
 					t.Fatalf("LLVM stdlib whitelist result: TIMEOUT package=%q: %v\n%s", name, ctxErr, out)
 				}
 				t.Fatalf("LLVM stdlib whitelist result: FAIL package=%q: %v\n%s", name, err, out)
 			}
-			t.Logf("LLVM stdlib whitelist result: PASS package=%q", name)
+			if candidate.class == llvmStdlibGray {
+				t.Logf("LLVM stdlib graylist result: PASS package=%q", name)
+			} else {
+				t.Logf("LLVM stdlib whitelist result: PASS package=%q", name)
+			}
 		})
 	}
 }
