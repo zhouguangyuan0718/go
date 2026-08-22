@@ -260,4 +260,18 @@ func (lfc *LLVMFuncContext) setDebugLocation(xpos src.XPos) {
 	location := GlobalCtxt.CreateDebugLocation(
 		pos.RelLine(), pos.RelCol(), locationScope, inlinedAt)
 	lfc.b.SetCurrentDebugLocationMetadata(location)
+
+	// LLVM may combine instructions from distinct frontend inline frames and
+	// retain only one DILocation. Keep one representative location per frontend
+	// inline node so the final machine pass can restore a node only when its
+	// complete edge has otherwise disappeared. This metadata does not constrain
+	// optimization or choose a machine-code insertion point.
+	if len(chain) != 0 && !lfc.RequiredInlinePos[pos.Base().InliningIndex()] {
+		lfc.RequiredInlinePos[pos.Base().InliningIndex()] = true
+		CurrentModule.AddNamedMetadataOperand(goObjDebugInlineRequiredMD,
+			GlobalCtxt.MDNode([]llvm.Metadata{
+				lfc.LF.ConstantAsMetadata(),
+				location,
+			}))
+	}
 }

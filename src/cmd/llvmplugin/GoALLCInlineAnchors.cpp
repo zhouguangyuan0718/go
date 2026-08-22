@@ -3,14 +3,17 @@
 // license that can be found in the LICENSE file.
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -30,6 +33,48 @@ bool isSameInlineFrame(const DILocation *Loc, const DILocation *CallSite) {
   const DISubprogram *LocSP = Loc->getScope()->getSubprogram();
   const DISubprogram *CallSiteSP = CallSite->getScope()->getSubprogram();
   return LocSP == CallSiteSP && Loc->getInlinedAt() == CallSite->getInlinedAt();
+}
+
+bool isSameSourcePosition(const DILocation *Loc, const DILocation *CallSite) {
+  if (!Loc || !CallSite)
+    return false;
+  // Native Go normalizes inline marks and instructions to column one before
+  // matching them. Keep the same file-and-line identity without scanning the
+  // machine function for another source position.
+  return Loc->getFile() == CallSite->getFile() &&
+         Loc->getLine() == CallSite->getLine();
+}
+
+struct InlineInsertionPoint {
+  MachineBasicBlock *Block = nullptr;
+  MachineBasicBlock::iterator At;
+};
+
+InlineInsertionPoint fallbackInlineInsertionPoint(MachineFunction &MF) {
+  // A frontend edge whose complete inline frame disappeared has no final
+  // child instruction to anchor. Keep that compatibility range beside a
+  // normal return, before frame teardown, rather than at function entry.
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB) {
+      if (!MI.isReturn())
+        continue;
+      auto At = MI.getIterator();
+      while (At != MBB.begin()) {
+        auto Prev = std::prev(At);
+        if (!Prev->isMetaInstruction() &&
+            !Prev->getFlag(MachineInstr::FrameDestroy))
+          break;
+        At = Prev;
+      }
+      return {&MBB, At};
+    }
+  }
+
+  for (MachineBasicBlock &MBB : llvm::reverse(MF))
+    for (MachineInstr &MI : llvm::reverse(MBB))
+      if (!MI.isMetaInstruction())
+        return {&MBB, MI.getIterator()};
+  return {};
 }
 
 struct CanonicalInlineSite {
@@ -84,6 +129,57 @@ class GoALLCInlineAnchorPass final : public MachineFunctionPass {
                            Loc->getAtomRank());
   }
 
+  SmallVector<const DILocation *, 16>
+  requiredInlineLocations(const MachineFunction &MF) const {
+    SmallVector<const DILocation *, 16> Required;
+    const Module *M = MF.getFunction().getParent();
+    const NamedMDNode *Locations =
+        M ? M->getNamedMetadata("goobj.debug.inline.required") : nullptr;
+    if (!Locations)
+      return Required;
+
+    for (const MDNode *Entry : Locations->operands()) {
+      if (Entry->getNumOperands() != 2)
+        report_fatal_error("expected !goobj.debug.inline.required entries to "
+                           "have two operands");
+      const auto *CAM =
+          dyn_cast_or_null<ConstantAsMetadata>(Entry->getOperand(0));
+      const auto *GV = CAM ? dyn_cast<GlobalValue>(CAM->getValue()) : nullptr;
+      const auto *Loc = dyn_cast_or_null<DILocation>(Entry->getOperand(1));
+      if (!GV || !Loc || !Loc->getInlinedAt())
+        report_fatal_error("invalid !goobj.debug.inline.required entry");
+      if (GV == &MF.getFunction())
+        Required.push_back(Loc);
+    }
+
+    llvm::stable_sort(
+        Required, [](const DILocation *LHS, const DILocation *RHS) {
+          auto Depth = [](const DILocation *Loc) {
+            unsigned Result = 0;
+            for (; Loc && Loc->getInlinedAt(); Loc = Loc->getInlinedAt())
+              ++Result;
+            return Result;
+          };
+          return Depth(LHS) > Depth(RHS);
+        });
+    return Required;
+  }
+
+  InlineInsertionPoint
+  insertionPointForMissingEdge(MachineFunction &MF,
+                               const DILocation *CallSite) const {
+    // For a nested edge, stay inside the surviving immediate parent frame.
+    // Root edges have no structural parent range to identify, so use the
+    // return-side compatibility point instead of guessing from source lines.
+    if (CallSite->getInlinedAt())
+      for (MachineBasicBlock &MBB : MF)
+        for (MachineInstr &MI : MBB)
+          if (!MI.isMetaInstruction() && MI.getDebugLoc() &&
+              isSameInlineFrame(MI.getDebugLoc().get(), CallSite))
+            return {&MBB, MI.getIterator()};
+    return fallbackInlineInsertionPoint(MF);
+  }
+
 public:
   static char ID;
 
@@ -101,7 +197,35 @@ public:
     const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
     CanonicalSites.clear();
 
+    DenseSet<const DILocation *> SurvivingCallsites;
+    for (MachineBasicBlock &MBB : MF)
+      for (MachineInstr &MI : MBB)
+        if (!MI.isMetaInstruction())
+          for (const DILocation *Loc = MI.getDebugLoc().get();
+               Loc && Loc->getInlinedAt(); Loc = Loc->getInlinedAt())
+            SurvivingCallsites.insert(Loc->getInlinedAt());
+
     bool Changed = false;
+    // LLVM can merge code from different frontend inline frames and keep just
+    // one of their locations. Recreate only a frontend edge that vanished
+    // completely; surviving edges continue to use their real instructions.
+    for (const DILocation *Loc : requiredInlineLocations(MF)) {
+      const DILocation *Innermost = Loc->getInlinedAt();
+      if (SurvivingCallsites.contains(Innermost))
+        continue;
+
+      InlineInsertionPoint Insert = insertionPointForMissingEdge(MF, Innermost);
+      if (!Insert.Block)
+        report_fatal_error(
+            "GoALLC required inline location has no insertion point");
+      TII.insertNoop(*Insert.Block, Insert.At);
+      std::prev(Insert.At)->setDebugLoc(DebugLoc(Loc));
+      for (const DILocation *Site = Loc; Site && Site->getInlinedAt();
+           Site = Site->getInlinedAt())
+        SurvivingCallsites.insert(Site->getInlinedAt());
+      Changed = true;
+    }
+
     // Normalize complete inline chains before inspecting them. This keeps the
     // anchor pass and the later GoObj debug handler on the same edge identity.
     for (MachineBasicBlock &MBB : MF)
@@ -127,9 +251,9 @@ public:
 
         // Handle outer-to-inner before the first surviving instruction in the
         // child. Native Go reuses an emitted instruction for an inline mark
-        // whenever possible. Do the same structurally: an immediately
-        // preceding, non-zero-width instruction in the parent frame already
-        // provides the required PC, without searching source coordinates.
+        // whenever possible. Do the same at the structural child boundary:
+        // reuse the immediately preceding non-zero-width parent instruction
+        // only when it also carries the callsite's source position.
         for (const DILocation *CallSite : CallSites) {
           if (!AnchoredCallsites.insert(CallSite).second)
             continue;
@@ -145,7 +269,8 @@ public:
                 Prev->getDebugLoc() && Prev->getDebugLoc().getLine() != 0 &&
                 TII.getInstSizeInBytes(*Prev) != 0 &&
                 !AnchorInstructions.contains(&*Prev) &&
-                isSameInlineFrame(Prev->getDebugLoc().get(), CallSite))
+                isSameInlineFrame(Prev->getDebugLoc().get(), CallSite) &&
+                isSameSourcePosition(Prev->getDebugLoc().get(), CallSite))
               Anchor = &*Prev;
             break;
           }
