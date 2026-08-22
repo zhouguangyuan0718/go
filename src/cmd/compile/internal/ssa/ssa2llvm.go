@@ -27,7 +27,6 @@ type LLVMFuncContext struct {
 	ClosureCodeLoads  map[ID]bool
 	DeferResults      map[llvmLocalKey]bool
 	DeferResultKeys   map[ID]llvmLocalKey
-	RequiredInlinePos map[int]bool
 	OpenDeferBits     llvmLocalKey
 	HasOpenDeferBits  bool
 	OpenDeferSlots    map[llvmLocalKey]int
@@ -92,8 +91,6 @@ const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolIndexMD = "goobj.symbol.index"
-const goObjDebugInlineRequiredMD = "goobj.debug.inline.required"
-const goObjDebugInlineAnchorBundle = "goobj.debug.inline.anchor"
 const llvmFramePointerAttr = "frame-pointer"
 const llvmFramePointerNonLeaf = "non-leaf"
 const llvmTargetCPUAttr = "target-cpu"
@@ -1078,20 +1075,6 @@ func (lfc *LLVMFuncContext) cgoUnsafeArgAddress(name *ir.Name, llvmName string) 
 func markLLVMGCLeafCall(call llvm.Value) {
 	attr := GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, "")
 	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, attr)
-}
-
-func (lfc *LLVMFuncContext) llvmInlineAnchor() llvm.Value {
-	// OpInlMark is the structural position of a Go inline entry. Preserve that
-	// position through generic LLVM optimization without tying the marker to a
-	// source line or extending the lifetime of an ordinary SSA value. Identical
-	// sideeffect markers may coalesce when their surrounding code coalesces; the
-	// late plugin turns each survivor into a zero-byte machine placement marker.
-	fn := getLLVMIntrinsicDeclaration("llvm.sideeffect")
-	bundle := llvm.NewOperandBundle(goObjDebugInlineAnchorBundle, nil)
-	call := lfc.b.CreateCallWithOperandBundles(
-		fn.GlobalValueType(), fn, nil, []llvm.OperandBundle{bundle}, "")
-	bundle.Dispose()
-	return call
 }
 
 func llvmMemoryOpInfo(v *Value) (int64, int) {
@@ -2422,11 +2405,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	arg0 := func() llvm.Value { return lfc.GenLV(v.Args[0]) }
 	arg1 := func() llvm.Value { return lfc.GenLV(v.Args[1]) }
 	switch v.Op {
-	case OpInitMem, OpSB, OpWBend:
+	case OpInitMem, OpSB, OpInlMark, OpWBend:
 		// LLVM models memory ordering through instruction dependencies, not an
 		// explicit SSA memory value. SB is only an address-space token here.
-	case OpInlMark:
-		lVal = lfc.llvmInlineAnchor()
 	case OpSP:
 		// Unlike SB, SP can participate in integer expressions such as the
 		// caller-frame-size calculation emitted for GetCallerSP.
@@ -3382,25 +3363,24 @@ func LLVMCompile(f *Func) {
 	}
 	cc := llvmCallConv(f.OwnAux.ABI().Which())
 	FCtxt := &LLVMFuncContext{
-		BBs:               map[ID]llvm.BasicBlock{},
-		Vs:                map[ID]llvm.Value{},
-		Locals:            map[llvmLocalKey]llvmStackSlot{},
-		AddressedResults:  map[ID][]llvmAddressedResult{},
-		ResultSlots:       map[ID]llvm.Value{},
-		CallResultSlots:   map[llvmCallResultKey]llvmStackSlot{},
-		ItabMethods:       map[ID]bool{},
-		ClosureCodeLoads:  map[ID]bool{},
-		DeferResults:      map[llvmLocalKey]bool{},
-		DeferResultKeys:   map[ID]llvmLocalKey{},
-		RequiredInlinePos: map[int]bool{},
-		OpenDeferSlots:    map[llvmLocalKey]int{},
-		F:                 f,
-		b:                 GlobalCtxt.NewBuilder(),
-		ReturnType:        sig.ReturnType,
-		ResultCount:       sig.ResultCount,
-		ReturnCount:       sig.ReturnCount,
-		Params:            sig.Params,
-		Results:           sig.Results,
+		BBs:              map[ID]llvm.BasicBlock{},
+		Vs:               map[ID]llvm.Value{},
+		Locals:           map[llvmLocalKey]llvmStackSlot{},
+		AddressedResults: map[ID][]llvmAddressedResult{},
+		ResultSlots:      map[ID]llvm.Value{},
+		CallResultSlots:  map[llvmCallResultKey]llvmStackSlot{},
+		ItabMethods:      map[ID]bool{},
+		ClosureCodeLoads: map[ID]bool{},
+		DeferResults:     map[llvmLocalKey]bool{},
+		DeferResultKeys:  map[ID]llvmLocalKey{},
+		OpenDeferSlots:   map[llvmLocalKey]int{},
+		F:                f,
+		b:                GlobalCtxt.NewBuilder(),
+		ReturnType:       sig.ReturnType,
+		ResultCount:      sig.ResultCount,
+		ReturnCount:      sig.ReturnCount,
+		Params:           sig.Params,
+		Results:          sig.Results,
 	}
 	defer FCtxt.b.Dispose()
 
