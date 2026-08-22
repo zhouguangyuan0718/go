@@ -1207,6 +1207,7 @@
       },
       "linux/amd64": {
         "fixedbugs/issue20780b.go": "timeout: exceeds the one-minute LLVM CI per-case budget on Linux/amd64",
+        "fixedbugs/issue29329.go": "slow: full-LLVM race build exceeds the one-minute CI per-case budget on Linux/amd64",
         "fixedbugs/issue36516.go": "slow: full-LLVM race build exceeds the one-minute CI per-case budget on Linux/amd64"
       }
     }

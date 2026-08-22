@@ -7,12 +7,12 @@ target triple = "x86_64-unknown-linux-goobj"
 ; DEBUG:            "line": 10,
 ; DEBUG:            "name": "main.mid",
 ; DEBUG-X86:        "parent_pc": 0
-; DEBUG-AARCH64:    "parent_pc": 0
+; DEBUG-AARCH64:    "parent_pc": 4
 ; DEBUG:            "parent": 0,
 ; DEBUG:            "line": 20,
 ; DEBUG:            "name": "main.inner",
-; DEBUG-X86:        "parent_pc": 1
-; DEBUG-AARCH64:    "parent_pc": 4
+; DEBUG-X86:        "parent_pc": 7
+; DEBUG-AARCH64:    "parent_pc": 8
 ; DEBUG-X86:        "pc_quantum": 1,
 ; DEBUG-AARCH64:    "pc_quantum": 4,
 ; DEBUG:            "kind": "pcfile",
@@ -21,6 +21,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; DEBUG:            "kind": "pcline",
 ; DEBUG:            "value": 10
 ; DEBUG:            "value": 20
+; DEBUG:            "value": 30
 ; DEBUG:            "kind": "pcinline",
 ; DEBUG:            "value": -1
 ; DEBUG:            "value": 0
@@ -79,11 +80,10 @@ target triple = "x86_64-unknown-linux-goobj"
 
 @main.sink = global i64 0
 
-declare void @llvm.sideeffect()
-
 define goabiinternal i64 @main.outer(i64 %x) !dbg !10 {
 entry:
-  %a = add i64 %x, 1, !dbg !30
+  %root = load volatile i64, ptr @main.sink, !dbg !38
+  %a = add i64 %root, 1, !dbg !30
   %b = mul i64 %a, 2, !dbg !30
   ret i64 %b, !dbg !30
 }
@@ -131,14 +131,12 @@ entry:
   ret i64 %x, !dbg !55
 }
 
-; The optimized instruction stream has no location for erasedInner. Frontend
-; required-location metadata must make the final machine pass materialize the
-; missing nested inline edge without constraining IR optimization.
+; Model an instruction whose nested inline location was discarded when LLVM
+; combined it with code from another frame. Frontend metadata must restore the
+; missing tree edge near final parent code, without constraining optimization.
 define goabiinternal void @main.erased() !dbg !19 {
 entry:
   store volatile i64 0, ptr @main.sink, !dbg !65
-  call void @llvm.sideeffect() [ "goobj.debug.inline.anchor"() ], !dbg !65
-  call void @llvm.sideeffect() [ "goobj.debug.inline.anchor"() ], !dbg !61
   ret void, !dbg !65
 }
 
@@ -186,6 +184,7 @@ entry:
 !35 = !DILocation(line: 61, column: 2, scope: !15, inlinedAt: !36)
 !36 = distinct !DILocation(line: 0, column: 0, scope: !14)
 !37 = !DILocation(line: 61, column: 2, scope: !15)
+!38 = !DILocation(line: 10, column: 7, scope: !10)
 !50 = !DILocation(line: 81, column: 2, scope: !17, inlinedAt: !52)
 !51 = !DILocation(line: 91, column: 2, scope: !18, inlinedAt: !52)
 !52 = distinct !DILocation(line: 71, column: 2, scope: !16)
