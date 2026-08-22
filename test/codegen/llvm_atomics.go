@@ -88,3 +88,16 @@ func llvmAtomicAnd32(p *uint32, mask uint32) uint32 {
 func llvmAtomicOr32(p *uint32, mask uint32) uint32 {
 	return atomic.OrUint32(p, mask)
 }
+
+// A nil atomic access must remain a faulting instruction after optimization;
+// the runtime turns the fault into a panic that Go code can recover.
+//
+// LLVM-DAG: store atomic i32 0, ptr null seq_cst, align 4
+// LLVM-OPT-DAG: store atomic i32 0, ptr null seq_cst, align 4
+// LLVM-DAG: attributes #{{[0-9]+}} = { {{.*}}null_pointer_is_valid{{.*}} }
+// LLVM-OPT-DAG: attributes #{{[0-9]+}} = { {{.*}}null_pointer_is_valid{{.*}} }
+//
+//go:noinline
+func llvmAtomicStoreNil() {
+	atomic.StoreInt32(nil, 0)
+}

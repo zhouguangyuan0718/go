@@ -3330,6 +3330,34 @@ func llvmIsRuntimeGorecover(f *Func) bool {
 	return f.OwnAux != nil && f.OwnAux.Fn != nil && f.OwnAux.Fn.Name == "runtime.gorecover"
 }
 
+func llvmIsAtomicMemoryOp(op Op) bool {
+	switch op {
+	case OpAtomicLoadPtr, OpAtomicLoad8, OpAtomicLoad32, OpAtomicLoad64,
+		OpAtomicLoadAcq32, OpAtomicLoadAcq64,
+		OpAtomicStore8, OpAtomicStore8Variant,
+		OpAtomicStore32, OpAtomicStore32Variant,
+		OpAtomicStore64, OpAtomicStore64Variant,
+		OpAtomicStorePtrNoWB, OpAtomicStoreRel32, OpAtomicStoreRel64,
+		OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant,
+		OpAtomicExchange8, OpAtomicExchange8Variant,
+		OpAtomicExchange32, OpAtomicExchange32Variant,
+		OpAtomicExchange64, OpAtomicExchange64Variant,
+		OpAtomicAnd8, OpAtomicAnd32,
+		OpAtomicAnd64value, OpAtomicAnd64valueVariant,
+		OpAtomicAnd32value, OpAtomicAnd32valueVariant,
+		OpAtomicAnd8value, OpAtomicAnd8valueVariant,
+		OpAtomicOr8, OpAtomicOr32,
+		OpAtomicOr64value, OpAtomicOr64valueVariant,
+		OpAtomicOr32value, OpAtomicOr32valueVariant,
+		OpAtomicOr8value, OpAtomicOr8valueVariant,
+		OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant,
+		OpAtomicCompareAndSwap64, OpAtomicCompareAndSwap64Variant,
+		OpAtomicCompareAndSwapRel32:
+		return true
+	}
+	return false
+}
+
 func LLVMCompile(f *Func) {
 	if f.OwnAux == nil || f.OwnAux.Fn == nil || f.OwnAux.ABIInfo() == nil {
 		f.fe.Fatalf(f.Entry.Pos, "missing function ABI information in LLVM lowering for %s", f.Name)
@@ -3495,8 +3523,10 @@ func LLVMCompile(f *Func) {
 	if f.OpenDeferBits != nil {
 		FCtxt.OpenDeferRecovery = GlobalCtxt.AddBasicBlock(FCtxt.LF, "open.defer.recovery")
 	}
+	hasAtomicMemoryOp := false
 	for _, BB := range f.Blocks {
 		for _, v := range BB.Values {
+			hasAtomicMemoryOp = hasAtomicMemoryOp || llvmIsAtomicMemoryOp(v.Op)
 			if (v.Op == OpInterCall || v.Op == OpInterLECall || v.Op == OpTailLECallInter) && len(v.Args) != 0 {
 				code := v.Args[0]
 				if code.Op == OpLoad && code.Type.IsUintptr() && code.Uses == 1 {
@@ -3517,7 +3547,11 @@ func LLVMCompile(f *Func) {
 			}
 		}
 	}
-	if len(FCtxt.ClosureCodeLoads) != 0 {
+	if len(FCtxt.ClosureCodeLoads) != 0 || hasAtomicMemoryOp {
+		// A nil memory access in Go must remain a real faulting instruction so
+		// the runtime can translate it into a recoverable panic. LLVM otherwise
+		// treats a known-null atomic access as immediate undefined behavior and
+		// may replace the function body with unreachable.
 		// Native Go relies on the funcval code-word load faulting when the
 		// funcval is nil. Its result feeds the indirect call, so keeping null
 		// dereferences defined is enough to retain the single ordinary load.
