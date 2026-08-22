@@ -7,20 +7,21 @@ target triple = "x86_64-unknown-linux-goobj"
 ; DEBUG:            "line": 10,
 ; DEBUG:            "name": "main.mid",
 ; DEBUG-X86:        "parent_pc": 0
-; DEBUG-AARCH64:    "parent_pc": 0
+; DEBUG-AARCH64:    "parent_pc": 4
 ; DEBUG:            "parent": 0,
 ; DEBUG:            "line": 20,
 ; DEBUG:            "name": "main.inner",
-; DEBUG-X86:        "parent_pc": 1
-; DEBUG-AARCH64:    "parent_pc": 4
+; DEBUG-X86:        "parent_pc": 7
+; DEBUG-AARCH64:    "parent_pc": 8
 ; DEBUG-X86:        "pc_quantum": 1,
 ; DEBUG-AARCH64:    "pc_quantum": 4,
 ; DEBUG:            "kind": "pcfile",
 ; DEBUG:            "value": 0,
 ; DEBUG:            "file": "/tmp/goobj-inline/outer.go"
 ; DEBUG:            "kind": "pcline",
-; DEBUG:            "value": 10
+; DEBUG:            "value": 9
 ; DEBUG:            "value": 20
+; DEBUG:            "value": 30
 ; DEBUG:            "kind": "pcinline",
 ; DEBUG:            "value": -1
 ; DEBUG:            "value": 0
@@ -65,25 +66,15 @@ target triple = "x86_64-unknown-linux-goobj"
 
 ; DEBUG-LABEL:      "name": "main.erased",
 ; DEBUG:            "start_line": 100,
-; DEBUG:            "inline_tree": [
-; DEBUG:            "parent": -1,
-; DEBUG:            "line": 101,
-; DEBUG:            "name": "main.erasedMid",
-; DEBUG-NOT:        "parent_pc": 0
-; DEBUG:            "parent_pc":
-; DEBUG:            "parent": 0,
-; DEBUG:            "line": 111,
-; DEBUG:            "name": "main.erasedInner",
-; DEBUG-NOT:        "parent_pc": 0
-; DEBUG:            "parent_pc":
+; DEBUG-NOT:        "inline_tree": [
+; DEBUG:            "pc_quantum":
 
 @main.sink = global i64 0
 
-declare void @llvm.sideeffect()
-
 define goabiinternal i64 @main.outer(i64 %x) !dbg !10 {
 entry:
-  %a = add i64 %x, 1, !dbg !30
+  %root = load volatile i64, ptr @main.sink, !dbg !38
+  %a = add i64 %root, 1, !dbg !30
   %b = mul i64 %a, 2, !dbg !30
   ret i64 %b, !dbg !30
 }
@@ -131,14 +122,11 @@ entry:
   ret i64 %x, !dbg !55
 }
 
-; The optimized instruction stream has no location for erasedInner. Frontend
-; required-location metadata must make the final machine pass materialize the
-; missing nested inline edge without constraining IR optimization.
+; Match native Go: an inline body with no surviving instruction does not need
+; an unwind entry and must not cause synthetic code to be emitted.
 define goabiinternal void @main.erased() !dbg !19 {
 entry:
   store volatile i64 0, ptr @main.sink, !dbg !65
-  call void @llvm.sideeffect() [ "goobj.debug.inline.anchor"() ], !dbg !65
-  call void @llvm.sideeffect() [ "goobj.debug.inline.anchor"() ], !dbg !61
   ret void, !dbg !65
 }
 
@@ -155,7 +143,6 @@ entry:
 !llvm.dbg.cu = !{!0}
 !llvm.module.flags = !{!5, !6}
 !goobj.debug.funcs = !{!40, !41, !42, !43, !44, !45, !46, !47, !48, !49, !56, !57}
-!goobj.debug.inline.required = !{!58}
 
 !0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "goallc-test", isOptimized: true, runtimeVersion: 0, emissionKind: LineTablesOnly, enums: !2, splitDebugInlining: true, nameTableKind: None)
 !1 = !DIFile(filename: "outer.go", directory: "/tmp/goobj-inline")
@@ -186,15 +173,13 @@ entry:
 !35 = !DILocation(line: 61, column: 2, scope: !15, inlinedAt: !36)
 !36 = distinct !DILocation(line: 0, column: 0, scope: !14)
 !37 = !DILocation(line: 61, column: 2, scope: !15)
+!38 = !DILocation(line: 9, column: 2, scope: !10)
 !50 = !DILocation(line: 81, column: 2, scope: !17, inlinedAt: !52)
 !51 = !DILocation(line: 91, column: 2, scope: !18, inlinedAt: !52)
 !52 = distinct !DILocation(line: 71, column: 2, scope: !16)
 !53 = !DILocation(line: 72, column: 2, scope: !16)
 !54 = !DILocation(line: 81, column: 2, scope: !17)
 !55 = !DILocation(line: 91, column: 2, scope: !18)
-!60 = !DILocation(line: 121, column: 2, scope: !21, inlinedAt: !61)
-!61 = distinct !DILocation(line: 111, column: 2, scope: !20, inlinedAt: !62)
-!62 = distinct !DILocation(line: 101, column: 2, scope: !19)
 !65 = !DILocation(line: 102, column: 2, scope: !19)
 !66 = !DILocation(line: 112, column: 2, scope: !20)
 !67 = !DILocation(line: 122, column: 2, scope: !21)
@@ -211,4 +196,3 @@ entry:
 !49 = !{!19, ptr @main.erased}
 !56 = !{!20, ptr @main.erasedMid}
 !57 = !{!21, ptr @main.erasedInner}
-!58 = !{ptr @main.erased, !60}
