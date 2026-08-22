@@ -294,7 +294,6 @@ func TestLLVMStdlib(t *testing.T) {
 	validateLLVMStdlibPolicy(t, packages, policySet)
 	set := effectiveLLVMStdlibTestSet(policySet, platform)
 	configureLLVMTestToolchain(t)
-	toolexec := llvmToolexec(t, "default<O2>")
 
 	whitelist := make([]string, 0, len(set.Whitelist))
 	for name := range set.Whitelist {
@@ -323,13 +322,13 @@ func TestLLVMStdlib(t *testing.T) {
 	}
 	t.Logf("LLVM stdlib blacklist result: NOT RUN remaining=%d reason=%q", len(packages)-len(whitelist)-len(graylist)-len(knownBlacklist), set.Blacklist["*"])
 
-	// The target package and toolexec pipeline are part of cmd/go's action IDs,
+	// The target package and in-process LLVM pipeline are part of cmd/go's action IDs,
 	// so one isolated cache can safely serve every package in this policy run.
 	// A single all= pattern compiles the test package, generated test main,
-	// runtime, and the complete dependency closure with LLVM. The toolchain,
-	// payload, and pass plugin remain fixed for the lifetime of the test process.
+	// runtime, and the complete dependency closure with LLVM. The compiler and
+	// its recorded payload remain fixed for the lifetime of the test process.
 	cache := t.TempDir()
-	warmLLVMExecutionRuntime(t, toolexec, cache)
+	warmLLVMExecutionRuntime(t, cache)
 	type llvmStdlibCandidate struct {
 		name  string
 		class llvmStdlibClass
@@ -356,7 +355,6 @@ func TestLLVMStdlib(t *testing.T) {
 				testTimeout = "5m"
 				processTimeout = 15 * time.Minute
 			}
-			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), processTimeout)
 			args := []string{
 				"test",
 				// The outer semaphore supplies package-level build parallelism.
@@ -365,8 +363,7 @@ func TestLLVMStdlib(t *testing.T) {
 				"-p=1",
 				"-count=1",
 				"-timeout=" + testTimeout,
-				"-toolexec=" + toolexec,
-				"-gcflags=all=-enablellvm -llvmironly",
+				"-gcflags=all=-enablellvm",
 			}
 			if name == "runtime" {
 				// LLVM GoObj does not yet emit complete
@@ -383,16 +380,31 @@ func TestLLVMStdlib(t *testing.T) {
 				t.Logf("LLVM runtime capability-boundary skips: %s", runtimeSkip)
 			}
 			args = append(args, name)
-			cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t), args...)
-			cmd.Env = append(os.Environ(),
-				"GOENV=off",
-				"GOFLAGS=",
-				"GOROOT="+testenv.GOROOT(t),
-				"GOCACHE="+cache,
-			)
-			out, err := cmd.CombinedOutput()
-			ctxErr := ctx.Err()
-			cancel()
+			run := func() ([]byte, error, error) {
+				ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), processTimeout)
+				defer cancel()
+				cmd := testenv.CommandContext(t, ctx, llvmStdlibGoTool(t), args...)
+				cmd.Env = append(os.Environ(),
+					"GOENV=off",
+					"GOFLAGS=",
+					"GOROOT="+testenv.GOROOT(t),
+					"GOCACHE="+cache,
+				)
+				out, err := cmd.CombinedOutput()
+				return out, err, ctx.Err()
+			}
+			out, err, ctxErr := run()
+			retried := false
+			// TestQueryRowClosingStmt/default intermittently returns sql.ErrNoRows
+			// on linux/amd64 in both this branch and the old-backend main baseline.
+			// Require one complete clean package rerun while keeping database/sql
+			// in the mandatory whitelist.
+			if err != nil && ctxErr == nil && platform == "linux/amd64" && name == "database/sql" &&
+				bytes.Contains(out, []byte("TestQueryRowClosingStmt")) && bytes.Contains(out, []byte("sql: no rows in result set")) {
+				t.Logf("LLVM stdlib whitelist result: RETRY known-flaky package=%q initial=%v\n%s", name, err, out)
+				out, err, ctxErr = run()
+				retried = true
+			}
 			if err != nil {
 				if candidate.class == llvmStdlibGray {
 					if ctxErr != nil {
@@ -409,6 +421,8 @@ func TestLLVMStdlib(t *testing.T) {
 			}
 			if candidate.class == llvmStdlibGray {
 				t.Logf("LLVM stdlib graylist result: PASS package=%q", name)
+			} else if retried {
+				t.Logf("LLVM stdlib whitelist result: PASS after retry package=%q", name)
 			} else {
 				t.Logf("LLVM stdlib whitelist result: PASS package=%q", name)
 			}
