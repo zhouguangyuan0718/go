@@ -27,6 +27,7 @@ type LLVMFuncContext struct {
 	ClosureCodeLoads  map[ID]bool
 	DeferResults      map[llvmLocalKey]bool
 	DeferResultKeys   map[ID]llvmLocalKey
+	RequiredInlinePos map[int]bool
 	OpenDeferBits     llvmLocalKey
 	HasOpenDeferBits  bool
 	OpenDeferSlots    map[llvmLocalKey]int
@@ -91,6 +92,7 @@ const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolIndexMD = "goobj.symbol.index"
+const goObjDebugInlineRequiredMD = "goobj.debug.inline.required"
 const llvmFramePointerAttr = "frame-pointer"
 const llvmFramePointerNonLeaf = "non-leaf"
 const llvmTargetCPUAttr = "target-cpu"
@@ -3363,24 +3365,25 @@ func LLVMCompile(f *Func) {
 	}
 	cc := llvmCallConv(f.OwnAux.ABI().Which())
 	FCtxt := &LLVMFuncContext{
-		BBs:              map[ID]llvm.BasicBlock{},
-		Vs:               map[ID]llvm.Value{},
-		Locals:           map[llvmLocalKey]llvmStackSlot{},
-		AddressedResults: map[ID][]llvmAddressedResult{},
-		ResultSlots:      map[ID]llvm.Value{},
-		CallResultSlots:  map[llvmCallResultKey]llvmStackSlot{},
-		ItabMethods:      map[ID]bool{},
-		ClosureCodeLoads: map[ID]bool{},
-		DeferResults:     map[llvmLocalKey]bool{},
-		DeferResultKeys:  map[ID]llvmLocalKey{},
-		OpenDeferSlots:   map[llvmLocalKey]int{},
-		F:                f,
-		b:                GlobalCtxt.NewBuilder(),
-		ReturnType:       sig.ReturnType,
-		ResultCount:      sig.ResultCount,
-		ReturnCount:      sig.ReturnCount,
-		Params:           sig.Params,
-		Results:          sig.Results,
+		BBs:               map[ID]llvm.BasicBlock{},
+		Vs:                map[ID]llvm.Value{},
+		Locals:            map[llvmLocalKey]llvmStackSlot{},
+		AddressedResults:  map[ID][]llvmAddressedResult{},
+		ResultSlots:       map[ID]llvm.Value{},
+		CallResultSlots:   map[llvmCallResultKey]llvmStackSlot{},
+		ItabMethods:       map[ID]bool{},
+		ClosureCodeLoads:  map[ID]bool{},
+		DeferResults:      map[llvmLocalKey]bool{},
+		DeferResultKeys:   map[ID]llvmLocalKey{},
+		RequiredInlinePos: map[int]bool{},
+		OpenDeferSlots:    map[llvmLocalKey]int{},
+		F:                 f,
+		b:                 GlobalCtxt.NewBuilder(),
+		ReturnType:        sig.ReturnType,
+		ResultCount:       sig.ResultCount,
+		ReturnCount:       sig.ReturnCount,
+		Params:            sig.Params,
+		Results:           sig.Results,
 	}
 	defer FCtxt.b.Dispose()
 
