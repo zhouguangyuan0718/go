@@ -21,6 +21,7 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 
 set(GOALLC_STATEPOINT_SOURCES
+  GoALLCAsyncPreemption.cpp
   GoALLCStackMapPrinter.cpp
   GoALLCInlineAnchors.cpp
   GoALLCPreCodeGen.cpp
@@ -132,6 +133,80 @@ if(BUILD_TESTING)
     PASS_REGULAR_EXPRESSION
       "GoALLCStatepoints: ran late pre-isel pipeline for"
   )
+
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.AsyncPreemptionIRNeutral
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-ir.ll"
+    CHECK
+  )
+
+  add_test(
+    NAME GoALLCStatepoints.AsyncPreemptionGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/async-preemption-goobj.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-goobj.ll"
+  )
+  add_test(
+    NAME GoALLCStatepoints.AsyncPreemptionAArch64GoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/async-preemption-aarch64.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-aarch64.ll"
+  )
+  add_test(
+    NAME GoALLCStatepoints.AsyncPreemptionWriteBarrierGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/async-preemption-writebarrier.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-writebarrier.ll"
+  )
+  if(GOALLC_OBJVIEW_EXECUTABLE)
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AsyncPreemptionObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-goobj.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/async-preemption-goobj.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.AsyncPreemptionObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.AsyncPreemptionGoObj
+    )
+
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AsyncPreemptionAArch64ObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-aarch64.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/async-preemption-aarch64.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.AsyncPreemptionAArch64ObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.AsyncPreemptionAArch64GoObj
+    )
+
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AsyncPreemptionWriteBarrierObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/async-preemption-writebarrier.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/async-preemption-writebarrier.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.AsyncPreemptionWriteBarrierObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.AsyncPreemptionWriteBarrierGoObj
+    )
+  endif()
 
   goallc_add_filecheck_test(
     GoALLCStatepoints.AnalysisInvalidation
