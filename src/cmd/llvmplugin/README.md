@@ -53,7 +53,10 @@ stack address into an ordinary non-root slot. Exact PHI/select/freeze and
 aggregate-leaf forwarding identities whose every path denotes the same alloca
 are likewise rebuilt from that alloca at each concrete use. Different allocas,
 non-zero offsets, and every other merged pointer remain ordinary scalar roots.
-Pointer values loaded from the allocation remain ordinary tracked roots.
+Typed Go `byval` and `goret` parameters follow the same fixed-frame-address
+rule: their raw argument is the storage identity, while SelectionDAG selects
+its canonical argument FrameIndex at each use. Pointer values loaded from any
+of these homes remain ordinary tracked roots.
 
 The current SSA value and CFG rewrite support matrix is:
 
@@ -61,12 +64,13 @@ The current SSA value and CFG rewrite support matrix is:
 | --- | --- | --- |
 | Pointer arguments | AArch64 GoObj qualified; SelectionDAG home reuse also tested on X86 | Values live after a call use caller statepoints; exact stack inputs stay in their fixed ABI homes, while register inputs and transformed values use normal statepoint spills. Call-only arguments are described by the callee's type-derived entry map. |
 | Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. It deliberately has no `gc.relocate`. First-class GEP/cast uses are rebuilt immediately at the use; direct memory uses stay on the FrameIndex and never enter relocation SSA. Pointers loaded from memory remain tracked. |
-| `select`, GEP, and pointer casts | Supported | Fixed-allocation GEP/no-op cast chains stay as direct FrameIndex uses or are rebuilt immediately at first-class uses. Exact same-allocation forwarding identities also collapse to use-local zero-offset recipes; mixed bases, non-zero-offset merges, and non-stack pointers remain ordinary scalar roots. |
+| Typed `byval`/`goret` addresses | Supported | The raw parameter is a fixed ABI-frame identity and may appear directly in `gc-live`, but deliberately has no `gc.relocate`. First-class uses are rebuilt use-locally and SelectionDAG selects the canonical argument FrameIndex before consulting an entry-block export vreg. Pointer contents retain their independent argument/object maps. |
+| `select`, GEP, and pointer casts | Supported | Fixed-frame GEP/no-op cast chains stay as direct FrameIndex uses or are rebuilt immediately at first-class uses. Exact same-frame forwarding identities also collapse to use-local zero-offset recipes; mixed bases, non-zero-offset merges, and non-stack pointers remain ordinary scalar roots. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
 | Loops and irreducible CFG | Supported | Relocation definitions are propagated through backedge and multi-entry PHIs without a shape-specific algorithm. |
-| Fixed struct/array SSA aggregates | Supported | Pointer and fixed pointer-vector leaves are extracted before liveness. Exact alloca-identity leaves are reconstructed use-locally from the raw alloca; ordinary leaves use their current relocated SSA values. Nested insert/extract paths and aggregate PHI/select/freeze forwarding are resolved structurally and fail closed for mixed bases or offsets. |
+| Fixed struct/array SSA aggregates | Supported | Pointer and fixed pointer-vector leaves are extracted before liveness. Exact fixed-frame-identity leaves are reconstructed use-locally from the raw alloca/byval/goret base; ordinary leaves use their current relocated SSA values. Nested insert/extract paths and aggregate PHI/select/freeze forwarding are resolved structurally and fail closed for mixed bases or offsets. |
 | Fixed-width pointer-vector SSA values | Supported | The vector remains one `gc-live` operand and one same-typed `gc.relocate`; it is not split into lanes. Pointer vectors in allocas remain unsupported. |
 | Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
 | Aggregate load results and store operands | Supported | First-class SSA values use aggregate normalization. Pointer leaves in surviving fixed allocas remain memory roots described by the alloca deopt layout protocol. |
@@ -294,7 +298,17 @@ the same direct location is instead the frame base whose bitmap selects memory
 slots. Its contents are active only when a matching explicit direct alloca
 also occurs in the statepoint's GC operands.
 
-Ordinary stack inputs use the same statepoint path. SelectionDAG formal
+Typed `byval` and `goret` parameters describe the address of a complete fixed
+Go ABI home, not a movable heap pointer. The statepoint pass keeps that raw
+base as the direct GC operand but emits no `gc.relocate`; first-class derived
+addresses are rebuilt at their concrete use. SelectionDAG then resolves every
+raw base use from the canonical argument FrameIndex before consulting an
+entry-block export vreg, so a statepoint cannot leave a cached pre-growth stack
+address live into its continuation. This rule is gated by the Go calling
+conventions and does not change ordinary ABI lowering.
+
+Ordinary pointer values loaded from stack inputs use the normal statepoint
+path. SelectionDAG formal
 lowering records a value home only when a Go ABI pointer part is a direct,
 non-extending load from an immutable fixed object and its IR aggregate offset,
 ABI part offset, load size, and object size all agree. If `gc-live` later

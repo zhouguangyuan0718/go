@@ -90,7 +90,7 @@ struct SafepointRecord {
   CallInst *Call;
   uint64_t ID;
   ValueSet Live;
-  ValueSet AllocaAddresses;
+  ValueSet FixedFrameAddresses;
   ValueSet DerivedPointers;
   CallInst *Statepoint = nullptr;
   CallInst *Result = nullptr;
@@ -141,7 +141,7 @@ struct OpenDeferInfo {
 enum class LivenessKind {
   PointerAggregates,
   RelocatablePointers,
-  AllocaAddresses,
+  FixedFrameAddresses,
   DerivedPointers,
 };
 
@@ -207,12 +207,41 @@ AllocaInst *rematerializableAllocaBase(Value *V) {
       rematerializableAllocaBase(static_cast<const Value *>(V)));
 }
 
-// Return the one static alloca denoted by Root when every path through its
-// forwarding graph is exactly that alloca's address. This deliberately
-// excludes non-zero address arithmetic: a PHI of different offsets is an
-// ordinary pointer value, even when every incoming address belongs to the same
-// frame object.
-const AllocaInst *exactAllocaIdentityBase(const Value *Root) {
+bool isFixedFrameArgument(const Value *V) {
+  const auto *Arg = dyn_cast<Argument>(V);
+  return Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr());
+}
+
+const Value *rematerializableFixedFrameBase(const Value *V) {
+  while (true) {
+    if (const auto *Alloca = dyn_cast<AllocaInst>(V))
+      return Alloca->isStaticAlloca() ? Alloca : nullptr;
+    if (isFixedFrameArgument(V))
+      return V;
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+      V = GEP->getPointerOperand();
+      continue;
+    }
+    if (const auto *Cast = dyn_cast<CastInst>(V);
+        Cast && Cast->isNoopCast(Cast->getDataLayout())) {
+      V = Cast->getOperand(0);
+      continue;
+    }
+    return nullptr;
+  }
+}
+
+Value *rematerializableFixedFrameBase(Value *V) {
+  return const_cast<Value *>(
+      rematerializableFixedFrameBase(static_cast<const Value *>(V)));
+}
+
+// Return the one fixed frame base denoted by Root when every path through its
+// forwarding graph is exactly that base's address. This deliberately excludes
+// non-zero address arithmetic: a PHI of different offsets is an ordinary
+// pointer value, even when every incoming address belongs to the same frame
+// object.
+const Value *exactFixedFrameIdentityBase(const Value *Root) {
   if (!Root->getType()->isPointerTy())
     return nullptr;
 
@@ -224,7 +253,7 @@ const AllocaInst *exactAllocaIdentityBase(const Value *Root) {
   SmallVector<IdentityQuery, 8> Worklist;
   Worklist.push_back({Root, {}});
   SmallVector<IdentityQuery, 8> Visited;
-  const AllocaInst *Base = nullptr;
+  const Value *Base = nullptr;
 
   while (!Worklist.empty()) {
     IdentityQuery Query = Worklist.pop_back_val();
@@ -321,35 +350,35 @@ const AllocaInst *exactAllocaIdentityBase(const Value *Root) {
       continue;
     }
 
-    const auto *Alloca = dyn_cast<AllocaInst>(V);
-    if (!Alloca || !Alloca->isStaticAlloca())
+    const Value *FixedBase = rematerializableFixedFrameBase(V);
+    if (!FixedBase || FixedBase != V)
       return nullptr;
-    if (Base && Base != Alloca)
+    if (Base && Base != FixedBase)
       return nullptr;
-    Base = Alloca;
+    Base = FixedBase;
   }
 
   // Reject an unanchored forwarding cycle and identities whose address space
-  // cannot be reproduced by the use-local zero-offset alloca recipe.
+  // cannot be reproduced by the use-local zero-offset frame recipe.
   return Base && Root->getType() == Base->getType() ? Base : nullptr;
 }
 
-AllocaInst *exactAllocaIdentityBase(Value *V) {
-  return const_cast<AllocaInst *>(
-      exactAllocaIdentityBase(static_cast<const Value *>(V)));
+Value *exactFixedFrameIdentityBase(Value *V) {
+  return const_cast<Value *>(
+      exactFixedFrameIdentityBase(static_cast<const Value *>(V)));
 }
 
-bool isStaticAllocaAddress(const Value *V) {
+bool isFixedFrameAddress(const Value *V) {
   if (!V->getType()->isPointerTy())
     return false;
-  // Merged addresses cannot be reconstructed from one relocated alloca.
+  // Merged addresses cannot be reconstructed from one fixed frame base.
   if (isa<PHINode>(V) || isa<SelectInst>(V))
     return false;
-  return rematerializableAllocaBase(V) != nullptr;
+  return rematerializableFixedFrameBase(V) != nullptr;
 }
 
 const Value *rematerializableDerivedBase(const Value *V) {
-  if (!isRelocatablePointerType(V->getType()) || isStaticAllocaAddress(V))
+  if (!isRelocatablePointerType(V->getType()) || isFixedFrameAddress(V))
     return nullptr;
 
   bool HasDerivedOperation = false;
@@ -426,18 +455,22 @@ FrameAddressUseKind classifyFrameAddressUse(const Use &U) {
 Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
                             Instruction *InsertBefore);
 
-Error canonicalizeDirectAllocaAddresses(
+Error canonicalizeDirectFixedFrameAddresses(
     Function &F, DominatorTree &DT,
     SmallPtrSetImpl<AllocaInst *> &WholeLifetimeAllocas) {
   SmallVector<Value *, 32> Addresses;
+  for (Argument &Arg : F.args())
+    if (isFixedFrameArgument(&Arg))
+      Addresses.push_back(&Arg);
   for (Instruction &I : instructions(F))
-    if (isStaticAllocaAddress(&I))
+    if (isFixedFrameAddress(&I))
       Addresses.push_back(&I);
 
   SmallVector<WeakTrackingVH, 32> DeadAddresses;
   for (Value *Address : Addresses) {
-    AllocaInst *Alloca = rematerializableAllocaBase(Address);
-    assert(Alloca && "canonical alloca address has no static base");
+    Value *Base = rematerializableFixedFrameBase(Address);
+    assert(Base && "canonical fixed frame address has no fixed base");
+    auto *Alloca = dyn_cast<AllocaInst>(Base);
     SmallVector<Use *, 8> FirstClassUses;
     SmallVector<IntrinsicInst *, 4> LifetimeStarts;
     for (Use &U : Address->uses())
@@ -446,15 +479,15 @@ Error canonicalizeDirectAllocaAddresses(
     if (FirstClassUses.empty())
       continue;
 
-    for (Use &U : Alloca->uses())
-      if (auto *II = dyn_cast<IntrinsicInst>(U.getUser());
-          II && II->getIntrinsicID() == Intrinsic::lifetime_start)
-        LifetimeStarts.push_back(II);
+    if (Alloca)
+      for (Use &U : Alloca->uses())
+        if (auto *II = dyn_cast<IntrinsicInst>(U.getUser());
+            II && II->getIntrinsicID() == Intrinsic::lifetime_start)
+          LifetimeStarts.push_back(II);
 
-    // A Go stack can move at every ordinary call. Do not share one derived
-    // frame address across calls: even though each gc.relocate is lowered back
-    // to a FrameIndex, the whole-function SSA merge can be spilled by register
-    // allocation and that ordinary spill slot is not a Go pointer root.
+    // A Go stack can move at every ordinary call. Do not share one materialized
+    // frame address across calls: exporting that SSA value can preserve a
+    // physical pre-growth address in a register or an ordinary non-root spill.
     // Rebuild the address immediately before each first-class use instead.
     DenseMap<Instruction *, Value *> UseAddresses;
     for (Use *U : FirstClassUses) {
@@ -480,15 +513,14 @@ Error canonicalizeDirectAllocaAddresses(
 
       Value *UseAddress = UseAddresses.lookup(InsertBefore);
       if (!UseAddress) {
-        if (Address == Alloca) {
+        if (Address == Base) {
           IRBuilder<> Builder(InsertBefore);
           UseAddress = Builder.CreateInBoundsGEP(
-              Builder.getInt8Ty(), Alloca, Builder.getInt64(0),
-              Alloca->hasName() ? Alloca->getName() + ".address"
-                                : "alloca.address");
+              Builder.getInt8Ty(), Base, Builder.getInt64(0),
+              Base->hasName() ? Base->getName() + ".address"
+                              : "fixed.frame.address");
         } else {
-          UseAddress =
-              rematerializeAddress(Address, Alloca, Alloca, InsertBefore);
+          UseAddress = rematerializeAddress(Address, Base, Base, InsertBefore);
         }
         UseAddresses[InsertBefore] = UseAddress;
       }
@@ -503,20 +535,21 @@ Error canonicalizeDirectAllocaAddresses(
   return Error::success();
 }
 
-void canonicalizeForwardedAllocaIdentities(Function &F) {
-  SmallVector<std::pair<Value *, AllocaInst *>, 16> Identities;
+void canonicalizeForwardedFixedFrameIdentities(Function &F) {
+  SmallVector<std::pair<Value *, Value *>, 16> Identities;
   for (Instruction &I : instructions(F)) {
-    if (!I.getType()->isPointerTy() || isStaticAllocaAddress(&I))
+    if (!I.getType()->isPointerTy() || isFixedFrameAddress(&I))
       continue;
-    if (AllocaInst *Base = exactAllocaIdentityBase(&I))
+    if (Value *Base = exactFixedFrameIdentityBase(&I))
       Identities.push_back({&I, Base});
   }
 
   SmallVector<WeakTrackingVH, 16> DeadIdentities;
   for (auto [Identity, Base] : Identities) {
-    // The identity has the alloca's exact pointer type and every path denotes
-    // the same address, so collapse it to the storage identity. The following
-    // direct-address pass rebuilds raw and derived recipes at concrete uses.
+    // The identity has the fixed base's exact pointer type and every path
+    // denotes the same address, so collapse it to the storage identity. The
+    // following direct-address pass rebuilds raw and derived recipes at
+    // concrete uses.
     Identity->replaceAllUsesWith(Base);
     DeadIdentities.push_back(Identity);
   }
@@ -540,22 +573,17 @@ bool isTrackedValue(const Value *V, LivenessKind Kind) {
   case LivenessKind::PointerAggregates:
     return !isRelocatablePointerType(Ty) && containsPointer(Ty);
   case LivenessKind::RelocatablePointers:
-    return isRelocatablePointerType(Ty) && !isStaticAllocaAddress(V) &&
+    return isRelocatablePointerType(Ty) && !isFixedFrameAddress(V) &&
            !rematerializableDerivedBase(V);
-  case LivenessKind::AllocaAddresses:
-    // Direct memory addresses must not enter relocation SSA. Under register
-    // pressure, a relocated address PHI can be spilled into an ordinary
-    // non-root slot; that cached address then points at the old Go stack after
-    // growth. rematerializeDirectFixedFrameMemoryUses rebuilds every terminal
-    // memory address at its use, while canonicalizeDirectAllocaAddresses does
-    // the same for first-class uses. Only those first-class local values need
-    // relocation liveness here.
-    return Ty->isPointerTy() && !isa<AllocaInst>(V) &&
-           isStaticAllocaAddress(V) &&
-           llvm::any_of(V->uses(), [](const Use &U) {
-             return classifyFrameAddressUse(U) ==
-                    FrameAddressUseKind::FirstClass;
-           });
+  case LivenessKind::FixedFrameAddresses:
+    // Pointer allocas have independent path-sensitive content activity below.
+    // Track byval/goret recipes here so a derived address which is live across
+    // a call keeps its complete incoming home active. Mapping every recipe
+    // back to the raw argument provides one direct FrameIndex stack-map
+    // location without creating relocation SSA. This deliberately avoids
+    // adding an unrelated gc-live location for pointer-free allocas.
+    return Ty->isPointerTy() &&
+           isa_and_nonnull<Argument>(rematerializableFixedFrameBase(V));
   case LivenessKind::DerivedPointers:
     return rematerializableDerivedBase(V) != nullptr;
   }
@@ -759,7 +787,7 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
     Value *Inserted = FindInsertedValue(&Aggregate, Leaf.Indices);
     Value *LeafValue =
         Inserted && (isa<UndefValue, PoisonValue>(Inserted) ||
-                     isStaticAllocaAddress(Inserted))
+                     isFixedFrameAddress(Inserted))
             ? Inserted
             : Builder.CreateExtractValue(&Aggregate, Leaf.Indices,
                                          leafName(Aggregate, Leaf.Indices));
@@ -1782,13 +1810,12 @@ Error rewriteCall(SafepointRecord &Record,
   }
 
   for (auto [Index, V] : llvm::enumerate(GCLive)) {
-    // A static alloca in gc-live describes the original frame object to the
-    // statepoint stack map. Its address is not a movable heap pointer and must
-    // not acquire a gc.relocate SSA identity. SelectionDAG records the alloca's
-    // FrameIndex directly; GoObj combines that location with the independent
-    // deopt pointer-map record for the object's live contents.
-    if (const auto *Alloca = dyn_cast<AllocaInst>(V);
-        Alloca && Alloca->isStaticAlloca())
+    // A static alloca or typed byval/goret argument in gc-live describes an
+    // original frame object to the statepoint stack map. Its address is not a
+    // movable heap pointer and must not acquire a gc.relocate SSA identity.
+    // SelectionDAG records the FrameIndex directly; GoObj combines that
+    // location with any independent pointer-map record for live contents.
+    if (rematerializableFixedFrameBase(V) == V)
       continue;
     CallInst *Relocate = Builder.CreateGCRelocate(
         Record.Statepoint, Index, Index, V->getType(),
@@ -1857,21 +1884,19 @@ Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
   return NewOperand;
 }
 
-void rematerializeDirectFixedFrameMemoryUses(
-    Function &F, DominatorTree &DT, ArrayRef<SafepointRecord> Records) {
+void rematerializeDirectFixedFrameMemoryUses(Function &F) {
   // CodeGenPrepare can share one large-offset GEP between several later memory
   // accesses. After statepoint continuations have been split, rebuild the
   // complete address chain at every terminal access so SelectionDAG cannot
-  // carry a pre-growth physical stack address into the continuation block. Use
-  // the latest dominating relocate when the fixed frame base is GC-live; a
-  // non-pointer frame object has no relocate and is rebuilt from its original
-  // FrameIndex base. Typed byval/goret homes follow the same rule.
+  // carry a pre-growth physical stack address into the continuation block.
+  // Static allocas and typed byval/goret homes have no gc.relocate; rebuild
+  // every recipe from its original FrameIndex base.
   SmallVector<std::pair<Value *, Value *>, 32> Addresses;
   for (Instruction &I : instructions(F))
-    if (isStaticAllocaAddress(&I))
-      Addresses.push_back({&I, rematerializableAllocaBase(&I)});
+    if (isFixedFrameAddress(&I))
+      Addresses.push_back({&I, rematerializableFixedFrameBase(&I)});
   for (Argument &Arg : F.args())
-    if (Arg.hasByValAttr() || Arg.hasGoRetAttr())
+    if (isFixedFrameArgument(&Arg))
       Addresses.push_back({&Arg, &Arg});
 
   SmallVector<WeakTrackingVH, 32> DeadAddresses;
@@ -1886,25 +1911,9 @@ void rematerializeDirectFixedFrameMemoryUses(
 
     for (Use *U : MemoryUses) {
       auto *UsePoint = cast<Instruction>(U->getUser());
-      Value *CurrentBase = Base;
-      for (const SafepointRecord &Record : Records) {
-        auto Relocate = llvm::find_if(Record.Relocates, [&](CallInst *Call) {
-          return cast<GCRelocateInst>(Call)->getDerivedPtr() == Base;
-        });
-        if (Relocate == Record.Relocates.end() ||
-            !DT.dominates(*Relocate, UsePoint))
-          continue;
-        if (CurrentBase == Base || DT.dominates(CurrentBase, *Relocate))
-          CurrentBase = *Relocate;
-      }
-
-      if (Address == Base && CurrentBase == Base)
+      if (Address == Base)
         continue;
-
-      Value *UseAddress =
-          Address == Base
-              ? CurrentBase
-              : rematerializeAddress(Address, Base, CurrentBase, UsePoint);
+      Value *UseAddress = rematerializeAddress(Address, Base, Base, UsePoint);
       U->set(UseAddress);
     }
     if (!MemoryUses.empty())
@@ -1921,37 +1930,20 @@ void rematerializeDirectFixedFrameMemoryUses(
 
 void repairRelocationSSA(Function &F, DominatorTree &DT,
                          ArrayRef<SafepointRecord> Records) {
-  // Each ordinary relocated pointer and each rematerialized fixed-object
-  // derived address is a new reaching definition of its original SSA value.
-  // Static allocas and typed byval/goret arguments are themselves fixed frame
-  // addresses: SelectionDAG rematerializes either from its frame index at each
-  // use, so replacing the original IR value with a gc.relocate chain would
-  // turn later statepoints into ordinary pointer spills.
+  // Each ordinary relocated pointer and each rematerialized derived address is
+  // a new reaching definition of its original SSA value. Fixed frame
+  // identities never enter this map: their uses are rebuilt directly from the
+  // original FrameIndex.
   MapVector<Value *, SmallVector<Value *, 4>> Definitions;
   for (const SafepointRecord &Record : Records) {
     for (CallInst *RelocateCall : Record.Relocates) {
       auto *Relocate = cast<GCRelocateInst>(RelocateCall);
-      Value *Original = Relocate->getDerivedPtr();
-      auto *Arg = dyn_cast<Argument>(Original);
-      if (!isa<AllocaInst>(Original) &&
-          !(Arg && (Arg->hasByValAttr() || Arg->hasGoRetAttr())))
-        Definitions[Original].push_back(RelocateCall);
+      Definitions[Relocate->getDerivedPtr()].push_back(RelocateCall);
     }
 
     Instruction *InsertBefore = Record.Relocates.empty()
                                     ? Record.Statepoint->getNextNode()
                                     : Record.Relocates.back()->getNextNode();
-    for (Value *Address : Record.AllocaAddresses) {
-      AllocaInst *Base = rematerializableAllocaBase(Address);
-      auto Relocate = llvm::find_if(Record.Relocates, [&](CallInst *Call) {
-        return cast<GCRelocateInst>(Call)->getDerivedPtr() == Base;
-      });
-      assert(Relocate != Record.Relocates.end() &&
-             "alloca address is missing its base relocate");
-      Value *Rematerialized =
-          rematerializeAddress(Address, Base, *Relocate, InsertBefore);
-      Definitions[Address].push_back(Rematerialized);
-    }
     for (Value *Address : Record.DerivedPointers) {
       Value *Base = rematerializableDerivedBase(Address);
       auto Relocate = llvm::find_if(Record.Relocates, [&](CallInst *Call) {
@@ -2074,16 +2066,18 @@ Error rewriteFunction(Function &F) {
   if (Error Err = scalarizeLivePointerAggregates(F))
     return Err;
   // Scalarization can expose forwarding identities and nested GEP/cast
-  // recipes. First collapse each exact same-allocation identity to the raw
-  // alloca, then canonicalize every direct fixed-frame recipe exactly once.
-  // This also rebuilds addresses derived from a collapsed PHI/select.
-  canonicalizeForwardedAllocaIdentities(F);
+  // recipes. First collapse each exact same-object identity to its raw alloca,
+  // byval, or goret base, then canonicalize every direct fixed-frame recipe
+  // exactly once. This also rebuilds addresses derived from a collapsed
+  // PHI/select.
+  canonicalizeForwardedFixedFrameIdentities(F);
   if (Error Err =
-          canonicalizeDirectAllocaAddresses(F, DT, WholeLifetimeAllocas))
+          canonicalizeDirectFixedFrameAddresses(F, DT, WholeLifetimeAllocas))
     return Err;
 
   LivenessData Data = computeLiveness(F, LivenessKind::RelocatablePointers);
-  LivenessData AddressData = computeLiveness(F, LivenessKind::AllocaAddresses);
+  LivenessData FixedFrameData =
+      computeLiveness(F, LivenessKind::FixedFrameAddresses);
   LivenessData DerivedData = computeLiveness(F, LivenessKind::DerivedPointers);
   SmallVector<SafepointRecord, 8> Records;
   uint64_t CallOrdinal = 0;
@@ -2101,22 +2095,24 @@ Error rewriteFunction(Function &F) {
     Records.push_back(
         {OrdinaryCall, stableStatepointID(F.getName(), CallOrdinal++),
          liveAtCall(*OrdinaryCall, Data, LivenessKind::RelocatablePointers),
-         liveAtCall(*OrdinaryCall, AddressData, LivenessKind::AllocaAddresses),
+         liveAtCall(*OrdinaryCall, FixedFrameData,
+                    LivenessKind::FixedFrameAddresses),
          liveAtCall(*OrdinaryCall, DerivedData,
                     LivenessKind::DerivedPointers)});
   }
-  for (const SafepointRecord &Record : Records)
-    if (!Record.AllocaAddresses.empty())
-      return createStringError(
-          std::errc::not_supported,
-          "GoALLC failed to rematerialize a fixed alloca address at its use");
-  for (SafepointRecord &Record : Records)
+  for (SafepointRecord &Record : Records) {
+    for (Value *Address : Record.FixedFrameAddresses) {
+      Value *Base = rematerializableFixedFrameBase(Address);
+      assert(Base && "live fixed frame address has no fixed base");
+      Record.Live.insert(Base);
+    }
     for (Value *Address : Record.DerivedPointers) {
       // A hoisted GEP from null can be a small non-Go pointer. Keep only its
       // relocatable base in Go's stack map; repairRelocationSSA reconstructs
       // the exact address expression after the statepoint.
       Record.Live.insert(rematerializableDerivedBase(Address));
     }
+  }
   for (const SafepointRecord &Record : Records)
     if (Error Err = validateSafepoint(Record))
       return Err;
@@ -2173,7 +2169,7 @@ Error rewriteFunction(Function &F) {
   // latter promotes temporary merge slots, so rebuild it for the new
   // continuation blocks.
   DT.recalculate(F);
-  rematerializeDirectFixedFrameMemoryUses(F, DT, Records);
+  rematerializeDirectFixedFrameMemoryUses(F);
   repairRelocationSSA(F, DT, Records);
   return Error::success();
 }
