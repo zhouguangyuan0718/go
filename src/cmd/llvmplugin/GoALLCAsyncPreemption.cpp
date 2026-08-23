@@ -313,6 +313,25 @@ bool markMorestackRanges(const MachineFunction &MF,
   return true;
 }
 
+void markFrameTransitionRanges(const MachineFunction &MF,
+                               GoObjUnsafeInstructionMarker MarkUnsafe) {
+  // LLVM's prologue and epilogue lowering may update a Go frame in several
+  // instructions. For example, AArch64 can save FP/LR below a not-yet-committed
+  // future SP and only then move that value into SP. An asynchronous preemption
+  // in the middle can use the same memory for its injected frames and corrupt
+  // the saved linkage. The inverse teardown has the same transient mismatch
+  // between the physical registers and the PCSP-described frame.
+  //
+  // FrameSetup and FrameDestroy are the target-independent MachineInstr
+  // contract for these transactions. Keeping just these short target-lowered
+  // ranges unsafe avoids constraining IR optimization or the ordinary body.
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB)
+      if (!MI.isMetaInstruction() && (MI.getFlag(MachineInstr::FrameSetup) ||
+                                      MI.getFlag(MachineInstr::FrameDestroy)))
+        MarkUnsafe(MI);
+}
+
 bool isEncodedRegisterRead(const MachineInstr &MI, const TargetInstrInfo &TII,
                            MCRegister Reg) {
   return TII.getName(MI.getOpcode()) == StringRef("READ_REGISTER_GPR64") &&
@@ -436,6 +455,8 @@ describeAsyncPreemption(const MachineFunction &MF,
     emitUnsafeFallbackRemark(F, "unrecognized morestack control flow");
     return GoObjAsyncPreemptionMode::WholeFunctionUnsafe;
   }
+
+  markFrameTransitionRanges(MF, MarkUnsafe);
 
   StringRef StackRegName = Arch == Triple::x86_64 ? "RSP" : "SP";
   if (!markInlineAsmRanges(MF, StackRegName, MarkUnsafe)) {

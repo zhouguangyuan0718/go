@@ -7,6 +7,12 @@ target triple = "x86_64-unknown-linux-goobj"
 ; OBJVIEW-NEXT: "end": [[#STACK_CHECK_END:]]
 ; OBJVIEW-NEXT: "value": -2
 ; OBJVIEW: "start": [[#STACK_CHECK_END]]
+; OBJVIEW-NEXT: "end": [[#FRAME_DESTROY_BEGIN:]]
+; OBJVIEW-NEXT: "value": -1
+; OBJVIEW: "start": [[#FRAME_DESTROY_BEGIN]]
+; OBJVIEW-NEXT: "end": [[#FRAME_DESTROY_END:]]
+; OBJVIEW-NEXT: "value": -2
+; OBJVIEW: "start": [[#FRAME_DESTROY_END]]
 ; OBJVIEW-NEXT: "end": [[#MORESTACK_BEGIN:]]
 ; OBJVIEW-NEXT: "value": -1
 ; OBJVIEW: "start": [[#MORESTACK_BEGIN]]
