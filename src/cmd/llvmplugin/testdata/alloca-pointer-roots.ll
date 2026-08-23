@@ -36,7 +36,9 @@ target triple = "x86_64-unknown-linux-goobj"
 
 ; IR-LABEL: define goabiinternal void @argument_aggregate_home_address_across_calls(
 ; IR: "gc-live"(ptr %value.home)
-; IR: %value.home.relocated{{[0-9]*}} = call coldcc ptr @llvm.experimental.gc.relocate
+; IR-NOT: @llvm.experimental.gc.relocate
+; IR: %value.home.address = getelementptr inbounds i8, ptr %value.home, i64 0
+; IR: ret void
 
 ; IR-LABEL: define goabiinternal void @alloca_gep_value_across_calls()
 ; IR: %field.remat{{[0-9]+}} = getelementptr inbounds %pointer_field, ptr %slot
