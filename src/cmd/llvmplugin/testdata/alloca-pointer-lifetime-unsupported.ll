@@ -7,7 +7,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: store ptr null
 ; IR-NOT: call void @llvm.memset.inline
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %slot)
-; IR: %slot.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+; IR-NOT: %slot.relocated
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: ret void
 
@@ -52,18 +52,20 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-LABEL: define goabiinternal void @phi_edge_pointer_alloca(
 ; IR: %slot = alloca ptr, align 8, !llvm.stackcoloring.no_merge
 ; IR: %slot.address = getelementptr inbounds i8, ptr %slot, i64 0
-; IR: %selected = phi ptr [ %slot.address, %initialize ], [ %other, %external ]
+; IR: %selected = phi ptr [ %slot.address{{.*}}, %initialize ], [ %other, %external ]
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %selected)
 
 ; IR-LABEL: define goabiinternal void @hoisted_aggregate_pointer_alloca()
 ; IR: call void @llvm.lifetime.start
 ; IR-NEXT: call void @llvm.memset.inline
-; IR: %slice.cap.leaf.0 = extractvalue
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %slice.cap.leaf.0)
-; IR: %slice.cap.leaf.0.relocated
+; IR-NOT: %slice.cap.leaf.0
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
 ; IR: store ptr null
+; IR: %slot.address{{.*}} = getelementptr inbounds i8, ptr %slot, i64 0
+; IR: %slice.cap.rebuilt = insertvalue { ptr, i64, i64 } poison, ptr %slot.address{{.*}}, 0
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
+; IR-NOT: %slice.cap.leaf.0.relocated
 ; IR-NOT: call void @llvm.lifetime.end
 
 ; OBJVIEW-LABEL: "name": "stack_object_alloca_with_lifetime"

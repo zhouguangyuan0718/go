@@ -3,7 +3,10 @@ target triple = "aarch64-apple-darwin-goobj"
 %result_storage = type { ptr, i64, ptr }
 
 ; IR-LABEL: define goabiinternal {{.*}} @fixed_frame_goret_base(
-; IR-COUNT-2: "gc-live"(ptr %result)
+; IR: "gc-live"(ptr %result)
+; IR: %result.relocated{{[0-9]+}} = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: "gc-live"(ptr %result)
+; IR: %result.relocated = call coldcc ptr @llvm.experimental.gc.relocate
 
 ; MIR-LABEL: name: fixed_frame_goret_base
 ; MIR: fixedStack:
