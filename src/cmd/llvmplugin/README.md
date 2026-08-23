@@ -71,7 +71,8 @@ The current SSA value and CFG rewrite support matrix is:
 | Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Go `VarDef` emits `llvm.lifetime.start`; parameter homes and addressed result homes have explicit starts at their initialization sites. The statepoint pass uses starts as backward liveness kills and real address uses as gens, so the last use supplies the implicit end. Active contents contribute callsite `LocalsPointerMaps`; address-observable objects additionally get function-wide `FUNCDATA_StackObjects` and one entry initialization because stack growth adjusts them even while source-dead. Locals-only storage is not initialized by the plugin, and no lifetime ends are emitted. |
 | Scalable vectors | Unsupported | The generic LLVM statepoint rewrite assumes a fixed vector width when constructing relocates; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
-| `invoke`, `callbr`, non-deopt operand bundles, unsupported parameter attributes, and `musttail` | Unsupported | One ordinary deopt bundle is preserved before the alloca suffix. `nest`, `captures`, and `readonly` parameter attributes are preserved; other shapes fail closed. |
+| `invoke`, `callbr`, non-deopt operand bundles, and unsupported parameter attributes | Unsupported | One ordinary deopt bundle is preserved before the alloca suffix. `nest`, `captures`, and `readonly` parameter attributes are preserved; other shapes fail closed. |
+| Frontend-qualified `musttail` | Not a caller safepoint | A tail transfer has no caller continuation to relocate. The Go frontend currently emits only direct `void()` transfers; LLVM target lowering validates that initial frame-reuse shape. |
 
 This matrix describes verified IR rewriting, not full runtime qualification.
 The Darwin/arm64 Go execution whitelist additionally covers one unconditional
