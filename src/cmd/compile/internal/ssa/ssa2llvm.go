@@ -3682,8 +3682,16 @@ func LLVMCompile(f *Func) {
 		if isDeferResultLocal(assignment.Name) {
 			// Defer recovery can enter without following the suspended call's
 			// ordinary edge. The goret formal is already a whole-activation fixed
-			// home, but volatile accesses are still needed on recovery paths.
+			// home, but volatile accesses are still needed on recovery paths. Mark
+			// pointer-containing homes so the statepoint pass keeps their contents
+			// in every ArgsPointerMaps entry, matching native PPARAMOUT liveness.
 			FCtxt.DeferResults[key] = true
+			if assignment.Name.Type().HasPointers() {
+				FCtxt.LF.AddAttributeAtIndex(
+					result.ParamIndex+1,
+					GlobalCtxt.CreateStringAttribute(goDeferResultMD, ""),
+				)
+			}
 		}
 	}
 	// A typed byval parameter already denotes the callee-private Go ABI stack

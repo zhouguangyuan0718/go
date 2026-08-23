@@ -123,13 +123,20 @@ struct PointerAllocaRecord {
   bool ActivityUnclear = false;
 };
 
-struct PointerByValRecord {
+struct PointerFixedArgRecord {
   Argument *Base;
+  bool IsGoRet;
   bool NeedsStackObject;
+  bool DeferResult;
   uint64_t ByteSize;
   uint64_t Alignment;
   uint64_t BitCount;
   SmallVector<uint64_t, 4> BitmapWords;
+  SmallVector<PointerAllocaLeaf, 8> Leaves;
+  DenseMap<const Instruction *, SmallBitVector> ContentUses;
+  DenseMap<const Instruction *, SmallBitVector> ContentDefs;
+  SmallVector<CallInst *, 8> ActiveCalls;
+  bool ActivityUnclear = false;
 };
 
 struct OpenDeferInfo {
@@ -1566,17 +1573,19 @@ Error collectPointerAllocas(
   return Error::success();
 }
 
-Error collectPointerByVals(Function &F,
-                           SmallVectorImpl<PointerByValRecord> &Records) {
+Error collectPointerFixedArgs(
+    Function &F, SmallVectorImpl<PointerFixedArgRecord> &Records) {
   if (!isGoCallingConv(F.getCallingConv()))
     return Error::success();
 
   const DataLayout &DL = F.getDataLayout();
   uint64_t PointerSize = DL.getPointerSize(0);
   for (Argument &Arg : F.args()) {
-    if (!Arg.hasByValAttr())
+    bool IsGoRet = Arg.hasGoRetAttr();
+    if (!Arg.hasByValAttr() && !IsGoRet)
       continue;
-    Type *StorageType = Arg.getParamByValType();
+    Type *StorageType =
+        IsGoRet ? Arg.getParamGoRetType() : Arg.getParamByValType();
     if (!StorageType || !containsPointer(StorageType))
       continue;
 
@@ -1584,7 +1593,7 @@ Error collectPointerByVals(Function &F,
     if (AllocationSize.isScalable())
       return createStringError(
           std::errc::not_supported,
-          "GoALLC statepoints do not support scalable byval parameter "
+          "GoALLC statepoints do not support scalable fixed argument "
           "layouts");
     Align Alignment =
         Arg.getParamAlign().value_or(DL.getABITypeAlign(StorageType));
@@ -1593,7 +1602,7 @@ Error collectPointerByVals(Function &F,
         Alignment < DL.getABITypeAlign(StorageType))
       return createStringError(
           std::errc::not_supported,
-          "GoALLC statepoints require pointer-aligned fixed byval parameter "
+          "GoALLC statepoints require pointer-aligned fixed argument "
           "layouts");
 
     SmallVector<PointerAllocaLeaf, 8> Leaves;
@@ -1607,19 +1616,270 @@ Error collectPointerByVals(Function &F,
       if (Leaf.Offset % PointerSize != 0 || Leaf.Offset >= ByteSize)
         return createStringError(
             std::errc::not_supported,
-            "GoALLC statepoint byval pointer slot is not pointer-aligned");
+            "GoALLC statepoint fixed argument pointer slot is not "
+            "pointer-aligned");
       uint64_t Bit = Leaf.Offset / PointerSize;
       uint64_t Mask = uint64_t(1) << (Bit % 64);
       if (BitmapWords[Bit / 64] & Mask)
         return createStringError(
             std::errc::invalid_argument,
-            "GoALLC statepoint byval pointer slots overlap");
+            "GoALLC statepoint fixed argument pointer slots overlap");
       BitmapWords[Bit / 64] |= Mask;
     }
-    Records.push_back({&Arg, addressNeedsStackObject(Arg), ByteSize,
-                       Alignment.value(), BitCount, std::move(BitmapWords)});
+    PointerFixedArgRecord Record;
+    Record.Base = &Arg;
+    Record.IsGoRet = IsGoRet;
+    Record.NeedsStackObject = addressNeedsStackObject(Arg);
+    Record.DeferResult = IsGoRet && Arg.hasAttribute(GoDeferResultMD);
+    Record.ByteSize = ByteSize;
+    Record.Alignment = Alignment.value();
+    Record.BitCount = BitCount;
+    Record.BitmapWords = std::move(BitmapWords);
+    Record.Leaves = std::move(Leaves);
+    Records.push_back(std::move(Record));
   }
   return Error::success();
+}
+
+SmallBitVector &fixedArgAccessMask(
+    DenseMap<const Instruction *, SmallBitVector> &Masks, Instruction &I,
+    size_t BitCount) {
+  SmallBitVector &Mask = Masks[&I];
+  if (Mask.empty())
+    Mask.resize(BitCount);
+  return Mask;
+}
+
+void addAllFixedArgSlots(DenseMap<const Instruction *, SmallBitVector> &Masks,
+                         Instruction &I,
+                         const PointerFixedArgRecord &Record) {
+  fixedArgAccessMask(Masks, I, Record.Leaves.size()).set();
+}
+
+void addFixedArgMemorySlots(
+    DenseMap<const Instruction *, SmallBitVector> &Masks, Instruction &I,
+    Value *Address, uint64_t AccessSize, bool IsDefinition,
+    PointerFixedArgRecord &Record) {
+  const DataLayout &DL = I.getDataLayout();
+  int64_t SignedOffset = 0;
+  Value *Base = GetPointerBaseWithConstantOffset(Address, SignedOffset, DL);
+  if (Base != Record.Base || SignedOffset < 0) {
+    Record.ActivityUnclear = true;
+    return;
+  }
+  uint64_t AccessBegin = static_cast<uint64_t>(SignedOffset);
+  std::optional<uint64_t> AccessEnd =
+      checkedAddUnsigned(AccessBegin, AccessSize);
+  if (!AccessEnd) {
+    Record.ActivityUnclear = true;
+    return;
+  }
+
+  uint64_t PointerSize = DL.getPointerSize(0);
+  SmallBitVector &Mask =
+      fixedArgAccessMask(Masks, I, Record.Leaves.size());
+  for (auto [Index, Leaf] : llvm::enumerate(Record.Leaves)) {
+    uint64_t SlotBegin = Leaf.Offset;
+    uint64_t SlotEnd = SlotBegin + PointerSize;
+    if (*AccessEnd <= SlotBegin || AccessBegin >= SlotEnd)
+      continue;
+    if (IsDefinition &&
+        (AccessBegin > SlotBegin || *AccessEnd < SlotEnd)) {
+      Record.ActivityUnclear = true;
+      return;
+    }
+    Mask.set(Index);
+  }
+}
+
+std::optional<uint64_t> fixedAccessSize(Type *Ty, const DataLayout &DL) {
+  TypeSize Size = DL.getTypeStoreSize(Ty);
+  if (Size.isScalable())
+    return std::nullopt;
+  return Size.getFixedValue();
+}
+
+void collectFixedArgContentAccesses(PointerFixedArgRecord &Record) {
+  SmallVector<Value *, 16> Worklist{Record.Base};
+  SmallPtrSet<Value *, 16> SeenAddresses;
+  while (!Worklist.empty()) {
+    Value *Address = Worklist.pop_back_val();
+    if (!SeenAddresses.insert(Address).second)
+      continue;
+    for (Use &U : Address->uses()) {
+      auto *I = dyn_cast<Instruction>(U.getUser());
+      if (!I) {
+        Record.ActivityUnclear = true;
+        continue;
+      }
+      FrameAddressUseKind Kind = classifyFrameAddressUse(U);
+      if (Kind == FrameAddressUseKind::Derivation) {
+        if (!I->getType()->isPointerTy() ||
+            rematerializableFixedFrameBase(I) != Record.Base) {
+          Record.ActivityUnclear = true;
+          continue;
+        }
+        Worklist.push_back(I);
+        continue;
+      }
+      if (Kind == FrameAddressUseKind::LifetimeOrDebug)
+        continue;
+      if (Kind == FrameAddressUseKind::FakeUse) {
+        addAllFixedArgSlots(Record.ContentUses, *I, Record);
+        continue;
+      }
+      if (Kind == FrameAddressUseKind::FirstClass) {
+        if (!isa<PHINode, SelectInst, FreezeInst, ICmpInst>(I))
+          addAllFixedArgSlots(Record.ContentUses, *I, Record);
+        continue;
+      }
+
+      const DataLayout &DL = I->getDataLayout();
+      if (auto *Load = dyn_cast<LoadInst>(I)) {
+        std::optional<uint64_t> Size = fixedAccessSize(Load->getType(), DL);
+        if (!Size)
+          Record.ActivityUnclear = true;
+        else
+          addFixedArgMemorySlots(Record.ContentUses, *I, Address, *Size,
+                                 false, Record);
+        continue;
+      }
+      if (auto *Store = dyn_cast<StoreInst>(I)) {
+        std::optional<uint64_t> Size =
+            fixedAccessSize(Store->getValueOperand()->getType(), DL);
+        if (!Size)
+          Record.ActivityUnclear = true;
+        else
+          addFixedArgMemorySlots(Record.ContentDefs, *I, Address, *Size, true,
+                                 Record);
+        continue;
+      }
+      if (auto *RMW = dyn_cast<AtomicRMWInst>(I)) {
+        std::optional<uint64_t> Size =
+            fixedAccessSize(RMW->getValOperand()->getType(), DL);
+        if (!Size) {
+          Record.ActivityUnclear = true;
+        } else {
+          addFixedArgMemorySlots(Record.ContentDefs, *I, Address, *Size, true,
+                                 Record);
+          addFixedArgMemorySlots(Record.ContentUses, *I, Address, *Size, false,
+                                 Record);
+        }
+        continue;
+      }
+      if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(I)) {
+        std::optional<uint64_t> Size =
+            fixedAccessSize(CmpXchg->getCompareOperand()->getType(), DL);
+        if (!Size) {
+          Record.ActivityUnclear = true;
+        } else {
+          addFixedArgMemorySlots(Record.ContentDefs, *I, Address, *Size, true,
+                                 Record);
+          addFixedArgMemorySlots(Record.ContentUses, *I, Address, *Size, false,
+                                 Record);
+        }
+        continue;
+      }
+      auto *Mem = dyn_cast<MemIntrinsic>(I);
+      auto *Length = Mem ? dyn_cast<ConstantInt>(Mem->getLength()) : nullptr;
+      if (!Mem || !Length || Length->getValue().getActiveBits() > 64) {
+        Record.ActivityUnclear = true;
+        continue;
+      }
+      uint64_t Size = Length->getZExtValue();
+      if (U.get() == Mem->getRawDest())
+        addFixedArgMemorySlots(Record.ContentDefs, *I, Address, Size, true,
+                               Record);
+      else if (auto *Transfer = dyn_cast<MemTransferInst>(Mem);
+               Transfer && U.get() == Transfer->getRawSource())
+        addFixedArgMemorySlots(Record.ContentUses, *I, Address, Size, false,
+                               Record);
+      else
+        Record.ActivityUnclear = true;
+    }
+  }
+}
+
+void transferFixedArgContentLiveness(const PointerFixedArgRecord &Record,
+                                     const Instruction &I,
+                                     SmallBitVector &Live) {
+  if (Record.IsGoRet && isa<ReturnInst>(I))
+    Live.set();
+  if (auto It = Record.ContentDefs.find(&I);
+      It != Record.ContentDefs.end())
+    Live.reset(It->second);
+  if (auto It = Record.ContentUses.find(&I);
+      It != Record.ContentUses.end())
+    Live |= It->second;
+}
+
+SmallBitVector fixedArgContentsLiveInBlock(
+    const PointerFixedArgRecord &Record, const BasicBlock &BB,
+    SmallBitVector Live) {
+  for (const Instruction &I : llvm::reverse(BB)) {
+    transferFixedArgContentLiveness(Record, I, Live);
+  }
+  return Live;
+}
+
+Error computePointerFixedArgActivity(
+    Function &F, MutableArrayRef<PointerFixedArgRecord> Records,
+    const DominatorTree &DT) {
+  SmallPtrSet<const CallInst *, 16> SafepointCalls;
+  for (Instruction &I : instructions(F)) {
+    auto *Call = dyn_cast<CallInst>(&I);
+    if (Call && !isa<GCStatepointInst>(Call) && !isLeafCall(*Call) &&
+        !Call->isMustTailCall())
+      SafepointCalls.insert(Call);
+  }
+
+  for (PointerFixedArgRecord &Record : Records) {
+    collectFixedArgContentAccesses(Record);
+    if (Record.ActivityUnclear)
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC cannot determine fixed argument content activity");
+
+    DenseMap<const BasicBlock *, SmallBitVector> LiveIn;
+    bool Changed;
+    do {
+      Changed = false;
+      for (BasicBlock &BB : llvm::reverse(F)) {
+        SmallBitVector LiveOut(Record.Leaves.size());
+        for (BasicBlock *Succ : successors(&BB))
+          if (auto It = LiveIn.find(Succ); It != LiveIn.end())
+            LiveOut |= It->second;
+        SmallBitVector NewLiveIn =
+            fixedArgContentsLiveInBlock(Record, BB, std::move(LiveOut));
+        auto It = LiveIn.find(&BB);
+        if (It == LiveIn.end() || NewLiveIn != It->second) {
+          LiveIn[&BB] = NewLiveIn;
+          Changed = true;
+        }
+      }
+    } while (Changed);
+
+    for (BasicBlock &BB : F) {
+      SmallBitVector Live(Record.Leaves.size());
+      for (BasicBlock *Succ : successors(&BB))
+        if (auto It = LiveIn.find(Succ); It != LiveIn.end())
+          Live |= It->second;
+      for (Instruction &I : llvm::reverse(BB)) {
+        auto *Call = dyn_cast<CallInst>(&I);
+        if (Call && SafepointCalls.contains(Call) &&
+            (Record.DeferResult || Live.any() ||
+             !DT.isReachableFromEntry(Call->getParent())))
+          Record.ActiveCalls.push_back(Call);
+        transferFixedArgContentLiveness(Record, I, Live);
+      }
+    }
+  }
+  return Error::success();
+}
+
+bool isPointerFixedArgActiveAt(const PointerFixedArgRecord &Record,
+                               const CallInst &Call) {
+  return llvm::is_contained(Record.ActiveCalls, &Call);
 }
 
 Error validateSafepoint(const SafepointRecord &Record) {
@@ -1689,10 +1949,10 @@ Error validateSafepoint(const SafepointRecord &Record) {
 
 void appendAllocaPtrMapDeoptOperands(
     IRBuilder<> &Builder, ArrayRef<const PointerAllocaRecord *> Allocas,
-    ArrayRef<const PointerByValRecord *> ByVals,
+    ArrayRef<const PointerFixedArgRecord *> FixedArgs,
     const SmallPtrSetImpl<Value *> &LiveContents,
     SmallVectorImpl<Value *> &Deopt) {
-  if (Allocas.empty() && ByVals.empty())
+  if (Allocas.empty() && FixedArgs.empty())
     return;
   // ProtocolLength covers BEGIN through END, but not the trailing duplicate
   // length.  The envelope itself therefore contributes BEGIN, length,
@@ -1700,15 +1960,15 @@ void appendAllocaPtrMapDeoptOperands(
   uint64_t ProtocolLength = 4;
   for (const PointerAllocaRecord *Alloca : Allocas)
     ProtocolLength += 11 + Alloca->BitmapWords.size();
-  for (const PointerByValRecord *ByVal : ByVals)
-    ProtocolLength += 11 + ByVal->BitmapWords.size();
+  for (const PointerFixedArgRecord *FixedArg : FixedArgs)
+    ProtocolLength += 11 + FixedArg->BitmapWords.size();
 
   auto AppendConstant = [&](uint64_t Value) {
     Deopt.push_back(ConstantInt::get(Builder.getInt64Ty(), Value));
   };
   AppendConstant(GoObj::AllocaPtrMapBeginMagic);
   AppendConstant(ProtocolLength);
-  AppendConstant(Allocas.size() + ByVals.size());
+  AppendConstant(Allocas.size() + FixedArgs.size());
   auto AppendRecord = [&](Value *Base, uint64_t ByteSize, uint64_t Alignment,
                           uint64_t BitCount, ArrayRef<uint64_t> BitmapWords) {
     AppendConstant(GoObj::AllocaPtrMapRecordTag);
@@ -1722,7 +1982,7 @@ void appendAllocaPtrMapDeoptOperands(
             0));
     // gc-live also carries direct frame bases needed only to rematerialize an
     // address after stack growth. Keep object-content liveness independent so
-    // GoObj never mistakes that relocate-only operand for a LocalsPointerMaps
+    // GoObj never mistakes that address-only operand for a LocalsPointerMaps
     // root.
     AppendConstant(LiveContents.contains(Base));
     AppendConstant(BitCount);
@@ -1735,9 +1995,9 @@ void appendAllocaPtrMapDeoptOperands(
     AppendRecord(Alloca->Alloca, Alloca->ByteSize, Alloca->Alignment,
                  Alloca->BitCount, Alloca->BitmapWords);
   }
-  for (const PointerByValRecord *ByVal : ByVals)
-    AppendRecord(ByVal->Base, ByVal->ByteSize, ByVal->Alignment,
-                 ByVal->BitCount, ByVal->BitmapWords);
+  for (const PointerFixedArgRecord *FixedArg : FixedArgs)
+    AppendRecord(FixedArg->Base, FixedArg->ByteSize, FixedArg->Alignment,
+                 FixedArg->BitCount, FixedArg->BitmapWords);
   AppendConstant(GoObj::AllocaPtrMapEndMagic);
   AppendConstant(ProtocolLength);
 }
@@ -1762,7 +2022,7 @@ void appendOpenDeferDeoptOperands(IRBuilder<> &Builder,
 
 Error rewriteCall(SafepointRecord &Record,
                   ArrayRef<const PointerAllocaRecord *> PointerAllocas,
-                  ArrayRef<const PointerByValRecord *> PointerByVals,
+                  ArrayRef<const PointerFixedArgRecord *> PointerFixedArgs,
                   const SmallPtrSetImpl<Value *> &LiveContents,
                   const std::optional<OpenDeferInfo> &OpenDefer) {
   CallInst *Call = Record.Call;
@@ -1780,7 +2040,7 @@ Error rewriteCall(SafepointRecord &Record,
   // Keep the open-defer envelope before the alloca ptrmap envelope. The latter
   // deliberately remains the final self-describing suffix for compatibility.
   appendOpenDeferDeoptOperands(Builder, OpenDefer, Deopt);
-  appendAllocaPtrMapDeoptOperands(Builder, PointerAllocas, PointerByVals,
+  appendAllocaPtrMapDeoptOperands(Builder, PointerAllocas, PointerFixedArgs,
                                   LiveContents, Deopt);
   Record.Statepoint = Builder.CreateGCStatepointCall(
       Record.ID, 0, Callee, CallArgs,
@@ -2060,8 +2320,8 @@ Error rewriteFunction(Function &F) {
   SmallVector<PointerAllocaRecord, 8> PointerAllocas;
   if (Error Err = collectPointerAllocas(F, OpenDefer, PointerAllocas))
     return Err;
-  SmallVector<PointerByValRecord, 4> PointerByVals;
-  if (Error Err = collectPointerByVals(F, PointerByVals))
+  SmallVector<PointerFixedArgRecord, 4> PointerFixedArgs;
+  if (Error Err = collectPointerFixedArgs(F, PointerFixedArgs))
     return Err;
   if (Error Err = scalarizeLivePointerAggregates(F))
     return Err;
@@ -2073,6 +2333,9 @@ Error rewriteFunction(Function &F) {
   canonicalizeForwardedFixedFrameIdentities(F);
   if (Error Err =
           canonicalizeDirectFixedFrameAddresses(F, DT, WholeLifetimeAllocas))
+    return Err;
+
+  if (Error Err = computePointerFixedArgActivity(F, PointerFixedArgs, DT))
     return Err;
 
   LivenessData Data = computeLiveness(F, LivenessKind::RelocatablePointers);
@@ -2143,21 +2406,27 @@ Error rewriteFunction(Function &F) {
       if (ContentsLive || Alloca.NeedsStackObject)
         AllocaRecords.push_back(&Alloca);
     }
-    SmallVector<const PointerByValRecord *, 4> ByValRecords;
-    for (const PointerByValRecord &ByVal : PointerByVals) {
-      // A typed byval parameter is a caller-initialized fixed Go argument
-      // object. Standard SSA liveness decides when its contents contribute to
-      // this call's ArgsPointerMaps. If its address is observable, carry the
-      // layout at every call so GoObj can also infer the function-level
-      // StackObject from an inactive contents record.
-      bool IsActive = Record.Live.contains(ByVal.Base);
+    SmallVector<const PointerFixedArgRecord *, 4> FixedArgRecords;
+    for (const PointerFixedArgRecord &FixedArg : PointerFixedArgs) {
+      // Byval inputs are live when their contents have a later memory use.
+      // Goret results additionally use every pointer slot at return, while
+      // stores kill the previous contents of the slots they overwrite. Keep
+      // that memory interval independent from address liveness so
+      // ArgsPointerMaps does not scan a future store destination or retain an
+      // overwritten result. As in native variable liveness, any live pointer
+      // slot activates the object's complete typed pointer layout; Go's
+      // zero-value initialization keeps the other pointer words scannable.
+      // Address-observable layouts still describe function-level StackObjects
+      // at every call.
+      bool IsActive = isPointerFixedArgActiveAt(FixedArg, *Record.Call);
       if (IsActive) {
-        LiveContents.insert(ByVal.Base);
+        Record.Live.insert(FixedArg.Base);
+        LiveContents.insert(FixedArg.Base);
       }
-      if (IsActive || ByVal.NeedsStackObject)
-        ByValRecords.push_back(&ByVal);
+      if (IsActive || FixedArg.NeedsStackObject)
+        FixedArgRecords.push_back(&FixedArg);
     }
-    if (Error Err = rewriteCall(Record, AllocaRecords, ByValRecords,
+    if (Error Err = rewriteCall(Record, AllocaRecords, FixedArgRecords,
                                 LiveContents, OpenDefer))
       return Err;
   }

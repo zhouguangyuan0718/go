@@ -55,8 +55,10 @@ are likewise rebuilt from that alloca at each concrete use. Different allocas,
 non-zero offsets, and every other merged pointer remain ordinary scalar roots.
 Typed Go `byval` and `goret` parameters follow the same fixed-frame-address
 rule: their raw argument is the storage identity, while SelectionDAG selects
-its canonical argument FrameIndex at each use. Pointer values loaded from any
-of these homes remain ordinary tracked roots.
+its canonical argument FrameIndex at each use. Their pointer-containing object
+layouts independently contribute to `ArgsPointerMaps` only while the contents
+are live. Pointer values loaded from any of these homes remain ordinary tracked
+roots.
 
 The current SSA value and CFG rewrite support matrix is:
 
@@ -64,7 +66,7 @@ The current SSA value and CFG rewrite support matrix is:
 | --- | --- | --- |
 | Pointer arguments | AArch64 GoObj qualified; SelectionDAG home reuse also tested on X86 | Values live after a call use caller statepoints; exact stack inputs stay in their fixed ABI homes, while register inputs and transformed values use normal statepoint spills. Call-only arguments are described by the callee's type-derived entry map. |
 | Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. It deliberately has no `gc.relocate`. First-class GEP/cast uses are rebuilt immediately at the use; direct memory uses stay on the FrameIndex and never enter relocation SSA. Pointers loaded from memory remain tracked. |
-| Typed `byval`/`goret` addresses | Supported | The raw parameter is a fixed ABI-frame identity and may appear directly in `gc-live`, but deliberately has no `gc.relocate`. First-class uses are rebuilt use-locally and SelectionDAG selects the canonical argument FrameIndex before consulting an entry-block export vreg. Pointer contents retain their independent argument/object maps. |
+| Typed `byval`/`goret` addresses | Supported | The raw parameter is a fixed ABI-frame identity and may appear directly in `gc-live`, but deliberately has no `gc.relocate`. First-class uses are rebuilt use-locally and SelectionDAG selects the canonical argument FrameIndex before consulting an entry-block export vreg. A separate object-content interval expands the typed layout into `ArgsPointerMaps`: byval is driven by later memory uses; goret also has an implicit use at return, while actual stores kill the overwritten input contents. |
 | `select`, GEP, and pointer casts | Supported | Fixed-frame GEP/no-op cast chains stay as direct FrameIndex uses or are rebuilt immediately at first-class uses. Exact same-frame forwarding identities also collapse to use-local zero-offset recipes; mixed bases, non-zero-offset merges, and non-stack pointers remain ordinary scalar roots. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
@@ -142,7 +144,7 @@ the producing call and before their result store. `OpVarLive` remains an
 source-lifetime initialization; the frontend marker helper adds no pointer
 clears, and neither side emits `llvm.lifetime.end`.
 
-For every surviving fixed object, statepoint rewriting enumerates pointer
+For every surviving fixed alloca, statepoint rewriting enumerates pointer
 offsets and performs a backward, path-sensitive live-out dataflow over its
 optimized address-use graph. A lifetime start is a kill and a real load, store,
 call use, comparison, `llvm.fake.use`, or other terminal address use is a gen.
@@ -305,7 +307,18 @@ addresses are rebuilt at their concrete use. SelectionDAG then resolves every
 raw base use from the canonical argument FrameIndex before consulting an
 entry-block export vreg, so a statepoint cannot leave a cached pre-growth stack
 address live into its continuation. This rule is gated by the Go calling
-conventions and does not change ordinary ABI lowering.
+conventions and does not change ordinary ABI lowering. Pointer-containing
+fixed arguments also carry the same self-describing deopt layout used for
+allocas. Backward memory liveness is computed over the optimized loads, stores,
+memory intrinsics, and escaping address uses. Goret pointer slots are implicit
+uses at return; a store kills the previous contents of every pointer slot it
+fully overwrites, so calls before a later result store do not acquire those
+result bits. If any pointer slot remains live, the object's complete typed
+pointer layout is active, matching Go's variable-granularity maps and zero-value
+invariant. Results reachable through defer recovery are conservatively live at
+every call. GoObj classifies these direct fixed ranges as argument/result
+storage and expands active layouts into `ArgsPointerMaps`; the direct address
+itself is never a bitmap pointer word.
 
 Ordinary pointer values loaded from stack inputs use the normal statepoint
 path. SelectionDAG formal
