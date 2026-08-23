@@ -101,6 +101,12 @@ if(BUILD_TESTING)
     )
   endfunction()
 
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.MustTailTransfer
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/musttail-transfer.ll"
+    CHECK
+  )
+
   function(goallc_add_failure_filecheck_test NAME INPUT CHECK_PREFIXES)
     goallc_add_filecheck_test(
       "${NAME}" "${INPUT}" "${CHECK_PREFIXES}"

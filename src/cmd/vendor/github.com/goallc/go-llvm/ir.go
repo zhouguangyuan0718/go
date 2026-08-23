@@ -77,6 +77,7 @@ type (
 	Linkage             C.LLVMLinkage
 	Visibility          C.LLVMVisibility
 	CallConv            C.LLVMCallConv
+	TailCallKind        C.LLVMTailCallKind
 	ComdatSelectionKind C.LLVMComdatSelectionKind
 	IntPredicate        C.LLVMIntPredicate
 	FloatPredicate      C.LLVMRealPredicate
@@ -1307,6 +1308,21 @@ func (v Value) CalledFunctionType() (t Type) {
 // Operations on call instructions (only)
 func (v Value) IsTailCall() bool    { return C.LLVMIsTailCall(v.C) != 0 }
 func (v Value) SetTailCall(is bool) { C.LLVMSetTailCall(v.C, boolToLLVMBool(is)) }
+
+const (
+	TailCallKindNone     TailCallKind = C.LLVMTailCallKindNone
+	TailCallKindTail     TailCallKind = C.LLVMTailCallKindTail
+	TailCallKindMustTail TailCallKind = C.LLVMTailCallKindMustTail
+	TailCallKindNoTail   TailCallKind = C.LLVMTailCallKindNoTail
+)
+
+func (v Value) TailCallKind() TailCallKind {
+	return TailCallKind(C.LLVMGetTailCallKind(v.C))
+}
+
+func (v Value) SetTailCallKind(kind TailCallKind) {
+	C.LLVMSetTailCallKind(v.C, C.LLVMTailCallKind(kind))
+}
 
 // Operations on phi nodes
 func (v Value) AddIncoming(vals []Value, blocks []BasicBlock) {

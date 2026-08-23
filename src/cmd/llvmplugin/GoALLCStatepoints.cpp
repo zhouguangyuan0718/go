@@ -615,7 +615,8 @@ Error scalarizeLivePointerAggregates(Function &F) {
 
   for (Instruction &I : instructions(F)) {
     auto *Call = dyn_cast<CallBase>(&I);
-    if (!Call || isa<GCStatepointInst>(Call) || isLeafCall(*Call))
+    if (!Call || isa<GCStatepointInst>(Call) || isLeafCall(*Call) ||
+        Call->isMustTailCall())
       continue;
     auto *OrdinaryCall = dyn_cast<CallInst>(Call);
     if (!OrdinaryCall)
@@ -1173,7 +1174,8 @@ bool hasInitializedPointerSlotsBeforeSafepoint(
                                     DL);
       continue;
     }
-    if (auto *Call = dyn_cast<CallBase>(I); Call && !isLeafCall(*Call))
+    if (auto *Call = dyn_cast<CallBase>(I);
+        Call && !Call->isMustTailCall() && !isLeafCall(*Call))
       return Initialized.count() == Record.Leaves.size();
   }
   return Initialized.count() == Record.Leaves.size();
@@ -1278,7 +1280,8 @@ Error collectPointerAllocas(
     SmallVectorImpl<PointerAllocaRecord> &PointerAllocas) {
   bool HasSafepoint = llvm::any_of(instructions(F), [](Instruction &I) {
     auto *Call = dyn_cast<CallBase>(&I);
-    return Call && !isa<GCStatepointInst>(Call) && !isLeafCall(*Call);
+    return Call && !Call->isMustTailCall() && !isa<GCStatepointInst>(Call) &&
+           !isLeafCall(*Call);
   });
   if (!HasSafepoint)
     return Error::success();
@@ -1857,7 +1860,8 @@ Error rewriteFunction(Function &F) {
       auto *Call = dyn_cast<CallBase>(&I);
       if (!Call)
         continue;
-      if (isa<GCStatepointInst>(Call) || !isLeafCall(*Call))
+      if (isa<GCStatepointInst>(Call) ||
+          (!Call->isMustTailCall() && !isLeafCall(*Call)))
         return createStringError(
             std::errc::invalid_argument,
             "GoALLC gc-leaf-function contains a non-leaf call");
@@ -1897,7 +1901,8 @@ Error rewriteFunction(Function &F) {
 
   for (Instruction &I : instructions(F)) {
     auto *Call = dyn_cast<CallBase>(&I);
-    if (!Call || isa<GCStatepointInst>(Call) || isLeafCall(*Call))
+    if (!Call || isa<GCStatepointInst>(Call) || isLeafCall(*Call) ||
+        Call->isMustTailCall())
       continue;
     auto *OrdinaryCall = dyn_cast<CallInst>(Call);
     if (!OrdinaryCall)
