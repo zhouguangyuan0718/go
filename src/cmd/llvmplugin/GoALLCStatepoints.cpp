@@ -207,6 +207,138 @@ AllocaInst *rematerializableAllocaBase(Value *V) {
       rematerializableAllocaBase(static_cast<const Value *>(V)));
 }
 
+// Return the one static alloca denoted by Root when every path through its
+// forwarding graph is exactly that alloca's address. This deliberately
+// excludes non-zero address arithmetic: a PHI of different offsets is an
+// ordinary pointer value, even when every incoming address belongs to the same
+// frame object.
+const AllocaInst *exactAllocaIdentityBase(const Value *Root) {
+  if (!Root->getType()->isPointerTy())
+    return nullptr;
+
+  struct IdentityQuery {
+    const Value *V;
+    SmallVector<unsigned, 4> Indices;
+  };
+
+  SmallVector<IdentityQuery, 8> Worklist;
+  Worklist.push_back({Root, {}});
+  SmallVector<IdentityQuery, 8> Visited;
+  const AllocaInst *Base = nullptr;
+
+  while (!Worklist.empty()) {
+    IdentityQuery Query = Worklist.pop_back_val();
+    if (llvm::any_of(Visited, [&](const IdentityQuery &Seen) {
+          return Seen.V == Query.V && Seen.Indices == Query.Indices;
+        }))
+      continue;
+    Visited.push_back(Query);
+
+    auto Push = [&](const Value *V, ArrayRef<unsigned> Indices) {
+      IdentityQuery Next{V, {}};
+      Next.Indices.append(Indices.begin(), Indices.end());
+      Worklist.push_back(std::move(Next));
+    };
+
+    const Value *V = Query.V;
+    if (!Query.Indices.empty()) {
+      // Carry an aggregate leaf path through SSA forwarding before asking
+      // FindInsertedValue to resolve an insertvalue chain. This is the form
+      // produced when aggregate scalarization extracts a pointer leaf from an
+      // aggregate PHI/select that is live across a statepoint.
+      if (const auto *Phi = dyn_cast<PHINode>(V)) {
+        for (const Value *Incoming : Phi->incoming_values())
+          Push(Incoming, Query.Indices);
+        continue;
+      }
+      if (const auto *Select = dyn_cast<SelectInst>(V)) {
+        Push(Select->getTrueValue(), Query.Indices);
+        Push(Select->getFalseValue(), Query.Indices);
+        continue;
+      }
+      if (const auto *Freeze = dyn_cast<FreezeInst>(V)) {
+        Push(Freeze->getOperand(0), Query.Indices);
+        continue;
+      }
+      if (const auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+        SmallVector<unsigned, 4> Combined(Extract->getIndices());
+        Combined.append(Query.Indices.begin(), Query.Indices.end());
+        Push(Extract->getAggregateOperand(), Combined);
+        continue;
+      }
+      if (const auto *Insert = dyn_cast<InsertValueInst>(V)) {
+        ArrayRef<unsigned> InsertIndices = Insert->getIndices();
+        ArrayRef<unsigned> QueryIndices = Query.Indices;
+        if (QueryIndices.size() >= InsertIndices.size() &&
+            llvm::equal(InsertIndices,
+                        QueryIndices.take_front(InsertIndices.size()))) {
+          // The requested leaf belongs to the inserted value. Continue with
+          // the suffix relative to that value, including an empty suffix when
+          // the inserted value is itself the pointer leaf.
+          Push(Insert->getInsertedValueOperand(),
+               QueryIndices.drop_front(InsertIndices.size()));
+        } else {
+          // This insertion updates a disjoint aggregate path. The requested
+          // leaf still comes from the input aggregate.
+          Push(Insert->getAggregateOperand(), QueryIndices);
+        }
+        continue;
+      }
+      if (Value *Inserted =
+              FindInsertedValue(const_cast<Value *>(V), Query.Indices)) {
+        Push(Inserted, {});
+        continue;
+      }
+      return nullptr;
+    }
+
+    if (const auto *Phi = dyn_cast<PHINode>(V)) {
+      for (const Value *Incoming : Phi->incoming_values())
+        Push(Incoming, {});
+      continue;
+    }
+    if (const auto *Select = dyn_cast<SelectInst>(V)) {
+      Push(Select->getTrueValue(), {});
+      Push(Select->getFalseValue(), {});
+      continue;
+    }
+    if (const auto *Freeze = dyn_cast<FreezeInst>(V)) {
+      Push(Freeze->getOperand(0), {});
+      continue;
+    }
+    if (const auto *Extract = dyn_cast<ExtractValueInst>(V)) {
+      Push(Extract->getAggregateOperand(), Extract->getIndices());
+      continue;
+    }
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(V);
+        GEP && GEP->hasAllZeroIndices()) {
+      Push(GEP->getPointerOperand(), {});
+      continue;
+    }
+    if (const auto *Cast = dyn_cast<CastInst>(V);
+        Cast && Cast->isNoopCast(Cast->getDataLayout())) {
+      Push(Cast->getOperand(0), {});
+      continue;
+    }
+
+    const auto *Alloca = dyn_cast<AllocaInst>(V);
+    if (!Alloca || !Alloca->isStaticAlloca())
+      return nullptr;
+    if (Base && Base != Alloca)
+      return nullptr;
+    Base = Alloca;
+  }
+
+  // Reject an unanchored forwarding cycle and identities whose address space
+  // cannot be reproduced by the use-local zero-offset alloca recipe.
+  return Base && Root->getType() == Base->getType() ? Base : nullptr;
+}
+
+AllocaInst *exactAllocaIdentityBase(Value *V) {
+  return const_cast<AllocaInst *>(
+      exactAllocaIdentityBase(static_cast<const Value *>(V)));
+}
+
 bool isStaticAllocaAddress(const Value *V) {
   if (!V->getType()->isPointerTy())
     return false;
@@ -302,6 +434,7 @@ Error canonicalizeDirectAllocaAddresses(
     if (isStaticAllocaAddress(&I))
       Addresses.push_back(&I);
 
+  SmallVector<WeakTrackingVH, 32> DeadAddresses;
   for (Value *Address : Addresses) {
     AllocaInst *Alloca = rematerializableAllocaBase(Address);
     assert(Alloca && "canonical alloca address has no static base");
@@ -361,8 +494,42 @@ Error canonicalizeDirectAllocaAddresses(
       }
       U->set(UseAddress);
     }
+    DeadAddresses.push_back(Address);
   }
+
+  for (WeakTrackingVH &Handle : llvm::reverse(DeadAddresses))
+    if (auto *I = dyn_cast_or_null<Instruction>(Handle))
+      RecursivelyDeleteTriviallyDeadInstructions(I);
   return Error::success();
+}
+
+void canonicalizeForwardedAllocaIdentities(Function &F) {
+  SmallVector<std::pair<Value *, AllocaInst *>, 16> Identities;
+  for (Instruction &I : instructions(F)) {
+    if (!I.getType()->isPointerTy() || isStaticAllocaAddress(&I))
+      continue;
+    if (AllocaInst *Base = exactAllocaIdentityBase(&I))
+      Identities.push_back({&I, Base});
+  }
+
+  SmallVector<WeakTrackingVH, 16> DeadIdentities;
+  for (auto [Identity, Base] : Identities) {
+    // The identity has the alloca's exact pointer type and every path denotes
+    // the same address, so collapse it to the storage identity. The following
+    // direct-address pass rebuilds raw and derived recipes at concrete uses.
+    Identity->replaceAllUsesWith(Base);
+    DeadIdentities.push_back(Identity);
+  }
+
+  for (WeakTrackingVH &Handle : llvm::reverse(DeadIdentities)) {
+    auto *I = dyn_cast_or_null<Instruction>(Handle);
+    if (!I)
+      continue;
+    if (auto *Phi = dyn_cast<PHINode>(I))
+      RecursivelyDeleteDeadPHINode(Phi);
+    else
+      RecursivelyDeleteTriviallyDeadInstructions(I);
+  }
 }
 
 bool isTrackedValue(const Value *V, LivenessKind Kind) {
@@ -582,15 +749,17 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
   SmallVector<Value *, 8> Values;
   Values.reserve(Leaves.size());
   for (const AggregateLeaf &Leaf : Leaves) {
-    // Use FindInsertedValue only to recognize leaves that do not contain a
-    // defined value. Reusing an ordinary inserted SSA value would make the
-    // relocation repair for this aggregate rewrite every other use of that
-    // value as well; distinct aggregate leaves need distinct SSA identities.
-    // Conversely, materializing an extractvalue from undef or poison would
-    // invent an ordinary pointer root whose SelectionDAG spill may be removed.
+    // Reuse alloca-derived inserted values so the post-scalarization fixed
+    // frame canonicalization can rebuild their complete address recipe at
+    // each concrete aggregate use. Other defined leaves retain distinct SSA
+    // identities because their ordinary relocation repair must not rewrite
+    // unrelated uses of the inserted value. Materializing an extractvalue
+    // from undef or poison would invent an ordinary pointer root whose
+    // SelectionDAG spill may be removed.
     Value *Inserted = FindInsertedValue(&Aggregate, Leaf.Indices);
     Value *LeafValue =
-        Inserted && isa<UndefValue, PoisonValue>(Inserted)
+        Inserted && (isa<UndefValue, PoisonValue>(Inserted) ||
+                     isStaticAllocaAddress(Inserted))
             ? Inserted
             : Builder.CreateExtractValue(&Aggregate, Leaf.Indices,
                                          leafName(Aggregate, Leaf.Indices));
@@ -1613,6 +1782,14 @@ Error rewriteCall(SafepointRecord &Record,
   }
 
   for (auto [Index, V] : llvm::enumerate(GCLive)) {
+    // A static alloca in gc-live describes the original frame object to the
+    // statepoint stack map. Its address is not a movable heap pointer and must
+    // not acquire a gc.relocate SSA identity. SelectionDAG records the alloca's
+    // FrameIndex directly; GoObj combines that location with the independent
+    // deopt pointer-map record for the object's live contents.
+    if (const auto *Alloca = dyn_cast<AllocaInst>(V);
+        Alloca && Alloca->isStaticAlloca())
+      continue;
     CallInst *Relocate = Builder.CreateGCRelocate(
         Record.Statepoint, Index, Index, V->getType(),
         V->hasName() ? V->getName() + ".relocated" : "");
@@ -1878,9 +2055,6 @@ Error rewriteFunction(Function &F) {
 
   DominatorTree DT(F);
   SmallPtrSet<AllocaInst *, 8> WholeLifetimeAllocas;
-  if (Error Err =
-          canonicalizeDirectAllocaAddresses(F, DT, WholeLifetimeAllocas))
-    return Err;
   Expected<std::optional<OpenDeferInfo>> OpenDeferOrErr =
       collectOpenDeferInfo(F);
   if (!OpenDeferOrErr)
@@ -1898,6 +2072,14 @@ Error rewriteFunction(Function &F) {
   if (Error Err = collectPointerByVals(F, PointerByVals))
     return Err;
   if (Error Err = scalarizeLivePointerAggregates(F))
+    return Err;
+  // Scalarization can expose forwarding identities and nested GEP/cast
+  // recipes. First collapse each exact same-allocation identity to the raw
+  // alloca, then canonicalize every direct fixed-frame recipe exactly once.
+  // This also rebuilds addresses derived from a collapsed PHI/select.
+  canonicalizeForwardedAllocaIdentities(F);
+  if (Error Err =
+          canonicalizeDirectAllocaAddresses(F, DT, WholeLifetimeAllocas))
     return Err;
 
   LivenessData Data = computeLiveness(F, LivenessKind::RelocatablePointers);
@@ -1923,6 +2105,11 @@ Error rewriteFunction(Function &F) {
          liveAtCall(*OrdinaryCall, DerivedData,
                     LivenessKind::DerivedPointers)});
   }
+  for (const SafepointRecord &Record : Records)
+    if (!Record.AllocaAddresses.empty())
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC failed to rematerialize a fixed alloca address at its use");
   for (SafepointRecord &Record : Records)
     for (Value *Address : Record.DerivedPointers) {
       // A hoisted GEP from null can be a small non-Go pointer. Keep only its
@@ -1935,37 +2122,6 @@ Error rewriteFunction(Function &F) {
       return Err;
   if (Error Err = computePointerAllocaActivity(F, PointerAllocas, Records, DT))
     return Err;
-  DenseMap<AllocaInst *, const PointerAllocaRecord *> PointerAllocaRecords;
-  for (const PointerAllocaRecord &Alloca : PointerAllocas)
-    PointerAllocaRecords[Alloca.Alloca] = &Alloca;
-
-  for (SafepointRecord &Record : Records) {
-    SmallVector<Value *, 8> InactiveAddresses;
-    for (Value *Address : Record.AllocaAddresses) {
-      AllocaInst *Base = rematerializableAllocaBase(Address);
-      bool IsActive = true;
-      if (PointerAllocaRecords.contains(Base)) {
-        // Record.AllocaAddresses is already the standard SSA live-out set for
-        // this call. Do not replace it with the storage activity approximation.
-      } else {
-        SmallVector<IntrinsicInst *, 4> LifetimeStarts;
-        for (User *U : Base->users())
-          if (auto *II = dyn_cast<IntrinsicInst>(U);
-              II && II->getIntrinsicID() == Intrinsic::lifetime_start)
-            LifetimeStarts.push_back(II);
-        if (!LifetimeStarts.empty())
-          IsActive = llvm::any_of(LifetimeStarts, [&](IntrinsicInst *Start) {
-            return DT.dominates(Start, Record.Call);
-          });
-      }
-      if (IsActive)
-        Record.Live.insert(Base);
-      else
-        InactiveAddresses.push_back(Address);
-    }
-    for (Value *Address : InactiveAddresses)
-      Record.AllocaAddresses.remove(Address);
-  }
   protectStackObjectsFromColoring(PointerAllocas);
   initializePointerAllocasForGC(PointerAllocas, WholeLifetimeAllocas);
   if (Error Err =

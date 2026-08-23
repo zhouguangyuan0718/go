@@ -820,6 +820,30 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"
     IR
   )
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.AllocaNoRelocateRewrite
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-no-relocate.ll"
+    IR
+  )
+  foreach(GOALLC_ALLOCA_REMAT_TARGET IN ITEMS X86 AArch64)
+    if(GOALLC_ALLOCA_REMAT_TARGET STREQUAL "X86")
+      set(GOALLC_ALLOCA_REMAT_TRIPLE "x86_64-unknown-linux-goobj")
+    else()
+      set(GOALLC_ALLOCA_REMAT_TRIPLE "aarch64-unknown-linux-goobj")
+    endif()
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.${GOALLC_ALLOCA_REMAT_TARGET}AllocaNoRelocateMIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-no-relocate.ll"
+      MIR
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-mtriple=${GOALLC_ALLOCA_REMAT_TRIPLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -stop-after=finalize-isel
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-no-relocate.ll"
+    )
+  endforeach()
   goallc_add_filecheck_test(
     GoALLCStatepoints.FixedFrameBaseMIR
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/fixed-frame-base.ll"

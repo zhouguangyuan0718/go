@@ -4,14 +4,14 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: br label %entry.statepoint.cont
 ; IR: entry.statepoint.cont:
-; IR: %slot.relocated{{[0-9]*}} = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: %first.remat = getelementptr inbounds i8, ptr %slot.relocated{{[0-9]*}}, i64 16
+; IR-NOT: %slot.relocated
+; IR: %first.remat = getelementptr inbounds i8, ptr %slot, i64 16
 ; IR: store <2 x ptr> %first.error, ptr %first.remat
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: br label %entry.statepoint.cont.statepoint.cont
 ; IR: entry.statepoint.cont.statepoint.cont:
-; IR: %slot.relocated{{[0-9]*}} = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: %second.remat = getelementptr inbounds i8, ptr %slot.relocated{{[0-9]*}}, i64 48
+; IR-NOT: %slot.relocated
+; IR: %second.remat = getelementptr inbounds i8, ptr %slot, i64 48
 ; IR: store <2 x ptr> %second.error, ptr %second.remat
 ; IR-NOT: %first.relocated.merge
 ; IR-NOT: %second.relocated.merge
