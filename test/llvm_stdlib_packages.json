@@ -112,7 +112,7 @@
       "path/filepath": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "regexp": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "regexp/syntax": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
-      "runtime": "qualified with the runtime implementation and external test harness compiled through LLVM O2; tests requiring precise LLVM GC layouts, inline or argument traceback metadata, async safe points, or signal-injected sigpanic are explicitly skipped",
+      "runtime": "qualified with the runtime implementation and external test harness compiled through LLVM O2, including asynchronous preemption and write-barrier unsafe-point validation; tests requiring precise LLVM GC layouts, inline or argument traceback metadata, debugger-call injection, or signal-injected sigpanic remain explicitly skipped",
       "runtime/debug": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "runtime/metrics": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "slices": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",

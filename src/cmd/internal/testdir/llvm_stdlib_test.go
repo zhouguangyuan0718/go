@@ -11,6 +11,7 @@ import (
 	"internal/testenv"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -25,7 +26,7 @@ const llvmStdlibPolicyEnv = "GOALLC_RUN_LLVM_STDLIB"
 // qualification boundary so the upstream tests continue to specify native Go
 // behavior unchanged. Subtest patterns retain the passing panicwrap, panic,
 // and unsafe-point rejection coverage beside the excluded cases.
-const llvmRuntimeSkip = `^(TestCallersNilPointerPanic|TestDebugCall|TestDebugCallGC|TestDebugCallGrowStack|TestDebugCallLarge|TestDebugCallPanic|TestGCInfo|TestTracebackArgs|TestTracebackElision|TestUnsafePoint)$|^TestStackWrapperStackPanic$/^sigpanic$|^TestTracebackSystem$/^trap$`
+const llvmRuntimeSkip = `^(TestCallersNilPointerPanic|TestDebugCall|TestDebugCallGC|TestDebugCallGrowStack|TestDebugCallLarge|TestDebugCallPanic|TestGCInfo|TestTracebackArgs|TestTracebackElision)$|^TestStackWrapperStackPanic$/^sigpanic$|^TestTracebackSystem$/^trap$`
 
 // The amd64 test additionally requires the native compiler's INT3 function
 // alignment filler. LLVM deliberately emits NOP padding instead.
@@ -277,6 +278,20 @@ func TestEffectiveLLVMStdlibTestSet(t *testing.T) {
 	}
 }
 
+func TestLLVMRuntimeAsyncPreemptionQualification(t *testing.T) {
+	skip := regexp.MustCompile(llvmRuntimeSkip + llvmRuntimeAMD64Skip)
+	for _, name := range []string{
+		"TestPreemption",
+		"TestPreemptionGC",
+		"TestAsyncPreempt",
+		"TestUnsafePoint",
+	} {
+		if skip.MatchString(name) {
+			t.Errorf("qualified LLVM runtime test %q is skipped", name)
+		}
+	}
+}
+
 func TestLLVMStdlib(t *testing.T) {
 	if os.Getenv(llvmStdlibPolicyEnv) != "1" {
 		t.Skipf("set %s=1 to run the LLVM standard library package policy", llvmStdlibPolicyEnv)
@@ -367,8 +382,8 @@ func TestLLVMStdlib(t *testing.T) {
 			}
 			if name == "runtime" {
 				// LLVM GoObj does not yet emit complete
-				// per-function DWARF, GC, traceback, async-safe-point, and
-				// signal metadata.
+				// per-function DWARF, GC, and traceback metadata, or support
+				// the remaining debugger-call and signal tests.
 				runtimeSkip := llvmRuntimeSkip
 				if runtime.GOARCH == "amd64" {
 					runtimeSkip += llvmRuntimeAMD64Skip
