@@ -8,6 +8,7 @@ package ssa
 
 import (
 	"bytes"
+	"cmd/compile/internal/abi"
 	"os"
 	"strings"
 	"testing"
@@ -372,6 +373,44 @@ func TestLLVMCurrentGRegister(t *testing.T) {
 			register, ok := llvmCurrentGRegister(test.arch, test.abi)
 			if register != test.register || ok != test.ok {
 				t.Fatalf("llvmCurrentGRegister(%q, %v) = (%q, %v), want (%q, %v)", test.arch, test.abi, register, ok, test.register, test.ok)
+			}
+		})
+	}
+}
+
+func TestLLVMCanEmitMustTail(t *testing.T) {
+	internalConfig := abi.NewABIConfig(16, 16, 0, uint8(obj.ABIInternal))
+	abi0Config := abi.NewABIConfig(0, 0, 0, uint8(obj.ABI0))
+	aux := func(config *abi.ABIConfig, fn *obj.LSym, params, results []*types.Type) *AuxCall {
+		return StaticAuxCall(fn, config.ABIAnalyzeTypes(params, results))
+	}
+	internalZero := aux(internalConfig, &obj.LSym{}, nil, nil)
+	abi0Zero := aux(abi0Config, &obj.LSym{}, nil, nil)
+	oneArg := aux(internalConfig, &obj.LSym{}, []*types.Type{types.Types[types.TINT]}, nil)
+	oneResult := aux(internalConfig, &obj.LSym{}, nil, []*types.Type{types.Types[types.TINT]})
+
+	context := &LLVMFuncContext{F: &Func{OwnAux: internalZero}}
+	for _, test := range []struct {
+		name string
+		call *Value
+		aux  *AuxCall
+		own  *AuxCall
+		want bool
+	}{
+		{"same ABI", &Value{Op: OpTailLECall}, internalZero, internalZero, true},
+		{"ABI0 to internal", &Value{Op: OpTailLECall}, internalZero, abi0Zero, true},
+		{"internal to ABI0", &Value{Op: OpTailLECall}, abi0Zero, internalZero, false},
+		{"non-tail call", &Value{Op: OpStaticLECall}, internalZero, internalZero, false},
+		{"indirect target", &Value{Op: OpTailLECall}, aux(internalConfig, nil, nil, nil), internalZero, false},
+		{"callee argument", &Value{Op: OpTailLECall}, oneArg, internalZero, false},
+		{"callee result", &Value{Op: OpTailLECall}, oneResult, internalZero, false},
+		{"caller argument", &Value{Op: OpTailLECall}, internalZero, oneArg, false},
+		{"caller result", &Value{Op: OpTailLECall}, internalZero, oneResult, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			context.F.OwnAux = test.own
+			if got := context.llvmCanEmitMustTail(test.call, test.aux); got != test.want {
+				t.Fatalf("llvmCanEmitMustTail() = %v, want %v", got, test.want)
 			}
 		})
 	}
