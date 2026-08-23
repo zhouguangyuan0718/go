@@ -50,6 +50,7 @@ constexpr StringLiteral GoOpenDeferBitsMD = "goallc.open_defer_bits";
 constexpr StringLiteral GoOpenDeferSlotsMD = "goallc.open_defer_slots";
 constexpr StringLiteral GoObjMarkerRelocMD = "goobj.marker_reloc";
 constexpr StringLiteral StackColoringNoMergeMD = "llvm.stackcoloring.no_merge";
+constexpr unsigned MaxFixedArgOffsetAlternatives = 32;
 
 // This strategy exists for statepoint verification and lowering. GoALLC owns
 // statepoint insertion, so UseRS4GC deliberately remains false.
@@ -1651,9 +1652,92 @@ SmallBitVector &fixedArgAccessMask(
 }
 
 void addAllFixedArgSlots(DenseMap<const Instruction *, SmallBitVector> &Masks,
-                         Instruction &I,
-                         const PointerFixedArgRecord &Record) {
+                         Instruction &I, const PointerFixedArgRecord &Record) {
   fixedArgAccessMask(Masks, I, Record.Leaves.size()).set();
+}
+
+bool collectFixedArgIntegerAlternatives(Value *Root, unsigned BitWidth,
+                                        SmallVectorImpl<APInt> &Alternatives) {
+  SmallVector<Value *, 8> Worklist{Root};
+  SmallPtrSet<Value *, 8> Seen;
+  while (!Worklist.empty()) {
+    Value *V = Worklist.pop_back_val();
+    if (!Seen.insert(V).second)
+      continue;
+    if (auto *Constant = dyn_cast<ConstantInt>(V)) {
+      APInt Value = Constant->getValue().sextOrTrunc(BitWidth);
+      if (!llvm::is_contained(Alternatives, Value)) {
+        if (Alternatives.size() == MaxFixedArgOffsetAlternatives)
+          return false;
+        Alternatives.push_back(std::move(Value));
+      }
+      continue;
+    }
+    if (auto *Phi = dyn_cast<PHINode>(V)) {
+      Worklist.append(Phi->incoming_values().begin(),
+                      Phi->incoming_values().end());
+      continue;
+    }
+    if (auto *Select = dyn_cast<SelectInst>(V)) {
+      Worklist.push_back(Select->getTrueValue());
+      Worklist.push_back(Select->getFalseValue());
+      continue;
+    }
+    if (auto *Freeze = dyn_cast<FreezeInst>(V)) {
+      Worklist.push_back(Freeze->getOperand(0));
+      continue;
+    }
+    return false;
+  }
+  return !Alternatives.empty();
+}
+
+std::optional<SmallVector<APInt, 8>>
+collectFixedArgAddressOffsets(Value *Address, Value *ExpectedBase,
+                              const DataLayout &DL, unsigned BitWidth) {
+  if (Address == ExpectedBase)
+    return SmallVector<APInt, 8>{APInt(BitWidth, 0)};
+
+  if (auto *Cast = dyn_cast<CastInst>(Address); Cast && Cast->isNoopCast(DL))
+    return collectFixedArgAddressOffsets(Cast->getOperand(0), ExpectedBase, DL,
+                                         BitWidth);
+
+  auto *GEP = dyn_cast<GetElementPtrInst>(Address);
+  if (!GEP)
+    return std::nullopt;
+  if (DL.getIndexSizeInBits(GEP->getPointerAddressSpace()) != BitWidth)
+    return std::nullopt;
+  std::optional<SmallVector<APInt, 8>> BaseOffsets =
+      collectFixedArgAddressOffsets(GEP->getPointerOperand(), ExpectedBase, DL,
+                                    BitWidth);
+  if (!BaseOffsets)
+    return std::nullopt;
+
+  SmallMapVector<Value *, APInt, 4> VariableOffsets;
+  APInt ConstantOffset(BitWidth, 0);
+  if (!GEP->collectOffset(DL, BitWidth, VariableOffsets, ConstantOffset))
+    return std::nullopt;
+
+  SmallVector<APInt, 8> Offsets;
+  for (const APInt &BaseOffset : *BaseOffsets)
+    Offsets.push_back(BaseOffset + ConstantOffset);
+  for (const auto &[Variable, Multiplier] : VariableOffsets) {
+    SmallVector<APInt, 8> Values;
+    if (!collectFixedArgIntegerAlternatives(Variable, BitWidth, Values))
+      return std::nullopt;
+    if (Offsets.size() > MaxFixedArgOffsetAlternatives / Values.size())
+      return std::nullopt;
+    SmallVector<APInt, 8> Combined;
+    for (const APInt &Offset : Offsets) {
+      for (const APInt &Value : Values) {
+        APInt Candidate = Offset + Value * Multiplier;
+        if (!llvm::is_contained(Combined, Candidate))
+          Combined.push_back(std::move(Candidate));
+      }
+    }
+    Offsets = std::move(Combined);
+  }
+  return Offsets;
 }
 
 void addFixedArgMemorySlots(
@@ -1661,35 +1745,61 @@ void addFixedArgMemorySlots(
     Value *Address, uint64_t AccessSize, bool IsDefinition,
     PointerFixedArgRecord &Record) {
   const DataLayout &DL = I.getDataLayout();
-  int64_t SignedOffset = 0;
-  Value *Base = GetPointerBaseWithConstantOffset(Address, SignedOffset, DL);
-  if (Base != Record.Base || SignedOffset < 0) {
-    Record.ActivityUnclear = true;
-    return;
-  }
-  uint64_t AccessBegin = static_cast<uint64_t>(SignedOffset);
-  std::optional<uint64_t> AccessEnd =
-      checkedAddUnsigned(AccessBegin, AccessSize);
-  if (!AccessEnd) {
-    Record.ActivityUnclear = true;
+  unsigned BitWidth =
+      DL.getIndexSizeInBits(Address->getType()->getPointerAddressSpace());
+  std::optional<SmallVector<APInt, 8>> PossibleOffsets =
+      collectFixedArgAddressOffsets(Address, Record.Base, DL, BitWidth);
+  if (!PossibleOffsets) {
+    // Unknown reads may observe any pointer slot. Unknown writes cannot kill
+    // any slot because no one slot is known to be overwritten on every
+    // execution. This is the standard may-use/must-def conservative transfer.
+    if (!IsDefinition)
+      addAllFixedArgSlots(Masks, I, Record);
     return;
   }
 
   uint64_t PointerSize = DL.getPointerSize(0);
-  SmallBitVector &Mask =
-      fixedArgAccessMask(Masks, I, Record.Leaves.size());
-  for (auto [Index, Leaf] : llvm::enumerate(Record.Leaves)) {
-    uint64_t SlotBegin = Leaf.Offset;
-    uint64_t SlotEnd = SlotBegin + PointerSize;
-    if (*AccessEnd <= SlotBegin || AccessBegin >= SlotEnd)
-      continue;
-    if (IsDefinition &&
-        (AccessBegin > SlotBegin || *AccessEnd < SlotEnd)) {
-      Record.ActivityUnclear = true;
+  SmallBitVector CombinedMask(Record.Leaves.size());
+  bool FirstOffset = true;
+  for (const APInt &Offset : *PossibleOffsets) {
+    if (Offset.isNegative() || Offset.getActiveBits() > 64) {
+      if (!IsDefinition)
+        addAllFixedArgSlots(Masks, I, Record);
       return;
     }
-    Mask.set(Index);
+    uint64_t AccessBegin = Offset.getZExtValue();
+    std::optional<uint64_t> AccessEnd =
+        checkedAddUnsigned(AccessBegin, AccessSize);
+    if (!AccessEnd) {
+      if (!IsDefinition)
+        addAllFixedArgSlots(Masks, I, Record);
+      return;
+    }
+
+    SmallBitVector OffsetMask(Record.Leaves.size());
+    for (auto [Index, Leaf] : llvm::enumerate(Record.Leaves)) {
+      uint64_t SlotBegin = Leaf.Offset;
+      uint64_t SlotEnd = SlotBegin + PointerSize;
+      if (*AccessEnd <= SlotBegin || AccessBegin >= SlotEnd)
+        continue;
+      if (IsDefinition && (AccessBegin > SlotBegin || *AccessEnd < SlotEnd)) {
+        // A safepoint must not scan a partially overwritten pointer word.
+        Record.ActivityUnclear = true;
+        return;
+      }
+      OffsetMask.set(Index);
+    }
+    if (FirstOffset) {
+      CombinedMask = std::move(OffsetMask);
+      FirstOffset = false;
+    } else if (IsDefinition) {
+      CombinedMask &= OffsetMask;
+    } else {
+      CombinedMask |= OffsetMask;
+    }
   }
+  if (CombinedMask.any())
+    fixedArgAccessMask(Masks, I, Record.Leaves.size()) |= CombinedMask;
 }
 
 std::optional<uint64_t> fixedAccessSize(Type *Ty, const DataLayout &DL) {
@@ -1738,18 +1848,16 @@ void collectFixedArgContentAccesses(PointerFixedArgRecord &Record) {
       if (auto *Load = dyn_cast<LoadInst>(I)) {
         std::optional<uint64_t> Size = fixedAccessSize(Load->getType(), DL);
         if (!Size)
-          Record.ActivityUnclear = true;
+          addAllFixedArgSlots(Record.ContentUses, *I, Record);
         else
-          addFixedArgMemorySlots(Record.ContentUses, *I, Address, *Size,
-                                 false, Record);
+          addFixedArgMemorySlots(Record.ContentUses, *I, Address, *Size, false,
+                                 Record);
         continue;
       }
       if (auto *Store = dyn_cast<StoreInst>(I)) {
         std::optional<uint64_t> Size =
             fixedAccessSize(Store->getValueOperand()->getType(), DL);
-        if (!Size)
-          Record.ActivityUnclear = true;
-        else
+        if (Size)
           addFixedArgMemorySlots(Record.ContentDefs, *I, Address, *Size, true,
                                  Record);
         continue;
@@ -1758,7 +1866,7 @@ void collectFixedArgContentAccesses(PointerFixedArgRecord &Record) {
         std::optional<uint64_t> Size =
             fixedAccessSize(RMW->getValOperand()->getType(), DL);
         if (!Size) {
-          Record.ActivityUnclear = true;
+          addAllFixedArgSlots(Record.ContentUses, *I, Record);
         } else {
           addFixedArgMemorySlots(Record.ContentDefs, *I, Address, *Size, true,
                                  Record);
@@ -1771,7 +1879,7 @@ void collectFixedArgContentAccesses(PointerFixedArgRecord &Record) {
         std::optional<uint64_t> Size =
             fixedAccessSize(CmpXchg->getCompareOperand()->getType(), DL);
         if (!Size) {
-          Record.ActivityUnclear = true;
+          addAllFixedArgSlots(Record.ContentUses, *I, Record);
         } else {
           addFixedArgMemorySlots(Record.ContentDefs, *I, Address, *Size, true,
                                  Record);
@@ -1781,21 +1889,30 @@ void collectFixedArgContentAccesses(PointerFixedArgRecord &Record) {
         continue;
       }
       auto *Mem = dyn_cast<MemIntrinsic>(I);
-      auto *Length = Mem ? dyn_cast<ConstantInt>(Mem->getLength()) : nullptr;
-      if (!Mem || !Length || Length->getValue().getActiveBits() > 64) {
+      if (!Mem) {
         Record.ActivityUnclear = true;
         continue;
       }
+      bool IsDest = U.get() == Mem->getRawDest();
+      auto *Transfer = dyn_cast<MemTransferInst>(Mem);
+      bool IsSource = Transfer && U.get() == Transfer->getRawSource();
+      if (!IsDest && !IsSource) {
+        Record.ActivityUnclear = true;
+        continue;
+      }
+      auto *Length = dyn_cast<ConstantInt>(Mem->getLength());
+      if (!Length || Length->getValue().getActiveBits() > 64) {
+        if (IsSource)
+          addAllFixedArgSlots(Record.ContentUses, *I, Record);
+        continue;
+      }
       uint64_t Size = Length->getZExtValue();
-      if (U.get() == Mem->getRawDest())
+      if (IsDest)
         addFixedArgMemorySlots(Record.ContentDefs, *I, Address, Size, true,
                                Record);
-      else if (auto *Transfer = dyn_cast<MemTransferInst>(Mem);
-               Transfer && U.get() == Transfer->getRawSource())
+      else
         addFixedArgMemorySlots(Record.ContentUses, *I, Address, Size, false,
                                Record);
-      else
-        Record.ActivityUnclear = true;
     }
   }
 }
@@ -1805,8 +1922,7 @@ void transferFixedArgContentLiveness(const PointerFixedArgRecord &Record,
                                      SmallBitVector &Live) {
   if (Record.IsGoRet && isa<ReturnInst>(I))
     Live.set();
-  if (auto It = Record.ContentDefs.find(&I);
-      It != Record.ContentDefs.end())
+  if (auto It = Record.ContentDefs.find(&I); It != Record.ContentDefs.end())
     Live.reset(It->second);
   if (auto It = Record.ContentUses.find(&I);
       It != Record.ContentUses.end())

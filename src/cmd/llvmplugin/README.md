@@ -312,13 +312,16 @@ fixed arguments also carry the same self-describing deopt layout used for
 allocas. Backward memory liveness is computed over the optimized loads, stores,
 memory intrinsics, and escaping address uses. Goret pointer slots are implicit
 uses at return; a store kills the previous contents of every pointer slot it
-fully overwrites, so calls before a later result store do not acquire those
-result bits. If any pointer slot remains live, the object's complete typed
-pointer layout is active, matching Go's variable-granularity maps and zero-value
-invariant. Results reachable through defer recovery are conservatively live at
-every call. GoObj classifies these direct fixed ranges as argument/result
-storage and expands active layouts into `ArgsPointerMaps`; the direct address
-itself is never a bitmap pointer word.
+fully overwrites on every possible address path, so calls before a later result
+store do not acquire those result bits. PHI/select-derived constant offsets use
+the union of possible read slots and the intersection of definitely overwritten
+slots. An unbounded read conservatively uses the complete pointer layout, while
+an unbounded write kills no slot. If any pointer slot remains live, the object's
+complete typed pointer layout is active, matching Go's variable-granularity
+maps and zero-value invariant. Results reachable through defer recovery are
+conservatively live at every call. GoObj classifies these direct fixed ranges
+as argument/result storage and expands active layouts into `ArgsPointerMaps`;
+the direct address itself is never a bitmap pointer word.
 
 Ordinary pointer values loaded from stack inputs use the normal statepoint
 path. SelectionDAG formal
