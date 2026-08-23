@@ -3232,16 +3232,32 @@ func (lfc *LLVMFuncContext) emitOpenDeferRecovery() {
 	}
 }
 
-// emitTailCallReturn lowers the compiler's RetJmp terminator to an ordinary
-// call followed immediately by a return. LLVM's Go calling conventions and
-// statepoint rewriting do not yet provide the musttail guarantee needed to
-// remove the current frame safely. Keeping an ordinary call is semantically
-// equivalent for the compiler-generated method and ABI wrappers that produce
-// OTAILCALL, and lets RewriteStatepointsForGC treat the call like every other
-// Go safepoint.
-//
-// TODO(goallc): Emit a genuine tail call once Go ABI frame reuse and
-// RewriteStatepointsForGC support are both guaranteed for musttail calls.
+// llvmCanEmitMustTail reports the first Go tail-call shape whose ABI frame
+// contract LLVM can currently guarantee. Keep this decision in the Go
+// compiler: LLVM implements the mechanical transfer between its Go calling
+// conventions, while the frontend decides which Go wrappers may reuse their
+// caller's frame. This intentionally starts with direct void(void) transfers;
+// later revisions can widen the predicate as argument/result frame reuse is
+// proven.
+func (lfc *LLVMFuncContext) llvmCanEmitMustTail(call *Value, aux *AuxCall) bool {
+	if call.Op != OpTailLECall || aux == nil || aux.Fn == nil ||
+		lfc.F.OwnAux == nil {
+		return false
+	}
+	callerABI := lfc.F.OwnAux.ABI().Which()
+	calleeABI := aux.ABI().Which()
+	compatibleABI := callerABI == calleeABI ||
+		callerABI == obj.ABI0 && calleeABI == obj.ABIInternal
+	return compatibleABI &&
+		aux.NArgs() == 0 && aux.NResults() == 0 &&
+		lfc.F.OwnAux.NArgs() == 0 && lfc.F.OwnAux.NResults() == 0
+}
+
+// emitTailCallReturn lowers the compiler's RetJmp terminator. Proven
+// void(void) direct transfers are emitted as musttail so neither LLVM
+// optimization nor statepoint rewriting may reintroduce a frame. Other
+// compiler-generated tail calls retain the existing call-and-return fallback
+// until their ABI frame shapes are supported.
 func (lfc *LLVMFuncContext) emitTailCallReturn(b *Block) {
 	mem := b.Controls[0]
 	if mem == nil || mem.Op != OpSelectN || len(mem.Args) != 1 || !mem.Type.IsMemory() {
@@ -3257,6 +3273,11 @@ func (lfc *LLVMFuncContext) emitTailCallReturn(b *Block) {
 	}
 
 	result := lfc.GenLV(call)
+	if lfc.llvmCanEmitMustTail(call, aux) {
+		result.SetTailCallKind(llvm.TailCallKindMustTail)
+		lfc.b.CreateRetVoid()
+		return
+	}
 	calleeSig := llvmSignature(aux)
 	direct := make([]llvm.Value, lfc.ReturnCount)
 	for i, callerResult := range lfc.Results {
