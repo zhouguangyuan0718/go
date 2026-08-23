@@ -259,9 +259,23 @@ Machine CFG; every transition back to the entry stack depth selects map 0. This
 covers the pre-frame morestack path without identifying `runtime.morestack` by
 name or manufacturing a statepoint. An ordinary statepoint selects its actual
 live map and overrides a same-PC entry-depth transition.
-GoObj emits the currently constant safe `PCDATA_UnsafePoint` table first and
-the statepoint-derived `PCDATA_StackMapIndex` table second, as required by
-their Go ABI indexes 0 and 1.
+GoObj emits `PCDATA_UnsafePoint` first and the statepoint-derived
+`PCDATA_StackMapIndex` second, as required by their Go ABI indexes 0 and 1.
+Asynchronous preemption is safe by default for ordinary optimized Go machine
+code, including frames, calls, vectors, atomics, and pointer/integer
+conversions. The frontend retains `go-async-unsafe` as a fail-closed fallback,
+but a Go-owned read-only callback overrides it after final machine lowering.
+The callback recognizes the complete write-barrier protocol in optimized IR,
+then marks its final machine blocks from the completed flag load through the
+raw heap write. It also marks target-inserted stack checks through the
+`morestack` call, inline-assembly spans, and the true live range of arm64
+R27/REGTMP. Runtime, reflect, and nosplit functions remain whole-function
+unsafe; an unrecognized protocol or target also falls back to that state.
+LLVM owns only the generic callback and label-to-PC serialization boundary. It
+coalesces adjacent marked `MachineInstr` spans into `PCDATA_UnsafePoint` ranges
+after final layout, including all instructions emitted by an AsmPrinter pseudo
+expansion. No unsafe-point marker is introduced into LLVM IR, so ordinary IR
+and machine optimization pipelines are unchanged.
 The GoObj writer interprets locations after final layout. An
 `Indirect [SP+offset]` location in the current frame contributes a locals
 pointer bit; one in the post-prologue caller-owned argument/result area
