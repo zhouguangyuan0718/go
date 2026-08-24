@@ -165,10 +165,14 @@ source-live or not. The plugin preserves their function-wide frame identity
 with `llvm.stackcoloring.no_merge`, while the existing lifetime interval still
 controls when their contents are roots. Any interval whose optimized producer
 does not initialize all pointer slots before a safepoint receives an inline
-zero initialization immediately after its start. No concrete alloca-derived
-address needs the old whole-function lifetime expansion. The record carries
-one generic tag, the alloca address, whole-object size and alignment, pointer
-size, valid bitmap bit count, and 64-bit bitmap words. The
+zero initialization immediately after its start. LLVM may hoist a pure
+first-class address use before its source `lifetime.start`; content liveness can
+then name that storage at an earlier safepoint. For this case, the original
+starts first remain liveness kills, then the physical alloca is widened to one
+entry lifetime and zeroed there. Address recipes still use the ordinary
+per-block `Base + Offset` rematerialization. The record carries one generic
+tag, the alloca address, whole-object size and alignment, pointer size, valid
+bitmap bit count, and 64-bit bitmap words. The
 envelope and every record carry explicit lengths, and a trailing duplicate
 envelope length makes the suffix recoverable after ordinary deopt operands.
 There is deliberately no contract version in the first grammar.

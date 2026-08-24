@@ -55,17 +55,19 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %selected)
 
 ; IR-LABEL: define goabiinternal void @hoisted_aggregate_pointer_alloca()
+; IR: %slot = alloca [2 x ptr], align 8, !llvm.stackcoloring.no_merge
+; IR-NEXT: call void @llvm.lifetime.start
+; IR-NEXT: call void @llvm.memset.inline
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
-; IR: call void @llvm.lifetime.start
-; IR-NOT: call void @llvm.memset.inline
+; IR-NOT: call void @llvm.lifetime.start
 ; IR-NOT: %slice.cap.leaf.0
 ; IR: store ptr null
 ; IR: %second.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: %slice.cap.rebuilt = insertvalue { ptr, i64, i64 } poison, ptr %slot, 0
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
-; IR: call void @llvm.lifetime.end
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
 ; IR-NOT: %slice.cap.leaf.0.relocated
+; IR-NOT: call void @llvm.lifetime.end
 
 ; OBJVIEW-LABEL: "name": "stack_object_alloca_with_lifetime"
 ; OBJVIEW: "kind": "locals_pointer_maps"

@@ -121,6 +121,7 @@ struct PointerAllocaRecord {
   SmallVector<IntrinsicInst *, 4> LifetimeMarkers;
   SmallVector<Instruction *, 16> AddressUses;
   SmallVector<CallInst *, 8> ActiveCalls;
+  bool WholeLifetime = false;
   bool ActivityUnclear = false;
 };
 
@@ -661,6 +662,51 @@ prepareFixedFrameAddresses(Function &F) {
     Records.push_back({Address, Base, *Offset});
   }
   return Records;
+}
+
+void collectWholeLifetimePointerAllocas(
+    ArrayRef<FixedFrameAddressRecord> Addresses,
+    MutableArrayRef<PointerAllocaRecord> PointerAllocas,
+    const DominatorTree &DT) {
+  DenseMap<AllocaInst *, PointerAllocaRecord *> Records;
+  for (PointerAllocaRecord &Record : PointerAllocas)
+    Records[Record.Alloca] = &Record;
+
+  for (const FixedFrameAddressRecord &Address : Addresses) {
+    auto *Alloca = dyn_cast<AllocaInst>(Address.Base);
+    if (!Alloca)
+      continue;
+    PointerAllocaRecord *Record = Records.lookup(Alloca);
+    if (!Record || Record->WholeLifetime ||
+        !llvm::any_of(Record->LifetimeMarkers, [](IntrinsicInst *Marker) {
+          return Marker->getIntrinsicID() == Intrinsic::lifetime_start;
+        }))
+      continue;
+    for (Use &U : Address.Address->uses()) {
+      if (classifyFrameAddressUse(U) != FrameAddressUseKind::FirstClass)
+        continue;
+      if (llvm::any_of(Record->LifetimeMarkers, [&](IntrinsicInst *Marker) {
+            if (Marker->getIntrinsicID() != Intrinsic::lifetime_start)
+              return false;
+            // A PHI operand is used on its incoming edge, not in the PHI's
+            // block. Check the concrete Use so a start in that predecessor can
+            // dominate just the alloca-carrying value.
+            return DT.dominates(Marker, U);
+          }))
+        continue;
+
+      // LLVM may hoist a non-dereferencing address operation outside the Go
+      // VarDef interval. Content liveness still sees that operation as a future
+      // use, so the corresponding callsite bitmap can scan the object before
+      // its source lifetime starts. Retain the established fallback: give the
+      // storage one entry lifetime and zero it before any safepoint. The
+      // original starts remain available until after content activity has been
+      // computed, and per-block Base+Offset rematerialization remains
+      // unchanged.
+      Record->WholeLifetime = true;
+      break;
+    }
+  }
 }
 
 Error localizeFixedFrameAddresses(ArrayRef<FixedFrameAddressRecord> Records) {
@@ -1573,7 +1619,7 @@ void initializePointerAllocasForGC(
   const DataLayout &DL =
       PointerAllocas.front().Alloca->getFunction()->getDataLayout();
   for (PointerAllocaRecord &Record : PointerAllocas) {
-    if (Record.DeferResult || Record.OpenDeferSlot)
+    if (Record.WholeLifetime || Record.DeferResult || Record.OpenDeferSlot)
       continue;
 
     SmallVector<IntrinsicInst *, 4> LifetimeStarts;
@@ -1598,6 +1644,29 @@ void initializePointerAllocasForGC(
       if (Instruction *Begin = Start->getNextNode();
           !hasInitializedPointerSlotsBeforeSafepoint(Begin, Record, DL))
         InitializeAt(Begin);
+  }
+}
+
+void promotePointerAllocasToWholeFunctionLifetime(
+    MutableArrayRef<PointerAllocaRecord> PointerAllocas) {
+  for (PointerAllocaRecord &Record : PointerAllocas) {
+    if (!Record.WholeLifetime)
+      continue;
+    for (IntrinsicInst *Marker : Record.LifetimeMarkers)
+      Marker->eraseFromParent();
+
+    // The original VarDef starts have already served as content-liveness kills.
+    // Replace them only now, then keep the physical storage initialized and
+    // unshared for every callsite bitmap which can name it.
+    IRBuilder<> Builder(Record.Alloca->getNextNode());
+    Builder.SetCurrentDebugLocation(Record.Alloca->getDebugLoc());
+    Builder.CreateLifetimeStart(Record.Alloca);
+    Builder.CreateMemSetInline(Record.Alloca, Record.Alloca->getAlign(),
+                               Builder.getInt8(0),
+                               Builder.getInt64(Record.ByteSize));
+    Record.Alloca->setMetadata(
+        StackColoringNoMergeMD,
+        MDNode::get(Record.Alloca->getContext(), ArrayRef<Metadata *>()));
   }
 }
 
@@ -2506,6 +2575,7 @@ Error rewriteFunction(Function &F) {
     return FixedFrameAddressesOrErr.takeError();
   SmallVector<FixedFrameAddressRecord, 32> FixedFrameAddresses =
       std::move(*FixedFrameAddressesOrErr);
+  collectWholeLifetimePointerAllocas(FixedFrameAddresses, PointerAllocas, DT);
 
   if (Error Err = computePointerFixedArgActivity(F, PointerFixedArgs, DT))
     return Err;
@@ -2555,6 +2625,7 @@ Error rewriteFunction(Function &F) {
     return Err;
   protectStackObjectsFromColoring(PointerAllocas);
   initializePointerAllocasForGC(PointerAllocas);
+  promotePointerAllocasToWholeFunctionLifetime(PointerAllocas);
   for (SafepointRecord &Record : llvm::reverse(Records)) {
     SmallVector<const PointerAllocaRecord *, 8> AllocaRecords;
     SmallPtrSet<Value *, 8> LiveContents;
