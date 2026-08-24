@@ -355,7 +355,7 @@ func TestLLVMStdlib(t *testing.T) {
 	for _, name := range graylist {
 		candidates = append(candidates, llvmStdlibCandidate{name: name, class: llvmStdlibGray})
 	}
-	parallelism := max(1, runtime.NumCPU()/2)
+	parallelism := runtime.NumCPU()
 	limit := make(chan struct{}, parallelism)
 	t.Logf("LLVM standard library package parallelism: %d (%d CPUs)", parallelism, runtime.NumCPU())
 	for _, candidate := range candidates {
@@ -367,12 +367,15 @@ func TestLLVMStdlib(t *testing.T) {
 			testTimeout := "2m"
 			processTimeout := 5 * time.Minute
 			if name == "runtime" {
-				testTimeout = "5m"
-				processTimeout = 15 * time.Minute
+				// The runtime stress tests need more CPU time when they run
+				// alongside other full-LLVM package builds.
+				testTimeout = "15m"
+				processTimeout = 30 * time.Minute
 			} else if name == "encoding/json/v2" {
 				// Its tests are fast once linked, but a cold full-LLVM
-				// compilation of the package can exceed five minutes.
-				processTimeout = 15 * time.Minute
+				// compilation under package-level contention can exceed
+				// fifteen minutes.
+				processTimeout = 30 * time.Minute
 			}
 			args := []string{
 				"test",
