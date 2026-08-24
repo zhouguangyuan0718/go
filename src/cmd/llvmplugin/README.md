@@ -35,7 +35,7 @@ stable callsite IDs, emits `gc.statepoint` and `gc.relocate`, and respects
 LLVM's `gc-leaf-function` attribute on callees and individual call sites.
 Definitions carrying that attribute are verified to contain only GC-leaf calls.
 Pointer classification is conservative and independent of LLVM address spaces.
-After all calls have been rewritten, the pass models each original pointer and
+After all calls have been rewritten, the pass models each ordinary pointer and
 all of its relocates as definitions of a temporary promotable alloca. Loads at
 the old uses make the required reaching definition explicit, and LLVM's public
 `PromoteMemToReg` utility removes the temporary memory operations and forms the
@@ -45,30 +45,39 @@ Raw static `alloca` values are native frame identities, not Go heap pointers.
 Pointer-containing allocas are explicit `gc-live` values while their storage
 is active so the adjacent alloca ptrmap describes their contents. Direct
 loads, stores, lifetime markers, and address derivations retain that identity.
-An observable use of the alloca address itself is rebuilt immediately before
-that first-class use. Direct loads and stores keep their original derived
-address and SelectionDAG lowers it from the current FrameIndex; putting such an
-address through whole-function relocation SSA could spill a cached pre-growth
-stack address into an ordinary non-root slot. PHI/select values which cannot be
-rebuilt from one alloca remain ordinary scalar roots. Pointer values loaded
-from the allocation remain ordinary tracked roots.
+An observable use of an alloca-derived address is rebuilt in its use block.
+Direct loads and stores of the raw alloca identity stay on the current
+FrameIndex; putting a concrete stack address through whole-function relocation
+SSA could spill a cached pre-growth value into an ordinary non-root slot.
+PHI/select/freeze and aggregate-leaf forwarding whose every path denotes the
+same alloca is normalized to integer offset SSA. Only that offset may cross a
+statepoint, and each concrete address is reconstructed as `Base + Offset` in
+the consuming block. Different allocas and every other ambiguous provenance
+remain ordinary scalar roots.
+Typed Go `byval` and `goret` parameters follow the same fixed-frame-address
+rule: their raw argument is the storage identity, while SelectionDAG selects
+its canonical argument FrameIndex at each use. Their pointer-containing object
+layouts independently contribute to `ArgsPointerMaps` only while the contents
+are live. Pointer values loaded from any of these homes remain ordinary tracked
+roots.
 
 The current SSA value and CFG rewrite support matrix is:
 
 | Value or control-flow shape | Status | Current contract |
 | --- | --- | --- |
 | Pointer arguments | AArch64 GoObj qualified; SelectionDAG home reuse also tested on X86 | Values live after a call use caller statepoints; exact stack inputs stay in their fixed ABI homes, while register inputs and transformed values use normal statepoint spills. Call-only arguments are described by the callee's type-derived entry map. |
-| Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. First-class GEP/cast uses are rebuilt immediately at the use; direct memory uses stay on the FrameIndex and never enter relocation SSA. Pointers loaded from memory remain tracked. |
-| `select`, GEP, and pointer casts | Supported | Fixed-allocation GEP/no-op cast chains stay as direct FrameIndex uses or are rebuilt immediately at first-class uses. Merged or non-stack pointer values remain ordinary scalar roots. |
+| Static `alloca` addresses | Supported | The raw alloca is the storage identity and the only extra `gc-live` root. It deliberately has no `gc.relocate`. First-class GEP/cast uses are rebuilt immediately at the use; direct memory uses stay on the FrameIndex and never enter relocation SSA. Pointers loaded from memory remain tracked. |
+| Typed `byval`/`goret` addresses | Supported | The raw parameter is a fixed ABI-frame identity and may appear directly in `gc-live`, but deliberately has no `gc.relocate`. First-class uses are rebuilt in each consuming block and SelectionDAG selects the canonical argument FrameIndex before consulting an entry-block export vreg. A separate variable-granularity content interval expands the typed layout into `ArgsPointerMaps`: byval uses backward memory liveness; goret is inactive before definite initialization and stays active through later overwrites until return. |
+| `select`, GEP, and pointer casts | Supported | Same-object fixed-frame expressions are represented as one canonical base plus integer offsets. Offset PHIs/selects may cross statepoints, while concrete addresses are rebuilt in each consuming block. Mixed bases, address-space changes, and non-stack pointers remain ordinary scalar roots. |
 | Pointer-valued call results | Supported | `gc.result` replaces the ordinary result and later safepoints relocate it. |
 | Multiple ordinary calls | Supported | Stable IDs and live sets remain per call; the next statepoint consumes the current relocated SSA value. |
 | Ordinary CFG merges | Supported | Call/skip and multiple-safepoint paths merge through pointer PHIs formed by `PromoteMemToReg`. |
 | Loops and irreducible CFG | Supported | Relocation definitions are propagated through backedge and multi-entry PHIs without a shape-specific algorithm. |
-| Fixed struct/array SSA aggregates | Supported | Pointer and fixed pointer-vector leaves are extracted before liveness and reconstructed from the current relocated SSA leaves. |
+| Fixed struct/array SSA aggregates | Supported | Pointer and fixed pointer-vector leaves are extracted before liveness. Same-object fixed-frame leaves carry integer offsets and are reconstructed in each consuming block from the raw alloca/byval/goret base; ordinary leaves use their current relocated SSA values. Nested insert/extract paths and aggregate PHI/select/freeze forwarding are resolved structurally and fail closed for mixed bases. |
 | Fixed-width pointer-vector SSA values | Supported | The vector remains one `gc-live` operand and one same-typed `gc.relocate`; it is not split into lanes. Pointer vectors in allocas remain unsupported. |
 | Aggregate arguments and call results | Supported for IR rewriting | The wrapped call keeps its real aggregate ABI type. Only leaves live after the call enter caller `gc-live`; supported fixed formal layouts also contribute pointer words to AArch64 entry maps. |
 | Aggregate load results and store operands | Supported | First-class SSA values use aggregate normalization. Pointer leaves in surviving fixed allocas remain memory roots described by the alloca deopt layout protocol. |
-| Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Go `VarDef` emits `llvm.lifetime.start`; parameter homes and addressed result homes have explicit starts at their initialization sites. The statepoint pass uses starts as backward liveness kills and real address uses as gens, so the last use supplies the implicit end. Active contents contribute callsite `LocalsPointerMaps`; address-observable objects additionally get function-wide `FUNCDATA_StackObjects` and one entry initialization because stack growth adjusts them even while source-dead. Locals-only storage is not initialized by the plugin, and no lifetime ends are emitted. |
+| Pointer-containing `alloca` storage | GoObj qualified for fixed layouts | Go `VarDef` emits `llvm.lifetime.start`; parameter homes and addressed result homes have explicit starts at their initialization sites. The statepoint pass uses starts as backward liveness kills and real address uses as gens, so the last use supplies the implicit end. Active contents contribute callsite `LocalsPointerMaps`; address-observable objects additionally get function-wide `FUNCDATA_StackObjects`. If the optimized producer does not definitely initialize every pointer slot before the next safepoint, the plugin inserts an inline zero initialization at that lifetime start. It preserves existing lifetime markers and emits no new lifetime ends. |
 | Scalable vectors | Unsupported | The generic LLVM statepoint rewrite assumes a fixed vector width when constructing relocates; fails closed. |
 | General moving-GC base/derived analysis | Unsupported | Base and derived indexes are identical in the current non-moving-heap phase. |
 | `invoke`, `callbr`, non-deopt operand bundles, and unsupported parameter attributes | Unsupported | One ordinary deopt bundle is preserved before the alloca suffix. `nest`, `captures`, and `readonly` parameter attributes are preserved; other shapes fail closed. |
@@ -105,8 +114,9 @@ This normalization has four invariants:
 3. A use-local rebuilt aggregate cannot cross a safepoint. A call-only
    aggregate argument stays as the real ABI operand and is neither scalarized
    nor recorded in caller `gc-live`.
-4. Post-safepoint reconstruction uses the current SSA definition produced by
-   `gc.relocate` and the whole-function relocation PHIs.
+4. Post-safepoint reconstruction uses either a use-local fixed-allocation
+   recipe or the current ordinary SSA definition produced by `gc.relocate` and
+   the whole-function relocation PHIs.
 
 Nested fixed structs and arrays are enumerated by leaf index path. A fixed-width
 pointer vector is one leaf: LLVM's statepoint verifier and rewrite preserve its
@@ -135,23 +145,34 @@ the producing call and before their result store. `OpVarLive` remains an
 source-lifetime initialization; the frontend marker helper adds no pointer
 clears, and neither side emits `llvm.lifetime.end`.
 
-For every surviving fixed object, statepoint rewriting enumerates pointer
+For every surviving fixed alloca, statepoint rewriting enumerates pointer
 offsets and performs a backward, path-sensitive live-out dataflow over its
 optimized address-use graph. A lifetime start is a kill and a real load, store,
 call use, comparison, `llvm.fake.use`, or other terminal address use is a gen.
 The callsite is sampled before applying that call's use transfer, so an address
 used only as a current call argument is live-in but not caller `gc-live`.
-Direct GEP/cast chains retain the alloca base; PHI/select/freeze results become
-independent scalar roots and do not make every possible incoming alloca live
-after the merge. This makes the final real use the implicit lifetime end
+Direct GEP/cast chains retain the alloca base. Same-allocation
+PHI/select/freeze and aggregate-leaf forwarding are canonicalized to integer
+offset SSA and use-block-local `Base + Offset` recipes; mixed-base results
+remain independent scalar roots and do not make every possible incoming
+alloca live after the merge. This makes the final real use the implicit
+lifetime end
 without modifying IR. Unclassifiable objects fail closed. The original
 lifetime starts remain in IR for the normal code-generation pipeline.
 Address-observable objects are different: Go's runtime adjusts every pointer
 word in every `StackObjects` record during stack growth, whether the object is
-source-live or not. The plugin therefore zeroes only those pointer leaves once
-at frame entry. This is independent of a later VarDef reinitialization. The
-record carries one generic tag, the alloca address, whole-object size and
-alignment, pointer size, valid bitmap bit count, and 64-bit bitmap words. The
+source-live or not. The plugin preserves their function-wide frame identity
+with `llvm.stackcoloring.no_merge`, while the existing lifetime interval still
+controls when their contents are roots. Any interval whose optimized producer
+does not initialize all pointer slots before a safepoint receives an inline
+zero initialization immediately after its start. LLVM may hoist a pure
+first-class address use before its source `lifetime.start`; content liveness can
+then name that storage at an earlier safepoint. For this case, the original
+starts first remain liveness kills, then the physical alloca is widened to one
+entry lifetime and zeroed there. Address recipes still use the ordinary
+per-block `Base + Offset` rematerialization. The record carries one generic
+tag, the alloca address, whole-object size and alignment, pointer size, valid
+bitmap bit count, and 64-bit bitmap words. The
 envelope and every record carry explicit lengths, and a trailing duplicate
 envelope length makes the suffix recoverable after ordinary deopt operands.
 There is deliberately no contract version in the first grammar.
@@ -160,9 +181,10 @@ LowerStatepoint lowers both the deopt alloca address and explicit `gc-live`
 alloca through their normal direct FrameIndex paths and preserves the adjacent
 constants in Machine StackMaps. For `gc "goallc"`, a static alloca used only
 as a deopt layout carrier is not implicitly promoted to a GC root; explicit
-`gc-live` is the activity signal. The resulting `gc.relocate(alloca)` is
-`NoRelocate` and rematerializes the same frame index, so no root spill is
-created. LLVM's GoObj StackMaps bridge retains the deopt prefix and resolves
+`gc-live` is the activity signal. The plugin emits no `gc.relocate` for that
+alloca address. Uses after the statepoint rebuild from the original alloca, so
+SelectionDAG selects the same FrameIndex without a root spill or reload.
+LLVM's GoObj StackMaps bridge retains the deopt prefix and resolves
 both inline constants and `ConstantIndex` values. The GoObj writer strictly
 parses the suffix and maps every layout with a matching direct `gc-live` alloca
 plus bitmap bit to that callsite's `LocalsPointerMaps`. An unmatched layout is
@@ -199,21 +221,25 @@ narrow Go ABI contract above.
 
 The final combined order is:
 
-1. **Optimized alloca classification and activity.** Enumerate pointer leaves, classify
-   final IR uses as address-observable stack objects or direct-only locals,
-   then compute callsite live-out from frontend lifetime starts and terminal
-   address uses. Address-observable objects alone receive function-entry
-   pointer initialization.
+1. **Optimized alloca classification and activity.** Enumerate pointer leaves,
+   classify final IR uses as address-observable stack objects or direct-only
+   locals, then compute callsite live-out from frontend lifetime starts and
+   terminal address uses. Insert lifetime-local zero initialization only when
+   the optimized producer cannot initialize every pointer slot before a
+   safepoint.
 2. **Aggregate normalization.** Use aggregate-only liveness to find and
    decompose supported live first-class struct/array values, then rebuild
    aggregates immediately before their uses.
-3. **Scalar statepoint insertion.** Split observable direct alloca-address uses
-   from the raw storage identity, compute scalar and derived-address liveness,
-   put each active base alloca and ordinary scalar root in `gc-live`, append the
-   unchanged alloca ptrmap records to deopt, and emit `gc.result` plus
-   `gc.relocate`.
-4. **Whole-function relocation SSA.** Rebuild live GEP/cast address chains from
-   each base-allocation relocate. Model those definitions and ordinary scalar
+3. **Fixed-frame canonicalization and scalar statepoints.** Normalize
+   same-object alloca/byval/goret pointer expressions (including nested
+   aggregate leaves and different-offset merges) to one canonical base plus
+   integer offset SSA. Put the live base and ordinary scalar roots in
+   `gc-live`, append object-content ptrmap records to deopt, and emit
+   `gc.result`. After splitting statepoint continuations, rebuild each concrete
+   fixed address in its consuming block. Emit `gc.relocate` only for ordinary
+   roots, never for a fixed-frame identity.
+4. **Ordinary relocation SSA.** Rebuild live GEP/cast address chains from each
+   ordinary relocatable base. Model those definitions and ordinary scalar
    relocates as stores to temporary promotable allocas, rewrite old uses through
    loads, and call the public `PromoteMemToReg` utility. This constructs
    conditional, loop/backedge, and irreducible-CFG PHIs while preserving raw
@@ -286,7 +312,31 @@ the same direct location is instead the frame base whose bitmap selects memory
 slots. Its contents are active only when a matching explicit direct alloca
 also occurs in the statepoint's GC operands.
 
-Ordinary stack inputs use the same statepoint path. SelectionDAG formal
+Typed `byval` and `goret` parameters describe the address of a complete fixed
+Go ABI home, not a movable heap pointer. The statepoint pass keeps that raw
+base as the direct GC operand but emits no `gc.relocate`; first-class derived
+addresses are rebuilt at their concrete use. SelectionDAG then resolves every
+raw base use from the canonical argument FrameIndex before consulting an
+entry-block export vreg, so a statepoint cannot leave a cached pre-growth stack
+address live into its continuation. This rule is gated by the Go calling
+conventions and does not change ordinary ABI lowering. Pointer-containing
+fixed arguments also carry the same self-describing deopt layout used for
+allocas. Byval inputs use backward memory liveness over the optimized loads,
+stores, memory intrinsics, and escaping address uses; a definite overwrite
+kills the previous input contents. Goret outputs instead use forward definite
+initialization: they contribute no contents before every pointer slot has been
+initialized on all incoming paths, then remain active through later overwrites
+until return. At the current variable granularity, a non-constant or merged
+offset makes a read use the complete pointer layout, while such a write proves
+no initialized or overwritten slot. Constant direct accesses retain slot
+precision only to recognize complete initialization. An active object
+contributes its complete typed bitmap. Results reachable through defer recovery
+are conservatively live at every call. GoObj classifies these direct fixed
+ranges as argument/result storage and expands active layouts into
+`ArgsPointerMaps`; the direct address itself is never a bitmap pointer word.
+
+Ordinary pointer values loaded from stack inputs use the normal statepoint
+path. SelectionDAG formal
 lowering records a value home only when a Go ABI pointer part is a direct,
 non-extending load from an immutable fixed object and its IR aggregate offset,
 ABI part offset, load size, and object size all agree. If `gc-live` later
