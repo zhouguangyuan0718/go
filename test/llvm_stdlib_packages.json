@@ -115,6 +115,7 @@
       "mime": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "mime/multipart": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "mime/quotedprintable": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
+      "net/http": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "net/mail": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "net/netip": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "net/rpc": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
