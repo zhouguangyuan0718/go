@@ -5,13 +5,13 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR: br label %entry.statepoint.cont
 ; IR: entry.statepoint.cont:
 ; IR-NOT: %slot.relocated
-; IR: %first.remat = getelementptr inbounds i8, ptr %slot, i64 16
+; IR: %first.remat = getelementptr i8, ptr %slot, i64 16
 ; IR: store <2 x ptr> %first.error, ptr %first.remat
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: br label %entry.statepoint.cont.statepoint.cont
 ; IR: entry.statepoint.cont.statepoint.cont:
 ; IR-NOT: %slot.relocated
-; IR: %second.remat = getelementptr inbounds i8, ptr %slot, i64 48
+; IR: %second.remat = getelementptr i8, ptr %slot, i64 48
 ; IR: store <2 x ptr> %second.error, ptr %second.remat
 ; IR-NOT: %first.relocated.merge
 ; IR-NOT: %second.relocated.merge
@@ -51,10 +51,9 @@ entry:
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: br label %entry.statepoint.cont
 ; IR: entry.statepoint.cont:
-; IR: %shared.remat{{[0-9]*}} = getelementptr inbounds i8, ptr %slot, i64 2376
+; IR: %shared.remat = getelementptr i8, ptr %slot, i64 2376
 ; IR: store <2 x ptr> %value.relocated{{[0-9]*}}, ptr %shared.remat{{[0-9]*}}
-; IR: %shared.remat{{[0-9]*}} = getelementptr inbounds i8, ptr %slot, i64 2376
-; IR: %child.remat{{[0-9]*}} = getelementptr inbounds i8, ptr %shared.remat{{[0-9]*}}, i64 800
+; IR: %child.remat = getelementptr i8, ptr %slot, i64 3176
 ; IR: store <2 x ptr> %value.relocated{{[0-9]*}}, ptr %child.remat{{[0-9]*}}
 ;
 ; MIR-LABEL: name: direct_alloca_shared_base_across_call

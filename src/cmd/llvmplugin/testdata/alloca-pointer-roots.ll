@@ -25,31 +25,35 @@ target triple = "x86_64-unknown-linux-goobj"
 
 ; IR-LABEL: define goabiinternal ptr @alloca_gep_address_across_call(
 ; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 16{{.*}}i64 2{{.*}}i64 2{{.*}}i64 1095519299
-; IR: %field.remat{{[0-9]*}} = getelementptr inbounds %pointer_field, ptr %slot
+; IR: %field.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: %result = load ptr, ptr %field.remat{{[0-9]*}}
 ; IR-NOT: %field.relocated.merge
 
 ; IR-LABEL: define goabiinternal void @alloca_direct_address_across_calls()
 ; IR: "gc-live"(ptr %slot)
-; IR-COUNT-2: getelementptr inbounds i8, ptr %slot, i64 0
+; IR-COUNT-2: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %slot
+; IR-NOT: getelementptr
 ; IR-NOT: .address.relocated.merge
 
 ; IR-LABEL: define goabiinternal void @argument_aggregate_home_address_across_calls(
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %value.home
 ; IR: "gc-live"(ptr %value.home)
 ; IR-NOT: @llvm.experimental.gc.relocate
-; IR: %value.home.address = getelementptr inbounds i8, ptr %value.home, i64 0
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %value.home
 ; IR: ret void
 
 ; IR-LABEL: define goabiinternal void @alloca_gep_value_across_calls()
-; IR: %field.remat{{[0-9]+}} = getelementptr inbounds %pointer_field, ptr %slot
+; IR: %field.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: "gc-live"(ptr %slot)
-; IR: %field.remat = getelementptr inbounds %pointer_field, ptr %slot
+; IR: %field.remat{{[0-9]+}} = getelementptr i8, ptr %slot, i64 8
 ; IR-NOT: .remat.relocated.merge
 
 ; IR-LABEL: define goabiinternal void @alloca_pointer_free_address_across_calls()
 ; IR-NOT: "deopt"(
-; IR-NOT: "gc-live"(
-; IR-COUNT-2: getelementptr inbounds i8, ptr %slot, i64 0
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %slot{{.*}}"gc-live"(ptr %slot)
+; IR: elementtype(void ()) @safepoint{{.*}}"gc-live"(ptr %slot)
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %slot
+; IR-NOT: getelementptr
 
 ; IR-LABEL: define goabiinternal ptr @alloca_address_passed_to_callee(
 ; IR: store ptr %pointer, ptr %slot

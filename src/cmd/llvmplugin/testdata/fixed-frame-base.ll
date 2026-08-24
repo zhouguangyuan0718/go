@@ -10,6 +10,40 @@ target triple = "aarch64-apple-darwin-goobj"
 ; IR: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
 ; IR-NOT: @llvm.experimental.gc.relocate
 
+; Goret contents have a forward lifetime: they are inactive before definite
+; initialization, then remain active through later overwrites until return.
+; IR-LABEL: define goabiinternal {{.*}} @fixed_frame_goret_initialization_interval(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"({{.*}}ptr %result)
+; IR: store %result_storage zeroinitializer, ptr %result, align 8
+; IR: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"({{.*}}ptr %result)
+; IR: store ptr %replacement{{.*}}, ptr %result, align 8
+; IR: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
+; IR-NOT: %result.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+
+; A named result observed by defer is exceptional: recovery can resume outside
+; LLVM's explicit CFG, so its contents remain active for the whole function,
+; including safepoints before the ordinary goret initialization point.
+; IR-LABEL: define goabiinternal {{.*}} @fixed_frame_defer_goret_whole_function(
+; IR-COUNT-2: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
+; IR-NOT: %result.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+
+; Byval and goret derived addresses use the same Base+Offset representation as
+; allocas. Only the integer choice crosses the statepoint; each continuation
+; rebuilds the concrete address from the canonical fixed argument FrameIndex.
+; IR-LABEL: define goabiinternal void @fixed_frame_byval_different_offset(
+; IR: %address.offset = select i1 %choose, i64 0, i64 8
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %input)
+; IR-NOT: %input.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %address.remat = getelementptr i8, ptr %input, i64 %address.offset
+; IR-NEXT: %value = load ptr, ptr %address.remat
+
+; IR-LABEL: define goabiinternal {{.*}} @fixed_frame_goret_different_offset(
+; IR: %address.offset = select i1 %choose, i64 0, i64 16
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"({{.*}}ptr %result)
+; IR-NOT: %result.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %address.remat = getelementptr i8, ptr %result, i64 %address.offset
+; IR: store ptr %replacement{{.*}}, ptr %address.remat
+
 ; IR-LABEL: define goabiinternal void @fixed_frame_byval_contents(
 ; IR: "deopt"({{.*}}ptr %input{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %input)
 ; IR: load ptr, ptr %input, align 8
@@ -52,6 +86,36 @@ target triple = "aarch64-apple-darwin-goobj"
 ; OBJVIEW: "count": 2
 ; OBJVIEW: "set_bits": null
 
+; The first bitmap is the entry/prologue map for the ordinary replacement
+; argument. The three explicit safepoints then see goret as inactive, active,
+; and still active after an overwrite.
+; OBJVIEW-LABEL: "name": "fixed_frame_goret_initialization_interval"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 4
+; OBJVIEW: "num_bits": 4
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 3
+; OBJVIEW: "set_bits": null
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0,
+; OBJVIEW-NEXT: 2
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0,
+; OBJVIEW-NEXT: 2
+
+; Both explicit safepoints use bitmap 1 below; bitmap 0 is the entry/prologue
+; map. This confirms that defer keeps the result contents active even at the
+; call before the ordinary initialization store.
+; OBJVIEW-LABEL: "name": "fixed_frame_defer_goret_whole_function"
+; OBJVIEW: "kind": "args_pointer_maps"
+; OBJVIEW: "count": 2
+; OBJVIEW: "num_bits": 3
+; OBJVIEW: "set_bits": null
+; OBJVIEW: "set_bits": [
+; OBJVIEW-NEXT: 0,
+; OBJVIEW-NEXT: 2
+; OBJVIEW-COUNT-2: "stack_map_index": 1
+
 ; OBJVIEW-LABEL: "name": "fixed_frame_byval_contents"
 ; OBJVIEW: "kind": "args_pointer_maps"
 ; OBJVIEW: "count": 2
@@ -70,6 +134,52 @@ entry:
   call goabiinternal void @safepoint()
   store %result_storage zeroinitializer, ptr %result, align 8
   call goabiinternal void @safepoint()
+  ret { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
+}
+
+define goabiinternal { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } @fixed_frame_goret_initialization_interval(
+    ptr %replacement,
+    ptr goret(%result_storage) align 8 "goretindex"="15" %result) #0 gc "goallc" {
+entry:
+  call goabiinternal void @safepoint()
+  store %result_storage zeroinitializer, ptr %result, align 8
+  call goabiinternal void @safepoint()
+  store ptr %replacement, ptr %result, align 8
+  call goabiinternal void @safepoint()
+  ret { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
+}
+
+define goabiinternal { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } @fixed_frame_defer_goret_whole_function(
+    ptr goret(%result_storage) align 8 "goretindex"="15" "goallc.defer_result" %result) #0 gc "goallc" {
+entry:
+  call goabiinternal void @safepoint()
+  store %result_storage zeroinitializer, ptr %result, align 8
+  call goabiinternal void @safepoint()
+  ret { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
+}
+
+define goabiinternal void @fixed_frame_byval_different_offset(
+    ptr byval([2 x ptr]) align 8 %input, i1 %choose) #0 gc "goallc" {
+entry:
+  %first = getelementptr inbounds [2 x ptr], ptr %input, i64 0, i64 0
+  %second = getelementptr inbounds [2 x ptr], ptr %input, i64 0, i64 1
+  %address = select i1 %choose, ptr %first, ptr %second
+  call goabiinternal void @safepoint()
+  %value = load ptr, ptr %address, align 8
+  call void @observe_pointer(ptr %value)
+  ret void
+}
+
+define goabiinternal { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } @fixed_frame_goret_different_offset(
+    ptr %replacement, i1 %choose,
+    ptr goret(%result_storage) align 8 "goretindex"="15" %result) #0 gc "goallc" {
+entry:
+  store %result_storage zeroinitializer, ptr %result, align 8
+  %first = getelementptr inbounds %result_storage, ptr %result, i64 0, i32 0
+  %second = getelementptr inbounds %result_storage, ptr %result, i64 0, i32 2
+  %address = select i1 %choose, ptr %first, ptr %second
+  call goabiinternal void @safepoint()
+  store ptr %replacement, ptr %address, align 8
   ret { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 } zeroinitializer
 }
 

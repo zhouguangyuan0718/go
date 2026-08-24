@@ -19,7 +19,8 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR-NOT: phi ptr
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: store ptr null, ptr %slot{{.*}}
+; IR: %address.remat = getelementptr i8, ptr %slot, i64 0
+; IR-NEXT: store ptr null, ptr %address.remat
 
 ; MIR-LABEL: name: same_alloca_phi
 ; MIR: stack:
@@ -31,15 +32,16 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR-LABEL: define goabiinternal i64 @same_alloca_phi_ptrtoint(
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: %slot.address = getelementptr inbounds i8, ptr %slot, i64 0
-; IR-NEXT: %address.int = ptrtoint ptr %slot.address to i64
+; IR: %address.remat = getelementptr i8, ptr %slot, i64 0
+; IR-NEXT: %address.int = ptrtoint ptr %address.remat to i64
 ; IR-NEXT: ret i64 %address.int
 
 ; IR-LABEL: define goabiinternal void @derived_from_same_alloca_phi(
 ; IR-NOT: phi ptr
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: %element.remat = getelementptr inbounds [4 x ptr], ptr %slot, i64 0, i64 %index
+; IR: %element.idx = mul nsw i64 %index, 8
+; IR-NEXT: %element.remat = getelementptr i8, ptr %slot, i64 %element.idx
 ; IR: @llvm.experimental.gc.statepoint{{.*}}ptr %element.remat
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
 
@@ -56,21 +58,26 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR: store ptr null, ptr %address.relocated
 
 ; IR-LABEL: define goabiinternal void @same_alloca_different_offset_phi(
-; IR: %address = phi ptr
-; IR: "gc-live"({{.*}}ptr %address)
-; IR: %address.relocated = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: store ptr null, ptr %address.relocated
-
-; IR-LABEL: define goabiinternal void @same_alloca_different_offset_select(
-; IR: %address = select i1 %choose, ptr %{{[^,]+}}, ptr %{{[^ ]+}}
-; IR: "gc-live"({{.*}}ptr %address)
-; IR: %address.relocated = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: store ptr null, ptr %address.relocated
-
-; IR-LABEL: define goabiinternal void @derived_dynamic(
+; IR-NOT: phi ptr
+; IR: %address.offset = phi i64 [ 0, %left ], [ 8, %right ]
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: %element.remat = getelementptr inbounds [4 x ptr], ptr %slot, i64 0, i64 %index
+; IR: %address.remat = getelementptr i8, ptr %slot, i64 %address.offset
+; IR-NEXT: store ptr null, ptr %address.remat
+
+; IR-LABEL: define goabiinternal void @same_alloca_different_offset_select(
+; IR-NOT: select i1 %choose, ptr
+; IR: %address.offset = select i1 %choose, i64 0, i64 8
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
+; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %address.remat = getelementptr i8, ptr %slot, i64 %address.offset
+; IR-NEXT: store ptr null, ptr %address.remat
+
+; IR-LABEL: define goabiinternal void @derived_dynamic(
+; IR: %element.idx = mul nsw i64 %index, 8
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
+; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %element.remat = getelementptr i8, ptr %slot, i64 %element.idx
 ; IR-NEXT: store ptr null, ptr %element.remat
 
 ; MIR-LABEL: name: derived_dynamic
@@ -85,7 +92,7 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR-NOT: phi ptr
 ; IR: loop:
 ; IR: store ptr null, ptr %slot
-; IR: %slot.address{{.*}} = getelementptr inbounds i8, ptr %slot, i64 0
+; IR: %slot.address.remat{{.*}} = getelementptr i8, ptr %slot, i64 0
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot{{.*}}){{.*}}"gc-live"(ptr %slot)
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
 
@@ -101,8 +108,8 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
 ; IR: merge.statepoint.cont:
-; IR: %slot.address = getelementptr inbounds i8, ptr %slot, i64 0
-; IR: insertvalue { ptr, i64, i64 } poison, ptr %slot.address, 0
+; IR: %merged.leaf.0.remat = getelementptr i8, ptr %slot, i64 0
+; IR: insertvalue { ptr, i64, i64 } poison, ptr %merged.leaf.0.remat, 0
 ; IR: @llvm.experimental.gc.statepoint
 
 ; MIR-LABEL: name: aggregate_phi_same_alloca
@@ -114,17 +121,19 @@ target triple = "aarch64-unknown-linux-goobj"
 ; MIR: {{(LEA64r|ADDXri)}} %stack.0.slot
 
 ; IR-LABEL: define goabiinternal void @aggregate_phi_different_offset(
-; IR: %merged.leaf.0 = extractvalue { ptr } %merged, 0
-; IR: "gc-live"(ptr %merged.leaf.0)
-; IR: %merged.leaf.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate
-; IR: insertvalue { ptr } poison, ptr %merged.leaf.0.relocated, 0
+; IR: %merged.offset = phi i64 [ 0, %left ], [ 8, %right ]
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
+; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %merged.leaf.0.remat = getelementptr i8, ptr %slot, i64 %merged.offset
+; IR: insertvalue { ptr } poison, ptr %merged.leaf.0.remat, 0
 
 ; IR-LABEL: define goabiinternal void @nested_aggregate_same_alloca(
 ; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %forwarded.offset = freeze i64 0
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
 ; IR: {{.*}}statepoint.cont:
-; IR: %slot.address = getelementptr inbounds i8, ptr %slot, i64 0
-; IR: insertvalue { { ptr, i64 }, i64 } poison, ptr %slot.address, 0, 0
+; IR: %nested.leaf.0.0.remat = getelementptr i8, ptr %slot, i64 %forwarded.offset
+; IR: insertvalue { { ptr, i64 }, i64 } poison, ptr %nested.leaf.0.0.remat, 0, 0
 
 ; IR-LABEL: define goabiinternal void @nested_aggregate_mixed_alloca(
 ; IR: %nested.leaf.0.0 = extractvalue { { ptr, i64 }, i64 } %nested, 0, 0
@@ -132,9 +141,12 @@ target triple = "aarch64-unknown-linux-goobj"
 ; IR: %nested.leaf.0.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate
 
 ; IR-LABEL: define goabiinternal void @nested_aggregate_different_offset(
-; IR: %nested.leaf.0.0 = extractvalue { { ptr, i64 }, i64 } %nested, 0, 0
-; IR: "gc-live"(ptr %nested.leaf.0.0)
-; IR: %nested.leaf.0.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %selected.offset = select i1 %choose, i64 0, i64 8
+; IR: %forwarded.offset = freeze i64 %selected.offset
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %slot)
+; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %nested.leaf.0.0.remat = getelementptr i8, ptr %slot, i64 %forwarded.offset
+; IR: insertvalue { { ptr, i64 }, i64 } poison, ptr %nested.leaf.0.0.remat, 0, 0
 
 declare goabiinternal void @safepoint()
 declare goabiinternal void @observe(ptr)
