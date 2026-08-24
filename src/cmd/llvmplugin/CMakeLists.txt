@@ -777,6 +777,58 @@ if(BUILD_TESTING)
       "${GOALLC_AGGREGATE_SCALARIZATION_PIPELINE}"
   )
 
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.AggregateUndefPhi
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+    IR
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.AggregateUndefPhiMIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+    MIR
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.AggregateUndefPhiAArch64MIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+    MIR-AARCH64
+    "${GOALLC_LLC_EXECUTABLE}"
+    -mtriple=aarch64-unknown-linux-goobj
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+  )
+  add_test(
+    NAME GoALLCStatepoints.AggregateUndefPhiGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/aggregate-undef-phi.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+  )
+  if(GOALLC_OBJVIEW_EXECUTABLE)
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.AggregateUndefPhiObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/aggregate-undef-phi.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -format=text
+      "${CMAKE_CURRENT_BINARY_DIR}/aggregate-undef-phi.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.AggregateUndefPhiObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.AggregateUndefPhiGoObj
+    )
+  endif()
+
   add_test(
     NAME GoALLCStatepoints.AggregateFixedVectorRewrite
     COMMAND
