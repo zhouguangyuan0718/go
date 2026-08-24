@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 #include "GoALLCStatepoints.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
@@ -332,6 +333,188 @@ Value *fixedFrameProvenanceBase(Value *V) {
 
 bool isFixedFrameAddress(const Value *V) {
   return V->getType()->isPointerTy() && fixedFrameProvenanceBase(V) != nullptr;
+}
+
+struct NullableFixedFrameAddress {
+  Value *Base;
+  APInt Offset;
+  bool IsFixedFrame;
+};
+
+std::optional<NullableFixedFrameAddress>
+decomposeNullableFixedFrameAddress(Value *V, const DataLayout &DL) {
+  if (!V->getType()->isPointerTy())
+    return std::nullopt;
+
+  unsigned OffsetBits = DL.getIndexTypeSizeInBits(V->getType());
+  APInt Offset(OffsetBits, 0);
+  Value *Base = V->stripAndAccumulateConstantOffsets(DL, Offset,
+                                                     /*AllowNonInbounds=*/true);
+  if (isFixedFrameBase(Base))
+    return NullableFixedFrameAddress{Base, std::move(Offset), true};
+  if (isa<ConstantPointerNull>(Base))
+    return NullableFixedFrameAddress{Base, std::move(Offset), false};
+
+  // SROA folds a non-inbounds GEP from null to an inttoptr constant. Recover
+  // its null base so it can be compared with the fixed-frame incoming value.
+  auto *IntToPtr = dyn_cast<ConstantExpr>(V);
+  auto *Integer = IntToPtr && IntToPtr->getOpcode() == Instruction::IntToPtr
+                      ? dyn_cast<ConstantInt>(IntToPtr->getOperand(0))
+                      : nullptr;
+  if (!Integer)
+    return std::nullopt;
+  auto *PointerTy = cast<PointerType>(V->getType());
+  return NullableFixedFrameAddress{ConstantPointerNull::get(PointerTy),
+                                   Integer->getValue().sextOrTrunc(OffsetBits),
+                                   false};
+}
+
+// SROA can distribute a GEP over a nullable pointer PHI:
+//
+//   %base = phi ptr [ null, %nil ], [ %frame, %present ]
+//   %field = getelementptr i8, ptr %base, i64 C
+//
+// becomes a pointer PHI whose nil incoming value is inttoptr(C). Generic
+// pointer liveness would then expose C as a Go GC root. Re-form the derived
+// address so statepoint lowering carries only the nullable base and rebuilds
+// Base+C after the call. The raw alloca/byval/goret frame identity remains on
+// the fixed-frame no-relocate path.
+void canonicalizeNullableFixedFrameDerivedPointers(Function &F) {
+  const DataLayout &DL = F.getDataLayout();
+  SmallVector<PHINode *, 8> Candidates;
+  for (BasicBlock &BB : F)
+    for (PHINode &Phi : BB.phis())
+      if (Phi.getType()->isPointerTy())
+        Candidates.push_back(&Phi);
+
+  for (PHINode *Phi : Candidates) {
+    if (!Phi->getParent() || Phi->getNumIncomingValues() < 2)
+      continue;
+
+    SmallVector<NullableFixedFrameAddress, 4> Incoming;
+    Value *FixedBase = nullptr;
+    bool HasNull = false;
+    bool Invalid = false;
+    for (Value *V : Phi->incoming_values()) {
+      std::optional<NullableFixedFrameAddress> Address =
+          decomposeNullableFixedFrameAddress(V, DL);
+      if (!Address ||
+          (!Incoming.empty() && Address->Offset != Incoming.front().Offset)) {
+        Invalid = true;
+        break;
+      }
+      if (Address->IsFixedFrame) {
+        if (FixedBase && FixedBase != Address->Base) {
+          Invalid = true;
+          break;
+        }
+        FixedBase = Address->Base;
+      } else {
+        HasNull = true;
+      }
+      Incoming.push_back(std::move(*Address));
+    }
+    if (Invalid || !FixedBase || !HasNull || Incoming.front().Offset.isZero())
+      continue;
+
+    PHINode *BasePhi = nullptr;
+    for (PHINode &Other : Phi->getParent()->phis()) {
+      if (&Other == Phi || Other.getType() != Phi->getType() ||
+          Other.getNumIncomingValues() != Phi->getNumIncomingValues())
+        continue;
+      bool Matches = true;
+      for (unsigned I = 0; I != Other.getNumIncomingValues(); ++I) {
+        if (Other.getIncomingBlock(I) != Phi->getIncomingBlock(I) ||
+            Other.getIncomingValue(I) != Incoming[I].Base) {
+          Matches = false;
+          break;
+        }
+      }
+      if (Matches) {
+        BasePhi = &Other;
+        break;
+      }
+    }
+    if (!BasePhi) {
+      BasePhi = PHINode::Create(Phi->getType(), Phi->getNumIncomingValues(),
+                                Phi->getName() + ".base", Phi->getIterator());
+      for (unsigned I = 0; I != Phi->getNumIncomingValues(); ++I)
+        BasePhi->addIncoming(Incoming[I].Base, Phi->getIncomingBlock(I));
+    }
+
+    Instruction *InsertBefore = &*Phi->getParent()->getFirstNonPHIIt();
+    IRBuilder<> Builder(InsertBefore);
+    Builder.SetCurrentDebugLocation(Phi->getDebugLoc());
+    Value *Offset = ConstantInt::get(DL.getIndexType(Phi->getType()),
+                                     Incoming.front().Offset);
+    Value *Derived = Builder.CreateGEP(Builder.getInt8Ty(), BasePhi, Offset,
+                                       Phi->getName() + ".derived");
+    Phi->replaceAllUsesWith(Derived);
+    Phi->eraseFromParent();
+  }
+
+  // SimplifyCFG commonly folds the same two-predecessor shape to selects,
+  // especially for AArch64. Apply the identical normalization there as well.
+  SmallVector<SelectInst *, 8> SelectCandidates;
+  for (Instruction &I : instructions(F))
+    if (auto *Select = dyn_cast<SelectInst>(&I);
+        Select && Select->getType()->isPointerTy())
+      SelectCandidates.push_back(Select);
+
+  for (SelectInst *Select : SelectCandidates) {
+    if (!Select->getParent())
+      continue;
+    std::optional<NullableFixedFrameAddress> True =
+        decomposeNullableFixedFrameAddress(Select->getTrueValue(), DL);
+    std::optional<NullableFixedFrameAddress> False =
+        decomposeNullableFixedFrameAddress(Select->getFalseValue(), DL);
+    if (!True || !False || True->Offset != False->Offset ||
+        True->IsFixedFrame == False->IsFixedFrame || True->Offset.isZero())
+      continue;
+    Value *FixedBase = True->IsFixedFrame ? True->Base : False->Base;
+    if (!isFixedFrameBase(FixedBase))
+      continue;
+
+    SelectInst *BaseSelect = nullptr;
+    for (Instruction &I : *Select->getParent()) {
+      auto *Other = dyn_cast<SelectInst>(&I);
+      if (!Other || Other == Select || Other->getType() != Select->getType() ||
+          Other->getCondition() != Select->getCondition() ||
+          Other->getTrueValue() != True->Base ||
+          Other->getFalseValue() != False->Base)
+        continue;
+      bool DominatesUses = llvm::all_of(Select->uses(), [&](const Use &U) {
+        auto *User = dyn_cast<Instruction>(U.getUser());
+        return !User || User->getParent() != Select->getParent() ||
+               Other->comesBefore(User);
+      });
+      if (DominatesUses) {
+        BaseSelect = Other;
+        break;
+      }
+    }
+
+    Instruction *InsertBefore = Select;
+    if (!BaseSelect) {
+      IRBuilder<> BaseBuilder(Select);
+      BaseBuilder.SetCurrentDebugLocation(Select->getDebugLoc());
+      BaseSelect = cast<SelectInst>(
+          BaseBuilder.CreateSelect(Select->getCondition(), True->Base,
+                                   False->Base, Select->getName() + ".base"));
+    } else {
+      InsertBefore = BaseSelect->getNextNode();
+      assert(InsertBefore && "select must be followed by a terminator");
+    }
+
+    IRBuilder<> Builder(InsertBefore);
+    Builder.SetCurrentDebugLocation(Select->getDebugLoc());
+    Value *Offset =
+        ConstantInt::get(DL.getIndexType(Select->getType()), True->Offset);
+    Value *Derived = Builder.CreateGEP(Builder.getInt8Ty(), BaseSelect, Offset,
+                                       Select->getName() + ".derived");
+    Select->replaceAllUsesWith(Derived);
+    Select->eraseFromParent();
+  }
 }
 
 const Value *rematerializableDerivedBase(const Value *V) {
@@ -2511,6 +2694,7 @@ Error rewriteFunction(Function &F) {
     return Err;
   if (Error Err = scalarizeLivePointerAggregates(F))
     return Err;
+  canonicalizeNullableFixedFrameDerivedPointers(F);
   // Scalarization can expose fixed-frame pointer PHIs/selects. Preserve only
   // their integer object offsets across statepoints; concrete addresses are
   // rebuilt from the canonical alloca/byval/goret base after continuations are
