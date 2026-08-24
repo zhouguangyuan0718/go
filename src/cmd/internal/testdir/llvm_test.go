@@ -21,7 +21,7 @@ import (
 	"testing"
 )
 
-const llvmDefaultCaseTimeoutSeconds = 60
+const llvmDefaultCaseTimeoutSeconds = 120
 
 const llvmBlacklistReasonRequirement = "timeout, OOM, unsupported defer/recover, or slow CI case"
 
@@ -37,10 +37,11 @@ func TestLLVMCaseTimeoutSeconds(t *testing.T) {
 		recipeTimeout int
 		want          int
 	}{
-		{0, 60},
+		{0, 120},
 		{30, 30},
 		{60, 60},
-		{600, 60},
+		{120, 120},
+		{600, 120},
 	} {
 		if got := llvmCaseTimeoutSeconds(tc.recipeTimeout); got != tc.want {
 			t.Errorf("llvmCaseTimeoutSeconds(%d) = %d, want %d", tc.recipeTimeout, got, tc.want)

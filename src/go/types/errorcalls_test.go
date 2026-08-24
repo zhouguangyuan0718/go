@@ -21,7 +21,7 @@ const (
 // and use balanced parentheses/brackets.
 func TestErrorCalls(t *testing.T) {
 	fset := token.NewFileSet()
-	files, err := pkgFiles(fset, ".")
+	files, err := pkgFiles(t, fset, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
