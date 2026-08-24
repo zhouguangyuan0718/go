@@ -21,7 +21,7 @@ func TestSelf(t *testing.T) {
 	testenv.MustHaveGoBuild(t) // The Go command is needed for the importer to determine the locations of stdlib .a files.
 
 	fset := token.NewFileSet()
-	files, err := pkgFiles(fset, ".")
+	files, err := pkgFiles(t, fset, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func BenchmarkCheck(b *testing.B) {
 
 func runbench(b *testing.B, path string, ignoreFuncBodies, writeInfo bool) {
 	fset := token.NewFileSet()
-	files, err := pkgFiles(fset, path)
+	files, err := pkgFiles(b, fset, path)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -102,8 +102,8 @@ func runbench(b *testing.B, path string, ignoreFuncBodies, writeInfo bool) {
 	b.ReportMetric(float64(lines)*float64(b.N)/time.Since(start).Seconds(), "lines/s")
 }
 
-func pkgFiles(fset *token.FileSet, path string) ([]*ast.File, error) {
-	filenames, err := pkgFilenames(path, true) // from stdlib_test.go
+func pkgFiles(t testing.TB, fset *token.FileSet, path string) ([]*ast.File, error) {
+	filenames, err := pkgFilenames(stdlibBuildContext(t), path, true) // from stdlib_test.go
 	if err != nil {
 		return nil, err
 	}

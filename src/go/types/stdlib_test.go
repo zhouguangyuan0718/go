@@ -8,6 +8,7 @@
 package types_test
 
 import (
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -45,17 +46,19 @@ func TestStdlib(t *testing.T) {
 	}
 
 	testenv.MustHaveGoBuild(t)
+	ctxt := stdlibBuildContext(t)
 
 	// Collect non-test files.
 	dirFiles := make(map[string][]string)
 	root := filepath.Join(testenv.GOROOT(t), "src")
-	walkPkgDirs(root, func(dir string, filenames []string) {
+	walkPkgDirs(ctxt, root, func(dir string, filenames []string) {
 		dirFiles[dir] = filenames
 	}, t.Error)
 
 	c := &stdlibChecker{
 		dirFiles: dirFiles,
 		pkgs:     make(map[string]*futurePackage),
+		ctxt:     ctxt,
 	}
 
 	start := time.Now()
@@ -96,6 +99,7 @@ func TestStdlib(t *testing.T) {
 // dirFiles, which must define a closed set of packages (such as GOROOT/src).
 type stdlibChecker struct {
 	dirFiles map[string][]string // non-test files per directory; must be pre-populated
+	ctxt     build.Context       // build configuration used to select those files
 
 	mu   sync.Mutex
 	pkgs map[string]*futurePackage // future cache of type-checking results
@@ -118,7 +122,7 @@ func (c *stdlibChecker) ImportFrom(path, dir string, _ ImportMode) (*Package, er
 		return Unsafe, nil
 	}
 
-	p, err := build.Default.Import(path, dir, build.FindOnly)
+	p, err := c.ctxt.Import(path, dir, build.FindOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -357,6 +361,9 @@ func TestStdKen(t *testing.T) {
 var excluded = map[string]bool{
 	"builtin":                       true,
 	"cmd/compile/internal/ssa/_gen": true,
+	// The source importer cannot type-check the cgo-backed LLVM bindings
+	// while pkgFilenames deliberately selects the non-cgo standard library.
+	"cmd/vendor/github.com/goallc/go-llvm":          true,
 	"crypto/internal/cryptotest/wycheproof/_schema": true,
 	"crypto/internal/cryptotest/x509limbo/_schema":  true,
 	"runtime/_mkmalloc":                             true,
@@ -434,10 +441,33 @@ func typecheckFiles(path string, filenames []string, importer Importer) (*Packag
 	return pkg, nil
 }
 
-// pkgFilenames returns the list of package filenames for the given directory.
-func pkgFilenames(dir string, includeTest bool) ([]string, error) {
+// stdlibBuildContext returns the build configuration used for the current Go
+// toolchain. In particular, a toolchain built with additional tags must use
+// those same tags when TestStdlib selects files to type-check. Because this
+// source-only test disables cgo, it selects the compiler's bootstrap
+// implementation instead of the cgo-backed LLVM implementation.
+func stdlibBuildContext(t testing.TB) build.Context {
+	t.Helper()
 	ctxt := build.Default
 	ctxt.CgoEnabled = false
+	info, err := buildinfo.ReadFile(testenv.GoToolPath(t))
+	if err != nil {
+		t.Fatalf("reading Go tool build information: %v", err)
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "-tags" {
+			ctxt.BuildTags = strings.Fields(strings.ReplaceAll(setting.Value, ",", " "))
+			break
+		}
+	}
+	if !slices.Contains(ctxt.BuildTags, "compiler_bootstrap") {
+		ctxt.BuildTags = append(ctxt.BuildTags, "compiler_bootstrap")
+	}
+	return ctxt
+}
+
+// pkgFilenames returns the list of package filenames for the given directory.
+func pkgFilenames(ctxt build.Context, dir string, includeTest bool) ([]string, error) {
 	pkg, err := ctxt.ImportDir(dir, 0)
 	if err != nil {
 		if _, nogo := err.(*build.NoGoError); nogo {
@@ -465,12 +495,13 @@ func pkgFilenames(dir string, includeTest bool) ([]string, error) {
 	return filenames, nil
 }
 
-func walkPkgDirs(dir string, pkgh func(dir string, filenames []string), errh func(args ...any)) {
-	w := walker{pkgh, errh}
+func walkPkgDirs(ctxt build.Context, dir string, pkgh func(dir string, filenames []string), errh func(args ...any)) {
+	w := walker{ctxt, pkgh, errh}
 	w.walk(dir)
 }
 
 type walker struct {
+	ctxt build.Context
 	pkgh func(dir string, filenames []string)
 	errh func(args ...any)
 }
@@ -485,7 +516,7 @@ func (w *walker) walk(dir string) {
 	// apply pkgh to the files in directory dir
 
 	// Don't get test files as these packages are imported.
-	pkgFiles, err := pkgFilenames(dir, false)
+	pkgFiles, err := pkgFilenames(w.ctxt, dir, false)
 	if err != nil {
 		w.errh(err)
 		return

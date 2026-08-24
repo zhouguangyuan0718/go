@@ -72,15 +72,18 @@
       "flag": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "fmt": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/ast": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
+      "go/build": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/build/constraint": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/constant": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/doc": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/doc/comment": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/format": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
+      "go/importer": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/parser": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/printer": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/scanner": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/token": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
+      "go/types": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "go/version": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "hash": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "hash/adler32": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
@@ -98,6 +101,7 @@
       "image/jpeg": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "image/png": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "index/suffixarray": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
+      "internal/copyright": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "internal/runtime/maps": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "io": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "io/fs": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
@@ -166,7 +170,10 @@
       "uuid": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "weak": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests"
     },
-    "graylist": {},
+    "graylist": {
+      "crypto/tls": "advisory full-LLVM qualification while environment-sensitive Bogo interoperability coverage is confirmed on clean CI hosts",
+      "net": "advisory full-LLVM qualification while environment-sensitive DNS and external-network coverage is confirmed on clean CI hosts"
+    },
     "blacklist": {
       "*": "package and its complete standard-library dependency closure including runtime have not yet been qualified through LLVM O2 compile, GoObj/archive, link, and package tests"
     },

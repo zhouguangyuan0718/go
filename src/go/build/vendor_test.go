@@ -19,6 +19,7 @@ import (
 // Vendoring a new package requires prior discussion.
 var allowedPackagePrefixes = []string{
 	"golang.org/x",
+	"github.com/goallc/go-llvm",
 	"github.com/google/pprof",
 	"github.com/ianlancetaylor/demangle",
 	"rsc.io/markdown",
@@ -66,6 +67,9 @@ func TestIsAllowed(t *testing.T) {
 		want bool
 	}{
 		{"evil.com/bad", false},
+		{"github.com/goallc/go-llvm", true},
+		{"github.com/goallc/go-llvm/llvm", true},
+		{"github.com/goallc/go-llvmish", false},
 		{"golang.org/x/build", true},
 		{"rsc.io/markdown", true},
 		{"rsc.io/markdowntonabbey", false},
