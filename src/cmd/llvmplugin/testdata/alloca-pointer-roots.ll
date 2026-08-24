@@ -25,31 +25,41 @@ target triple = "x86_64-unknown-linux-goobj"
 
 ; IR-LABEL: define goabiinternal ptr @alloca_gep_address_across_call(
 ; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 16{{.*}}i64 2{{.*}}i64 2{{.*}}i64 1095519299
-; IR: %field.remat{{[0-9]*}} = getelementptr inbounds %pointer_field, ptr %slot
+; IR: %field.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: %result = load ptr, ptr %field.remat{{[0-9]*}}
 ; IR-NOT: %field.relocated.merge
 
 ; IR-LABEL: define goabiinternal void @alloca_direct_address_across_calls()
 ; IR: "gc-live"(ptr %slot)
-; IR-COUNT-2: getelementptr inbounds i8, ptr %slot, i64 0
+; IR-COUNT-2: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %slot
+; IR-NOT: getelementptr
 ; IR-NOT: .address.relocated.merge
 
+; IR-LABEL: define goabiinternal void @argument_aggregate_home_address_across_calls(
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %value.home
+; IR: "gc-live"(ptr %value.home)
+; IR-NOT: @llvm.experimental.gc.relocate
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %value.home
+; IR: ret void
+
 ; IR-LABEL: define goabiinternal void @alloca_gep_value_across_calls()
-; IR: %field.remat{{[0-9]+}} = getelementptr inbounds %pointer_field, ptr %slot
+; IR: %field.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: "gc-live"(ptr %slot)
-; IR: %field.remat = getelementptr inbounds %pointer_field, ptr %slot
+; IR: %field.remat{{[0-9]+}} = getelementptr i8, ptr %slot, i64 8
 ; IR-NOT: .remat.relocated.merge
 
 ; IR-LABEL: define goabiinternal void @alloca_pointer_free_address_across_calls()
 ; IR-NOT: "deopt"(
-; IR-NOT: "gc-live"(
-; IR-COUNT-2: getelementptr inbounds i8, ptr %slot, i64 0
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %slot{{.*}}"gc-live"(ptr %slot)
+; IR: elementtype(void ()) @safepoint{{.*}}"gc-live"(ptr %slot)
+; IR: elementtype(void (ptr)) @observe_stack_address{{.*}}ptr %slot
+; IR-NOT: getelementptr
 
 ; IR-LABEL: define goabiinternal ptr @alloca_address_passed_to_callee(
 ; IR: store ptr %pointer, ptr %slot
 ; IR-NOT: store ptr null, ptr %slot
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot{{.*}}){{.*}}"gc-live"(ptr %slot)
-; IR: %slot.relocated = call coldcc ptr @llvm.experimental.gc.relocate
+; IR-NOT: %slot.relocated
 ; IR-NOT: store ptr {{.*}}, ptr %slot
 
 ; IR-LABEL: define goabiinternal void @alloca_marker_free_at_safepoint(
@@ -63,9 +73,9 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: "deopt"({{.*}}i64 1, i64 1095520067{{.*}}ptr %left
 
 ; IR-LABEL: define goabiinternal ptr @alloca_select_same_base(
-; IR: "deopt"({{.*}}ptr %slot
-; IR-SAME: "gc-live"(ptr %selected
-; IR: %selected.relocated
+; IR: "deopt"({{.*}}ptr %slot{{.*}}"gc-live"(ptr %slot
+; IR-NOT: %selected.relocated
+; IR: %result = load ptr, ptr %slot{{.*}}
 
 ; MIR-COUNT-31: STATEPOINT{{.*}}1195461697{{.*}}1095520067{{.*}}%{{(fixed-)?}}stack.{{[0-9]+}}
 ; MIR-ALL-COUNT-34: STATEPOINT

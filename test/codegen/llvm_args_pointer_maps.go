@@ -6,11 +6,21 @@
 
 package codegen
 
+// LLVM-LABEL: define goabiinternal {{.*}} @codegen.addressedPartiallyInitializedAggregateResult(
+// LLVM-SAME: ptr goret(%codegen.pointerAggregate) align 8 "goretindex"="15" %.result15)
+// LLVM: store ptr null, ptr {{%.*}}
+// LLVM: store ptr null, ptr {{%.*}}
+// LLVM: store ptr %first, ptr {{%.*}}
+// LLVM: call goabiinternal void @codegen.observePointerAggregate(ptr %.result15)
+// LLVM: call goabiinternal void @codegen.safepoint()
+// LLVM: store ptr %second, ptr {{%.*}}
 // LLVM-LABEL: define goabiinternal {{.*}} @codegen.partiallyInitializedAggregateResult(
 // LLVM-SAME: ptr goret(%codegen.pointerAggregate) align 8 "goretindex"="15" %.result15)
 // LLVM: call goabiinternal void @codegen.safepoint()
 // LLVM: call goabiinternal void @codegen.safepoint()
 // LLVM: store %codegen.pointerAggregate {{%.*}}, ptr %.result15
+// LLVM-LABEL: define goabiinternal {{.*}} @codegen.deferredAggregateResult(
+// LLVM-SAME: ptr goret(%codegen.pointerAggregate) align 8 "goallc.defer_result" "goretindex"="15" %.result15)
 // LLVM-LABEL: define goabiinternal {{.*}} @codegen.initializedPointerResult(
 // LLVM-SAME: ptr goret(ptr) align 8 "goretindex"="16" %.result16)
 // LLVM: call goabiinternal void @codegen.safepoint()
@@ -23,6 +33,16 @@ package codegen
 // LLVM-SAME: ptr byval(ptr) align 8 %pointer)
 // LLVM: load ptr, ptr %pointer
 // LLVM: call goabiinternal void @codegen.safepoint()
+// LLVM-OPT-LABEL: define goabiinternal {{.*}} @codegen.addressedPartiallyInitializedAggregateResult(
+// LLVM-OPT-SAME: ptr goret(%codegen.pointerAggregate) align 8 {{.*}}"goretindex"="15" %.result15)
+// LLVM-OPT: [[SECOND_RESULT:%.*]] = getelementptr {{.*}}ptr %.result15, i64 16
+// LLVM-OPT: store ptr null, ptr [[SECOND_RESULT]]
+// LLVM-OPT: store ptr %first, ptr %.result15
+// LLVM-OPT: call goabiinternal void @codegen.observePointerAggregate(ptr {{.*}}%.result15)
+// LLVM-OPT: call goabiinternal void @codegen.safepoint()
+// LLVM-OPT: store ptr %second, ptr [[SECOND_RESULT]]
+// LLVM-OPT-LABEL: define goabiinternal {{.*}} @codegen.deferredAggregateResult(
+// LLVM-OPT-SAME: ptr goret(%codegen.pointerAggregate) align 8 "goallc.defer_result" "goretindex"="15" %.result15)
 
 type pointerAggregate struct {
 	first  *int
@@ -32,6 +52,9 @@ type pointerAggregate struct {
 
 //go:noescape
 func safepoint()
+
+//go:noescape
+func observePointerAggregate(*pointerAggregate)
 
 //go:noinline
 func initializedPointerResult(pointer *int) (
@@ -53,6 +76,38 @@ func partiallyInitializedAggregateResult(first, second *int) (
 	result.first = first
 	safepoint()
 	result.second = second
+	safepoint()
+	return
+}
+
+//go:noinline
+func addressedPartiallyInitializedAggregateResult(first, second *int) (
+	r0, r1, r2, r3, r4, r5, r6, r7 int,
+	r8, r9, r10, r11, r12, r13, r14 int,
+	result pointerAggregate,
+) {
+	result.first = first
+	observePointerAggregate(&result)
+	safepoint()
+	result.second = second
+	return
+}
+
+// deferredAggregateResult uses a caller-owned result home that can be reached
+// through defer recovery. Its pointer contents therefore remain visible to
+// every suspension point, including paths that do not follow an ordinary call
+// edge.
+//
+//go:noinline
+func deferredAggregateResult(first, second *int) (
+	r0, r1, r2, r3, r4, r5, r6, r7 int,
+	r8, r9, r10, r11, r12, r13, r14 int,
+	result pointerAggregate,
+) {
+	result = pointerAggregate{first: first, second: second}
+	defer func() {
+		result.first, result.second = result.second, result.first
+	}()
 	safepoint()
 	return
 }

@@ -369,6 +369,10 @@ func TestLLVMStdlib(t *testing.T) {
 			if name == "runtime" {
 				testTimeout = "5m"
 				processTimeout = 15 * time.Minute
+			} else if name == "encoding/json/v2" {
+				// Its tests are fast once linked, but a cold full-LLVM
+				// compilation of the package can exceed five minutes.
+				processTimeout = 15 * time.Minute
 			}
 			args := []string{
 				"test",

@@ -8,7 +8,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; predicate proves that this alloca lives only until the one byval call, so it
 ; is not modeled as a caller-local GC object.
 ; IR: call goabiinternal token {{.*}} @llvm.experimental.gc.statepoint
-; IR-SAME: ptr byval(ptr) align 8 %argument.home.address
+; IR-SAME: ptr byval(ptr) align 8 %argument.home
 ; IR-SAME: i32 0, i32 0)
 
 ; MIR-LABEL: name: pure_ssa_call_slot
