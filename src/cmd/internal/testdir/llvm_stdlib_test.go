@@ -355,7 +355,7 @@ func TestLLVMStdlib(t *testing.T) {
 	for _, name := range graylist {
 		candidates = append(candidates, llvmStdlibCandidate{name: name, class: llvmStdlibGray})
 	}
-	parallelism := max(1, runtime.NumCPU()/2)
+	parallelism := runtime.NumCPU()
 	limit := make(chan struct{}, parallelism)
 	t.Logf("LLVM standard library package parallelism: %d (%d CPUs)", parallelism, runtime.NumCPU())
 	for _, candidate := range candidates {

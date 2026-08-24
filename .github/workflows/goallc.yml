@@ -263,7 +263,6 @@ jobs:
           ./bin/go test cmd/internal/testdir \
             -run '^TestLLVM$' \
             -count=1 \
-            -parallel=1 \
             -timeout=100m \
             -json \
             2>&1 | tee "$RUNNER_TEMP/goallc-test-results.json" \
