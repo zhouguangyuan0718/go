@@ -88,6 +88,16 @@ target triple = "aarch64-unknown-linux-goobj"
 ; MIR: STATEPOINT{{.*}}%stack.0.slot
 ; MIR: bb.1.entry.statepoint.cont:
 
+; An integer offset can itself be the result of the statepointed call. Its
+; saved recipe must follow call RAUW to gc.result instead of retaining a raw
+; pointer to the erased ordinary call.
+; IR-LABEL: define goabiinternal void @call_result_dynamic_offset(
+; IR: [[TOKEN:%.*]] = call goabiinternal token {{.*}}@llvm.experimental.gc.statepoint
+; IR: [[OFFSET:%.*]] = call i64 @llvm.experimental.gc.result.i64(token [[TOKEN]])
+; IR-NOT: = call coldcc ptr @llvm.experimental.gc.relocate
+; IR: %address.remat = getelementptr i8, ptr %slot, i64 [[OFFSET]]
+; IR: @llvm.experimental.gc.statepoint{{.*}}ptr %address.remat
+
 ; IR-LABEL: define goabiinternal void @aggregate_leaf_loop(
 ; IR-NOT: phi ptr
 ; IR: loop:
@@ -150,6 +160,7 @@ target triple = "aarch64-unknown-linux-goobj"
 
 declare goabiinternal void @safepoint()
 declare goabiinternal void @observe(ptr)
+declare goabiinternal i64 @dynamic_offset(ptr)
 declare goabiinternal void @consume_slice({ ptr, i64, i64 })
 declare goabiinternal void @consume_pointer_aggregate({ ptr })
 declare goabiinternal void @consume_nested_aggregate({ { ptr, i64 }, i64 })
@@ -300,6 +311,15 @@ entry:
   %element = getelementptr inbounds [4 x ptr], ptr %slot, i64 0, i64 %index
   call goabiinternal void @safepoint()
   store ptr null, ptr %element, align 8
+  ret void
+}
+
+define goabiinternal void @call_result_dynamic_offset() gc "goallc" {
+entry:
+  %slot = alloca [32 x i8], align 1
+  %offset = call goabiinternal i64 @dynamic_offset(ptr %slot)
+  %address = getelementptr inbounds i8, ptr %slot, i64 %offset
+  call goabiinternal void @observe(ptr %address)
   ret void
 }
 
