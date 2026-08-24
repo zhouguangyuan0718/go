@@ -438,7 +438,11 @@ Value *rematerializeAddress(Value *Address, Value *Base, Value *RelocatedBase,
 struct FixedFrameAddressRecord {
   Value *Address;
   Value *Base;
-  Value *Offset;
+  // Integer offsets may themselves be ordinary call results. Statepoint
+  // rewriting replaces such a call with gc.result before addresses are
+  // localized, so retain a tracking handle rather than a raw pointer to the
+  // erased call instruction.
+  WeakTrackingVH Offset;
 };
 
 struct FixedFrameOffsetCacheEntry {
@@ -663,6 +667,11 @@ Error localizeFixedFrameAddresses(ArrayRef<FixedFrameAddressRecord> Records) {
   SmallVector<WeakTrackingVH, 32> DeadAddresses;
   for (const FixedFrameAddressRecord &Record : Records) {
     Value *Address = Record.Address;
+    Value *Offset = Record.Offset;
+    if (!Offset)
+      return createStringError(
+          std::errc::invalid_argument,
+          "GoALLC fixed-frame offset was deleted during statepoint rewrite");
     // A raw alloca/byval/goret value is already an abstract frame identity.
     // SelectionDAG selects its FrameIndex independently in every block (with
     // the Go fixed-argument hook for byval/goret), so only derived addresses
@@ -698,7 +707,7 @@ Error localizeFixedFrameAddresses(ArrayRef<FixedFrameAddressRecord> Records) {
       IRBuilder<> Builder(InsertBefore);
       Builder.SetCurrentDebugLocation(InsertBefore->getDebugLoc());
       Value *Local =
-          Builder.CreateGEP(Builder.getInt8Ty(), Record.Base, Record.Offset,
+          Builder.CreateGEP(Builder.getInt8Ty(), Record.Base, Offset,
                             Address->hasName() ? Address->getName() + ".remat"
                                                : "fixed.frame.address");
       LocalAddresses[BB] = Local;
