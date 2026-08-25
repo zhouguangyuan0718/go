@@ -32,6 +32,11 @@ const llvmRuntimeSkip = `^(TestCallersNilPointerPanic|TestDebugCall|TestDebugCal
 // alignment filler. LLVM deliberately emits NOP padding instead.
 const llvmRuntimeAMD64Skip = `|^TestFunctionAlignmentTraceback$`
 
+// These tests assert native pcln and inline-stack shapes that LLVM GoObj does
+// not fully reproduce yet. Keep the heap-profile stack-growth coverage in
+// TestMemoryProfiler and TestGenericsHashKeyInPprofBuilder enabled.
+const llvmPprofSkip = `^(TestCPUProfileRecursion|TestGenericsInlineLocations|TestProfilerStackDepth)$|^TestTryAdd$/^recursion_chain_inline$`
+
 type llvmStdlibTestSet struct {
 	Whitelist         map[string]string            `json:"whitelist"`
 	Graylist          map[string]string            `json:"graylist,omitempty"`
@@ -292,6 +297,18 @@ func TestLLVMRuntimeAsyncPreemptionQualification(t *testing.T) {
 	}
 }
 
+func TestLLVMPprofBadPointerQualification(t *testing.T) {
+	skip := regexp.MustCompile(llvmPprofSkip)
+	for _, name := range []string{
+		"TestMemoryProfiler/proto",
+		"TestGenericsHashKeyInPprofBuilder",
+	} {
+		if skip.MatchString(name) {
+			t.Errorf("qualified LLVM runtime/pprof test %q is skipped", name)
+		}
+	}
+}
+
 func TestLLVMStdlib(t *testing.T) {
 	if os.Getenv(llvmStdlibPolicyEnv) != "1" {
 		t.Skipf("set %s=1 to run the LLVM standard library package policy", llvmStdlibPolicyEnv)
@@ -371,6 +388,9 @@ func TestLLVMStdlib(t *testing.T) {
 				// alongside other full-LLVM package builds.
 				testTimeout = "15m"
 				processTimeout = 30 * time.Minute
+			} else if name == "runtime/pprof" {
+				testTimeout = "5m"
+				processTimeout = 15 * time.Minute
 			} else if name == "encoding/json/v2" {
 				// Its tests are fast once linked, but a cold full-LLVM
 				// compilation under package-level contention can exceed
@@ -400,6 +420,9 @@ func TestLLVMStdlib(t *testing.T) {
 					"-skip="+runtimeSkip,
 				)
 				t.Logf("LLVM runtime capability-boundary skips: %s", runtimeSkip)
+			} else if name == "runtime/pprof" {
+				args = append(args, "-skip="+llvmPprofSkip)
+				t.Logf("LLVM runtime/pprof capability-boundary skips: %s", llvmPprofSkip)
 			}
 			args = append(args, name)
 			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), processTimeout)

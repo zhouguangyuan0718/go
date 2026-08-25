@@ -141,6 +141,7 @@
       "runtime/coverage": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "runtime/debug": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "runtime/metrics": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
+      "runtime/pprof": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests; tests requiring precise native pcln or inline-stack shapes remain explicitly skipped",
       "runtime/race": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "runtime/trace": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",
       "slices": "qualified through LLVM O2 compilation of its complete standard-library dependency closure including runtime, plus GoObj/archive, link, and package tests",

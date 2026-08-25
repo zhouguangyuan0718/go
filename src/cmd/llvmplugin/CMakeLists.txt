@@ -540,6 +540,46 @@ if(BUILD_TESTING)
     -verify-machineinstrs
   )
 
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.NullableFixedFrameDerived
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+    IR
+    -verify-machineinstrs
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.NullableFixedFrameDerivedMIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+    MIR
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+  )
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.NullableFixedFrameDerivedAArch64MIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+    MIR-AARCH64
+    "${GOALLC_LLC_EXECUTABLE}"
+    -mtriple=aarch64-unknown-linux-goobj
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -verify-machineinstrs
+    -stop-after=finalize-isel
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+  )
+  add_test(
+    NAME GoALLCStatepoints.NullableFixedFrameDerivedGoObj
+    COMMAND
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/nullable-fixed-frame-derived.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+  )
+
   add_test(
     NAME GoALLCStatepoints.GoObj
     COMMAND
@@ -616,6 +656,17 @@ if(BUILD_TESTING)
         "GOALLC_OBJVIEW_EXECUTABLE does not exist: "
         "${GOALLC_OBJVIEW_EXECUTABLE}")
     endif()
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.NullableFixedFrameDerivedObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/nullable-fixed-frame-derived.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -format=text
+      "${CMAKE_CURRENT_BINARY_DIR}/nullable-fixed-frame-derived.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.NullableFixedFrameDerivedObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.NullableFixedFrameDerivedGoObj
+    )
     foreach(GOALLC_DEBUG_TARGET IN ITEMS X86 AArch64)
       if(GOALLC_DEBUG_TARGET STREQUAL "X86")
         set(GOALLC_DEBUG_CHECK_PREFIX DEBUG-X86)
