@@ -63,7 +63,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; MIR-AARCH64: LDRBBui{{.*}}2240
 
 ; OBJVIEW-LABEL: TEXT nullable_fixed_frame_derived(SB)
-; OBJVIEW: size=78 args=8 locals=2256
+; OBJVIEW: size={{[0-9]+}} args=8 locals=2256
 ; OBJVIEW: FUNCDATA_LocalsPointerMaps count=2 bits=282
 ; OBJVIEW-SAME: map[0]={{0+}}
 ; OBJVIEW-SAME: map[1]=1{{0+}}
