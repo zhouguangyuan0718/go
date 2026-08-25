@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 #include "GoALLCStatepoints.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
@@ -11,6 +12,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/Utils/Local.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/BinaryFormat/GoObj.h"
@@ -332,6 +334,541 @@ Value *fixedFrameProvenanceBase(Value *V) {
 
 bool isFixedFrameAddress(const Value *V) {
   return V->getType()->isPointerTy() && fixedFrameProvenanceBase(V) != nullptr;
+}
+
+// LLVM's RewriteStatepointsForGC traces a live derived pointer to a base
+// defining value (BDV). Constants have the non-moving null base, while a
+// pointer PHI/select whose incoming values resolve to different bases gets a
+// parallel base PHI/select. Keep the scalar part of that contract here: Go's
+// stack maps carry only the inferred base, and an integer offset lets the
+// existing rematerialization path rebuild the derived value after stack
+// growth.
+class ScalarPointerBaseAnalysis {
+public:
+  explicit ScalarPointerBaseAnalysis(Function &F) : DL(F.getDataLayout()) {}
+
+  Expected<Value *> get(Value *V) {
+    Expected<Value *> DefOrErr = findBaseOrBDV(V);
+    if (!DefOrErr)
+      return DefOrErr.takeError();
+    Value *Def = *DefOrErr;
+    if (isKnownBase(Def))
+      return Def;
+
+    MapVector<Value *, BaseState> States;
+    SmallVector<Value *, 16> Worklist{Def};
+    States.insert({Def, BaseState()});
+    while (!Worklist.empty()) {
+      Value *Current = Worklist.pop_back_val();
+      Error Err = visitMergeOperands(Current, [&](Value *Input) -> Error {
+        Expected<Value *> InputDefOrErr = findBaseOrBDV(Input);
+        if (!InputDefOrErr)
+          return InputDefOrErr.takeError();
+        Value *InputDef = *InputDefOrErr;
+        if (isKnownBase(InputDef))
+          return Error::success();
+        if (!isa<PHINode, SelectInst>(InputDef))
+          return createStringError(
+              std::errc::not_supported,
+              "GoALLC pointer base analysis found an unsupported merge");
+        if (States.insert({InputDef, BaseState()}).second)
+          Worklist.push_back(InputDef);
+        return Error::success();
+      });
+      if (Err)
+        return std::move(Err);
+    }
+
+    // A merge of values which are already bases is itself a base. This is the
+    // important distinction between `phi(null, frame)` and
+    // `phi(null+C, frame+C)`.
+    bool Changed;
+    do {
+      Changed = false;
+      SmallVector<Value *, 8> BaseMerges;
+      for (auto &[Merge, State] : States) {
+        Value *CurrentMerge = Merge;
+        bool AllInputsAreBases = true;
+        Error Err = visitMergeOperands(Merge, [&](Value *Input) -> Error {
+          if (Input->stripPointerCasts() == CurrentMerge)
+            return Error::success();
+          Expected<Value *> InputDefOrErr = findBaseOrBDV(Input);
+          if (!InputDefOrErr)
+            return InputDefOrErr.takeError();
+          Value *InputDef = *InputDefOrErr;
+          if (Input->stripPointerCasts() != InputDef || States.count(InputDef))
+            AllInputsAreBases = false;
+          return Error::success();
+        });
+        if (Err)
+          return std::move(Err);
+        if (AllInputsAreBases)
+          BaseMerges.push_back(Merge);
+      }
+      for (Value *Merge : BaseMerges) {
+        States.erase(Merge);
+        ResolvedBases[Merge] = Merge;
+        KnownBases[Merge] = true;
+        Changed = true;
+      }
+    } while (Changed);
+
+    if (!States.count(Def))
+      return Def;
+
+    bool Progress;
+    do {
+      Progress = false;
+      for (auto &[Merge, OldState] : States) {
+        BaseState NewState;
+        Error Err = visitMergeOperands(Merge, [&](Value *Input) -> Error {
+          Expected<Value *> InputDefOrErr = findBaseOrBDV(Input);
+          if (!InputDefOrErr)
+            return InputDefOrErr.takeError();
+          Value *InputDef = *InputDefOrErr;
+          auto It = States.find(InputDef);
+          NewState.meet(It == States.end()
+                            ? BaseState(BaseState::Base, InputDef)
+                            : It->second);
+          return Error::success();
+        });
+        if (Err)
+          return std::move(Err);
+        if (NewState != OldState) {
+          OldState = NewState;
+          Progress = true;
+        }
+      }
+    } while (Progress);
+
+    for (auto &[Merge, State] : States)
+      if (State.Kind == BaseState::Unknown)
+        return createStringError(
+            std::errc::not_supported,
+            "GoALLC pointer base analysis found an unanchored merge cycle");
+
+    for (auto &[Merge, State] : States) {
+      if (State.Kind != BaseState::Conflict)
+        continue;
+      Instruction *I = cast<Instruction>(Merge);
+      Instruction *BaseMerge = nullptr;
+      if (auto *Phi = dyn_cast<PHINode>(I)) {
+        BaseMerge =
+            PHINode::Create(Phi->getType(), Phi->getNumIncomingValues(),
+                            Phi->getName() + ".base", Phi->getIterator());
+      } else {
+        BaseMerge = I->clone();
+        BaseMerge->insertBefore(I->getIterator());
+        BaseMerge->setName(I->getName() + ".base");
+      }
+      State.BaseValue = BaseMerge;
+      DefiningValues[BaseMerge] = BaseMerge;
+      ResolvedBases[BaseMerge] = BaseMerge;
+      KnownBases[BaseMerge] = true;
+    }
+
+    for (auto &[Merge, State] : States) {
+      if (State.Kind != BaseState::Conflict)
+        continue;
+      Instruction *BaseMerge = cast<Instruction>(State.BaseValue);
+      auto BaseForInput = [&](Value *Input) -> Expected<Value *> {
+        Expected<Value *> InputDefOrErr = findBaseOrBDV(Input);
+        if (!InputDefOrErr)
+          return InputDefOrErr.takeError();
+        Value *InputDef = *InputDefOrErr;
+        auto It = States.find(InputDef);
+        Value *Base = It == States.end() ? InputDef : It->second.BaseValue;
+        if (!Base || Base->getType() != Input->getType())
+          return createStringError(
+              std::errc::not_supported,
+              "GoALLC pointer base has an incompatible scalar type");
+        return Base;
+      };
+
+      if (auto *BasePhi = dyn_cast<PHINode>(BaseMerge)) {
+        auto *Phi = cast<PHINode>(Merge);
+        for (unsigned I = 0; I != Phi->getNumIncomingValues(); ++I) {
+          Expected<Value *> BaseOrErr = BaseForInput(Phi->getIncomingValue(I));
+          if (!BaseOrErr)
+            return BaseOrErr.takeError();
+          BasePhi->addIncoming(*BaseOrErr, Phi->getIncomingBlock(I));
+        }
+      } else {
+        auto *BaseSelect = cast<SelectInst>(BaseMerge);
+        auto *Select = cast<SelectInst>(Merge);
+        Expected<Value *> TrueBaseOrErr = BaseForInput(Select->getTrueValue());
+        if (!TrueBaseOrErr)
+          return TrueBaseOrErr.takeError();
+        Expected<Value *> FalseBaseOrErr =
+            BaseForInput(Select->getFalseValue());
+        if (!FalseBaseOrErr)
+          return FalseBaseOrErr.takeError();
+        BaseSelect->setTrueValue(*TrueBaseOrErr);
+        BaseSelect->setFalseValue(*FalseBaseOrErr);
+      }
+    }
+
+    deduplicateBaseMerges(States);
+    for (auto &[Merge, State] : States)
+      ResolvedBases[Merge] = State.BaseValue;
+    return ResolvedBases.lookup(Def);
+  }
+
+private:
+  struct BaseState {
+    enum KindTy { Unknown, Base, Conflict } Kind = Unknown;
+    Value *BaseValue = nullptr;
+
+    BaseState() = default;
+    BaseState(KindTy Kind, Value *BaseValue)
+        : Kind(Kind), BaseValue(BaseValue) {}
+
+    void meet(const BaseState &Other) {
+      if (Kind == Conflict || Other.Kind == Unknown)
+        return;
+      if (Kind == Unknown) {
+        *this = Other;
+        return;
+      }
+      if (Other.Kind == Conflict || BaseValue != Other.BaseValue) {
+        Kind = Conflict;
+        BaseValue = nullptr;
+      }
+    }
+
+    bool operator!=(const BaseState &Other) const {
+      return Kind != Other.Kind || BaseValue != Other.BaseValue;
+    }
+  };
+
+  const DataLayout &DL;
+  MapVector<Value *, Value *> DefiningValues;
+  MapVector<Value *, Value *> ResolvedBases;
+  MapVector<Value *, bool> KnownBases;
+
+  bool isKnownBase(Value *V) const {
+    auto It = KnownBases.find(V);
+    return It != KnownBases.end() && It->second;
+  }
+
+  Expected<Value *> findBaseDefiningValue(Value *V) {
+    if (!V->getType()->isPointerTy())
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC scalar pointer base has non-pointer type");
+    if (auto It = DefiningValues.find(V); It != DefiningValues.end())
+      return It->second;
+
+    auto RememberBase = [&](Value *Base) -> Value * {
+      DefiningValues[V] = Base;
+      KnownBases[Base] = true;
+      return Base;
+    };
+    if (isa<Constant>(V)) {
+      auto *Null = ConstantPointerNull::get(cast<PointerType>(V->getType()));
+      return RememberBase(Null);
+    }
+    if (isFixedFrameBase(V) ||
+        isa<Argument, LoadInst, CallBase, IntToPtrInst, ExtractValueInst>(V))
+      return RememberBase(V);
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+      Expected<Value *> BaseOrErr =
+          findBaseDefiningValue(GEP->getPointerOperand());
+      if (!BaseOrErr)
+        return BaseOrErr.takeError();
+      DefiningValues[V] = *BaseOrErr;
+      return *BaseOrErr;
+    }
+    if (auto *Freeze = dyn_cast<FreezeInst>(V)) {
+      Expected<Value *> BaseOrErr =
+          findBaseDefiningValue(Freeze->getOperand(0));
+      if (!BaseOrErr)
+        return BaseOrErr.takeError();
+      DefiningValues[V] = *BaseOrErr;
+      return *BaseOrErr;
+    }
+    if (auto *Cast = dyn_cast<CastInst>(V);
+        Cast && Cast->getSrcTy()->isPointerTy() &&
+        Cast->getDestTy()->isPointerTy() && Cast->isNoopCast(DL)) {
+      Expected<Value *> BaseOrErr = findBaseDefiningValue(Cast->getOperand(0));
+      if (!BaseOrErr)
+        return BaseOrErr.takeError();
+      DefiningValues[V] = *BaseOrErr;
+      return *BaseOrErr;
+    }
+    if (isa<PHINode, SelectInst>(V)) {
+      DefiningValues[V] = V;
+      KnownBases[V] = false;
+      return V;
+    }
+
+    // The current non-moving heap contract treats any other scalar pointer
+    // producer as a base. Only transparent address derivations and merge nodes
+    // participate in base inference.
+    return RememberBase(V);
+  }
+
+  Expected<Value *> findBaseOrBDV(Value *V) {
+    Expected<Value *> DefOrErr = findBaseDefiningValue(V);
+    if (!DefOrErr)
+      return DefOrErr.takeError();
+    if (Value *Resolved = ResolvedBases.lookup(*DefOrErr))
+      return Resolved;
+    return *DefOrErr;
+  }
+
+  template <typename VisitorT>
+  Error visitMergeOperands(Value *V, VisitorT &&Visit) {
+    if (auto *Phi = dyn_cast<PHINode>(V)) {
+      for (Value *Input : Phi->incoming_values())
+        if (Error Err = Visit(Input))
+          return Err;
+      return Error::success();
+    }
+    if (auto *Select = dyn_cast<SelectInst>(V)) {
+      if (Error Err = Visit(Select->getTrueValue()))
+        return Err;
+      return Visit(Select->getFalseValue());
+    }
+    return createStringError(std::errc::not_supported,
+                             "GoALLC pointer BDV is not a PHI or select");
+  }
+
+  void deduplicateBaseMerges(MapVector<Value *, BaseState> &States) {
+    auto ReplaceBase = [&](Instruction *Old, Instruction *New) {
+      Old->replaceAllUsesWith(New);
+      for (auto &[Merge, State] : States)
+        if (State.BaseValue == Old)
+          State.BaseValue = New;
+      KnownBases[New] = true;
+      DefiningValues.erase(Old);
+      ResolvedBases.erase(Old);
+      KnownBases.erase(Old);
+      Old->eraseFromParent();
+    };
+
+    for (auto &[Merge, State] : States) {
+      auto *BasePhi = dyn_cast_or_null<PHINode>(State.BaseValue);
+      if (!BasePhi)
+        continue;
+      for (PHINode &Other : BasePhi->getParent()->phis()) {
+        if (&Other == BasePhi || Other.getType() != BasePhi->getType() ||
+            Other.getNumIncomingValues() != BasePhi->getNumIncomingValues())
+          continue;
+        bool Same = true;
+        for (unsigned I = 0; I != Other.getNumIncomingValues(); ++I)
+          Same &= Other.getIncomingBlock(I) == BasePhi->getIncomingBlock(I) &&
+                  Other.getIncomingValue(I) == BasePhi->getIncomingValue(I);
+        if (Same) {
+          ReplaceBase(BasePhi, &Other);
+          break;
+        }
+      }
+    }
+
+    for (auto &[Merge, State] : States) {
+      auto *BaseSelect = dyn_cast_or_null<SelectInst>(State.BaseValue);
+      if (!BaseSelect)
+        continue;
+      for (Instruction &I : *BaseSelect->getParent()) {
+        auto *Other = dyn_cast<SelectInst>(&I);
+        if (!Other || Other == BaseSelect || !Other->comesBefore(BaseSelect))
+          continue;
+        if (Other->getType() == BaseSelect->getType() &&
+            Other->getCondition() == BaseSelect->getCondition() &&
+            Other->getTrueValue() == BaseSelect->getTrueValue() &&
+            Other->getFalseValue() == BaseSelect->getFalseValue()) {
+          ReplaceBase(BaseSelect, Other);
+          break;
+        }
+      }
+    }
+  }
+};
+
+class ScalarPointerOffsetBuilder {
+public:
+  ScalarPointerOffsetBuilder(Function &F, ScalarPointerBaseAnalysis &Bases)
+      : DL(F.getDataLayout()), Bases(Bases) {}
+
+  Expected<Value *> get(Value *V) {
+    if (Value *Offset = Offsets.lookup(V))
+      return Offset;
+    Expected<Value *> BaseOrErr = Bases.get(V);
+    if (!BaseOrErr)
+      return BaseOrErr.takeError();
+    Value *Base = *BaseOrErr;
+    Type *IndexTy = DL.getIndexType(V->getType());
+    if (V == Base) {
+      Value *Zero = ConstantInt::get(IndexTy, 0);
+      Offsets[V] = Zero;
+      return Zero;
+    }
+    if (auto *C = dyn_cast<Constant>(V)) {
+      if (DL.isNonIntegralPointerType(V->getType()))
+        return createStringError(
+            std::errc::not_supported,
+            "GoALLC cannot form an offset for a non-integral pointer constant");
+      Constant *Offset = ConstantExpr::getPtrToInt(C, IndexTy);
+      Offset = ConstantFoldConstant(Offset, DL);
+      Offsets[V] = Offset;
+      return Offset;
+    }
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+      Expected<Value *> ParentOrErr = get(GEP->getPointerOperand());
+      if (!ParentOrErr)
+        return ParentOrErr.takeError();
+      IRBuilder<> Builder(GEP);
+      Value *GEPOffset = emitGEPOffset(&Builder, DL, GEP);
+      if (GEPOffset->getType() != IndexTy)
+        GEPOffset = Builder.CreateSExtOrTrunc(GEPOffset, IndexTy,
+                                              GEP->getName() + ".offset.cast");
+      Value *Offset = GEPOffset;
+      if (auto *Parent = dyn_cast<ConstantInt>(*ParentOrErr);
+          !Parent || !Parent->isZero())
+        Offset = Builder.CreateAdd(*ParentOrErr, GEPOffset,
+                                   GEP->getName() + ".offset");
+      Offsets[V] = Offset;
+      return Offset;
+    }
+    if (auto *Cast = dyn_cast<CastInst>(V);
+        Cast && Cast->getSrcTy()->isPointerTy() &&
+        Cast->getDestTy()->isPointerTy() && Cast->isNoopCast(DL)) {
+      Expected<Value *> OffsetOrErr = get(Cast->getOperand(0));
+      if (!OffsetOrErr)
+        return OffsetOrErr.takeError();
+      Offsets[V] = *OffsetOrErr;
+      return *OffsetOrErr;
+    }
+    if (auto *Freeze = dyn_cast<FreezeInst>(V)) {
+      Expected<Value *> OperandOrErr = get(Freeze->getOperand(0));
+      if (!OperandOrErr)
+        return OperandOrErr.takeError();
+      IRBuilder<> Builder(Freeze);
+      Value *Offset =
+          Builder.CreateFreeze(*OperandOrErr, Freeze->getName() + ".offset");
+      Offsets[V] = Offset;
+      return Offset;
+    }
+    if (auto *Phi = dyn_cast<PHINode>(V)) {
+      auto *OffsetPhi =
+          PHINode::Create(IndexTy, Phi->getNumIncomingValues(),
+                          Phi->getName() + ".offset", Phi->getIterator());
+      Offsets[V] = OffsetPhi;
+      for (unsigned I = 0; I != Phi->getNumIncomingValues(); ++I) {
+        Expected<Value *> IncomingOrErr = get(Phi->getIncomingValue(I));
+        if (!IncomingOrErr)
+          return IncomingOrErr.takeError();
+        OffsetPhi->addIncoming(*IncomingOrErr, Phi->getIncomingBlock(I));
+      }
+      Value *Common = nullptr;
+      for (Value *Incoming : OffsetPhi->incoming_values()) {
+        if (Incoming == OffsetPhi)
+          continue;
+        if (!Common)
+          Common = Incoming;
+        else if (Common != Incoming)
+          return OffsetPhi;
+      }
+      if (Common) {
+        Offsets[V] = Common;
+        OffsetPhi->replaceAllUsesWith(Common);
+        OffsetPhi->eraseFromParent();
+        return Common;
+      }
+      return OffsetPhi;
+    }
+    if (auto *Select = dyn_cast<SelectInst>(V)) {
+      Expected<Value *> TrueOrErr = get(Select->getTrueValue());
+      if (!TrueOrErr)
+        return TrueOrErr.takeError();
+      Expected<Value *> FalseOrErr = get(Select->getFalseValue());
+      if (!FalseOrErr)
+        return FalseOrErr.takeError();
+      Value *Offset = *TrueOrErr;
+      if (*TrueOrErr != *FalseOrErr) {
+        IRBuilder<> Builder(Select);
+        Offset =
+            Builder.CreateSelect(Select->getCondition(), *TrueOrErr,
+                                 *FalseOrErr, Select->getName() + ".offset");
+      }
+      Offsets[V] = Offset;
+      return Offset;
+    }
+    return createStringError(
+        std::errc::not_supported,
+        "GoALLC cannot express a derived scalar pointer as base plus offset");
+  }
+
+private:
+  const DataLayout &DL;
+  ScalarPointerBaseAnalysis &Bases;
+  MapVector<Value *, Value *> Offsets;
+};
+
+Error normalizeMergedDerivedPointers(Function &F) {
+  ScalarPointerBaseAnalysis Bases(F);
+  ScalarPointerOffsetBuilder Offsets(F, Bases);
+  struct Normalization {
+    WeakTrackingVH Address;
+    WeakTrackingVH Base;
+    WeakTrackingVH Offset;
+  };
+  SmallVector<WeakTrackingVH, 16> Candidates;
+  for (Instruction &I : instructions(F))
+    // Same-object fixed-frame merges already use FixedFrameOffsetBuilder and
+    // must retain their canonical alloca/byval/goret identity.
+    if (I.getType()->isPointerTy() && isa<PHINode, SelectInst>(I) &&
+        !isFixedFrameAddress(&I))
+      Candidates.push_back(&I);
+
+  SmallVector<Normalization, 16> Normalizations;
+  for (WeakTrackingVH &Handle : Candidates) {
+    auto *I = dyn_cast_or_null<Instruction>(Handle);
+    if (!I)
+      continue;
+    Expected<Value *> BaseOrErr = Bases.get(I);
+    if (!BaseOrErr)
+      return BaseOrErr.takeError();
+    if (*BaseOrErr == I)
+      continue;
+    Expected<Value *> OffsetOrErr = Offsets.get(I);
+    if (!OffsetOrErr)
+      return OffsetOrErr.takeError();
+    Normalizations.push_back({I, *BaseOrErr, *OffsetOrErr});
+  }
+
+  SmallVector<WeakTrackingVH, 16> Dead;
+  for (const Normalization &Normalization : Normalizations) {
+    auto *Address = dyn_cast_or_null<Instruction>(Normalization.Address);
+    Value *Base = Normalization.Base;
+    Value *Offset = Normalization.Offset;
+    if (!Address || !Base || !Offset)
+      return createStringError(
+          std::errc::invalid_argument,
+          "GoALLC derived pointer normalization lost an SSA value");
+    Instruction *InsertBefore = Address;
+    if (auto *Phi = dyn_cast<PHINode>(Address))
+      InsertBefore = &*Phi->getParent()->getFirstNonPHIIt();
+    IRBuilder<> Builder(InsertBefore);
+    Builder.SetCurrentDebugLocation(Address->getDebugLoc());
+    Value *Derived =
+        Builder.CreateGEP(Builder.getInt8Ty(), Base, Offset,
+                          Address->hasName() ? Address->getName() + ".derived"
+                                             : "derived.pointer");
+    Address->replaceAllUsesWith(Derived);
+    Dead.push_back(Address);
+  }
+  for (WeakTrackingVH &Handle : llvm::reverse(Dead)) {
+    auto *I = dyn_cast_or_null<Instruction>(Handle);
+    if (!I)
+      continue;
+    if (auto *Phi = dyn_cast<PHINode>(I))
+      RecursivelyDeleteDeadPHINode(Phi);
+    else
+      RecursivelyDeleteTriviallyDeadInstructions(I);
+  }
+  return Error::success();
 }
 
 const Value *rematerializableDerivedBase(const Value *V) {
@@ -2510,6 +3047,8 @@ Error rewriteFunction(Function &F) {
   if (Error Err = collectPointerFixedArgs(F, PointerFixedArgs))
     return Err;
   if (Error Err = scalarizeLivePointerAggregates(F))
+    return Err;
+  if (Error Err = normalizeMergedDerivedPointers(F))
     return Err;
   // Scalarization can expose fixed-frame pointer PHIs/selects. Preserve only
   // their integer object offsets across statepoints; concrete addresses are
