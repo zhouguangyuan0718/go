@@ -925,6 +925,48 @@ std::string leafName(Value &Aggregate, ArrayRef<unsigned> Indices) {
   return Name;
 }
 
+Value *findUniformUninitializedLeaf(Value &Aggregate,
+                                    ArrayRef<unsigned> Indices,
+                                    SmallPtrSetImpl<Value *> &Active) {
+  if (Value *Inserted = FindInsertedValue(&Aggregate, Indices))
+    return isa<UndefValue, PoisonValue>(Inserted) ? Inserted : nullptr;
+
+  // FindInsertedValue deliberately stops at control-flow merges. Look through
+  // a merge only when every incoming aggregate contributes the exact same
+  // undef or poison leaf. Reusing that constant preserves the IR semantics and
+  // prevents scalarization from manufacturing a pointer SSA value whose
+  // SelectionDAG representation is only an IMPLICIT_DEF.
+  if (!Active.insert(&Aggregate).second)
+    return nullptr;
+
+  SmallVector<Value *, 4> IncomingAggregates;
+  if (auto *Phi = dyn_cast<PHINode>(&Aggregate)) {
+    IncomingAggregates.append(Phi->incoming_values().begin(),
+                              Phi->incoming_values().end());
+  } else if (auto *Select = dyn_cast<SelectInst>(&Aggregate)) {
+    IncomingAggregates.push_back(Select->getTrueValue());
+    IncomingAggregates.push_back(Select->getFalseValue());
+  }
+
+  Value *Uniform = nullptr;
+  for (Value *Incoming : IncomingAggregates) {
+    Value *Leaf = findUniformUninitializedLeaf(*Incoming, Indices, Active);
+    if (!Leaf || (Uniform && Leaf != Uniform)) {
+      Uniform = nullptr;
+      break;
+    }
+    Uniform = Leaf;
+  }
+  Active.erase(&Aggregate);
+  return Uniform;
+}
+
+Value *findUniformUninitializedLeaf(Value &Aggregate,
+                                    ArrayRef<unsigned> Indices) {
+  SmallPtrSet<Value *, 8> Active;
+  return findUniformUninitializedLeaf(Aggregate, Indices, Active);
+}
+
 Expected<SmallVector<Value *, 8>>
 extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
                        Function &F) {
@@ -964,12 +1006,16 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
     // from undef or poison would invent an ordinary pointer root whose
     // SelectionDAG spill may be removed.
     Value *Inserted = FindInsertedValue(&Aggregate, Leaf.Indices);
-    Value *LeafValue =
-        Inserted && (isa<UndefValue, PoisonValue>(Inserted) ||
-                     isFixedFrameAddress(Inserted))
-            ? Inserted
-            : Builder.CreateExtractValue(&Aggregate, Leaf.Indices,
-                                         leafName(Aggregate, Leaf.Indices));
+    Value *LeafValue = nullptr;
+    if (Inserted && (isa<UndefValue, PoisonValue>(Inserted) ||
+                     isFixedFrameAddress(Inserted))) {
+      LeafValue = Inserted;
+    } else if (!Inserted) {
+      LeafValue = findUniformUninitializedLeaf(Aggregate, Leaf.Indices);
+    }
+    if (!LeafValue)
+      LeafValue = Builder.CreateExtractValue(&Aggregate, Leaf.Indices,
+                                             leafName(Aggregate, Leaf.Indices));
     Values.push_back(LeafValue);
   }
   return Values;
