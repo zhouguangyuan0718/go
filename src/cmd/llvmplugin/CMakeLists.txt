@@ -479,6 +479,55 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/typed-byval.ll"
   )
   goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.CallsiteGoRet
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/callsite-goret.ll"
+    IR
+  )
+  foreach(GOALLC_GORET_TARGET IN ITEMS X86 AArch64)
+    if(GOALLC_GORET_TARGET STREQUAL "X86")
+      set(GOALLC_GORET_TRIPLE "x86_64-unknown-linux-goobj")
+    else()
+      set(GOALLC_GORET_TRIPLE "aarch64-unknown-linux-goobj")
+    endif()
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.${GOALLC_GORET_TARGET}CallsiteGoRetMIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/callsite-goret.ll"
+      MIR
+      "${GOALLC_LLC_EXECUTABLE}"
+      "-mtriple=${GOALLC_GORET_TRIPLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs
+      -stop-after=finalize-isel
+      -o -
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/callsite-goret.ll"
+    )
+    add_test(
+      NAME GoALLCStatepoints.${GOALLC_GORET_TARGET}CallsiteGoRetGoObj
+      COMMAND
+        "${GOALLC_LLC_EXECUTABLE}"
+        "-mtriple=${GOALLC_GORET_TRIPLE}"
+        "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+        -verify-machineinstrs
+        -filetype=obj
+        -o "${CMAKE_CURRENT_BINARY_DIR}/callsite-goret-${GOALLC_GORET_TARGET}.goobj"
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/callsite-goret.ll"
+    )
+    if(GOALLC_OBJVIEW_EXECUTABLE)
+      goallc_add_filecheck_test(
+        GoALLCStatepoints.${GOALLC_GORET_TARGET}CallsiteGoRetObjView
+        "${CMAKE_CURRENT_SOURCE_DIR}/testdata/callsite-goret.ll"
+        OBJVIEW
+        "${GOALLC_OBJVIEW_EXECUTABLE}" -format=text
+        "${CMAKE_CURRENT_BINARY_DIR}/callsite-goret-${GOALLC_GORET_TARGET}.goobj"
+      )
+      set_tests_properties(
+        GoALLCStatepoints.${GOALLC_GORET_TARGET}CallsiteGoRetObjView
+        PROPERTIES
+        DEPENDS GoALLCStatepoints.${GOALLC_GORET_TARGET}CallsiteGoRetGoObj
+      )
+    endif()
+  endforeach()
+  goallc_add_ir_filecheck_test(
     GoALLCStatepoints.IndirectCallRewrite
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/indirect-callee.ll"
     IR

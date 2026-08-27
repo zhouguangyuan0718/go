@@ -126,6 +126,7 @@ struct PointerAllocaRecord {
   PointerFrameLayout Layout;
   SmallVector<IntrinsicInst *, 4> LifetimeMarkers;
   SmallVector<Instruction *, 16> AddressUses;
+  SmallVector<CallInst *, 4> GoRetDefs;
   SmallVector<CallInst *, 8> ActiveCalls;
   bool WholeLifetime = false;
   bool ActivityUnclear = false;
@@ -1887,6 +1888,26 @@ Expected<std::optional<OpenDeferInfo>> collectOpenDeferInfo(Function &F) {
 // post-optimization decision: the frontend Addrtaken bit is provenance, not a
 // promise that prevents SROA or forces a surviving frame address to remain a
 // stack object.
+bool isWholeAllocaGoRetUse(const AllocaInst &Alloca, Value *Address,
+                           const Use &U) {
+  auto *Call = dyn_cast<CallInst>(U.getUser());
+  if (!Call || !Call->isArgOperand(&U) ||
+      !isGoCallingConv(Call->getCallingConv()))
+    return false;
+  unsigned ArgNo = Call->getArgOperandNo(&U);
+  if (!Call->paramHasAttr(ArgNo, Attribute::GoRet) ||
+      Call->getParamGoRetType(ArgNo) != Alloca.getAllocatedType())
+    return false;
+
+  int64_t Offset = 0;
+  const DataLayout &DL = Call->getDataLayout();
+  if (GetPointerBaseWithConstantOffset(Address, Offset, DL) != &Alloca ||
+      Offset != 0)
+    return false;
+  std::optional<Align> ParamAlign = Call->getParamAlign(ArgNo);
+  return ParamAlign && Alloca.getAlign() >= *ParamAlign;
+}
+
 bool addressNeedsStackObject(Value &Base) {
   SmallVector<Value *, 16> Worklist{&Base};
   SmallPtrSet<Value *, 16> Seen;
@@ -1931,6 +1952,14 @@ bool addressNeedsStackObject(Value &Base) {
           continue;
         }
         if (isa<ICmpInst>(I))
+          continue;
+        // A typed goret operand denotes the callee-written ABI result area;
+        // the callee does not receive or observe this IR carrier address.
+        // Keep exact whole-object carriers on the compiler-controlled fixed
+        // frame path. Any other use of the same address is still examined
+        // independently and can require a StackObject.
+        if (auto *Alloca = dyn_cast<AllocaInst>(&Base);
+            Alloca && isWholeAllocaGoRetUse(*Alloca, Address, U))
           continue;
         // A mixed-object merge, passing, storing, returning, converting,
         // inline asm, and every other escaping SSA use makes the address
@@ -1979,9 +2008,12 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record,
         return Marker->getIntrinsicID() == Intrinsic::lifetime_start;
       });
   SmallPtrSet<Instruction *, 16> SeenUses;
+  SmallPtrSet<CallInst *, 4> CandidateGoRetDefs;
+  SmallPtrSet<CallInst *, 4> NonGoRetCallUses;
   visitFixedFrameAddressUses(
       *Record.Alloca,
-      [&](Value *, Use &U, Instruction *I, FrameAddressUseKind Kind) {
+      [&](Value *Address, Use &U, Instruction *I,
+          FrameAddressUseKind Kind) {
         if (!I) {
           Record.ActivityUnclear = true;
           return;
@@ -1995,6 +2027,12 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record,
             (Kind == FrameAddressUseKind::FirstClass &&
              isa<PHINode, SelectInst, FreezeInst>(I)))
           return;
+        if (auto *Call = dyn_cast<CallInst>(I)) {
+          if (isWholeAllocaGoRetUse(*Record.Alloca, Address, U))
+            CandidateGoRetDefs.insert(Call);
+          else
+            NonGoRetCallUses.insert(Call);
+        }
         if (Kind == FrameAddressUseKind::FirstClass && HasLifetimeStart &&
             !llvm::any_of(Record.LifetimeMarkers, [&](IntrinsicInst *Marker) {
               return Marker->getIntrinsicID() == Intrinsic::lifetime_start &&
@@ -2010,17 +2048,25 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record,
         if (SeenUses.insert(I).second)
           Record.AddressUses.push_back(I);
       });
+  for (CallInst *Call : CandidateGoRetDefs)
+    if (!NonGoRetCallUses.contains(Call))
+      Record.GoRetDefs.push_back(Call);
+}
+
+void transferPointerAllocaLiveness(const PointerAllocaRecord &Record,
+                                   const Instruction &I, bool &Live) {
+  if (llvm::is_contained(Record.LifetimeMarkers, &I) ||
+      llvm::is_contained(Record.GoRetDefs, &I))
+    Live = false;
+  else if (llvm::is_contained(Record.AddressUses, &I))
+    Live = true;
 }
 
 bool pointerAllocaLiveInBlock(const PointerAllocaRecord &Record,
                               const BasicBlock &BB, bool LiveOut) {
   bool Live = LiveOut;
-  for (const Instruction &I : llvm::reverse(BB)) {
-    if (llvm::is_contained(Record.LifetimeMarkers, &I))
-      Live = false;
-    else if (llvm::is_contained(Record.AddressUses, &I))
-      Live = true;
-  }
+  for (const Instruction &I : llvm::reverse(BB))
+    transferPointerAllocaLiveness(Record, I, Live);
   return Live;
 }
 
@@ -2065,13 +2111,12 @@ Error computePointerAllocaActivity(
         // safepoint, so an address used solely as this call's argument is not
         // a caller gc-live root.
         auto *Call = dyn_cast<CallInst>(&I);
+        bool IsGoRetDef = llvm::is_contained(Record.GoRetDefs, Call);
         if (Call && SafepointCalls.contains(Call) &&
+            !IsGoRetDef &&
             (Live || !DT.isReachableFromEntry(Call->getParent())))
           Record.ActiveCalls.push_back(Call);
-        if (llvm::is_contained(Record.LifetimeMarkers, &I))
-          Live = false;
-        else if (llvm::is_contained(Record.AddressUses, &I))
-          Live = true;
+        transferPointerAllocaLiveness(Record, I, Live);
       }
     }
   }
@@ -2145,6 +2190,8 @@ bool hasInitializedPointerSlotsBeforeSafepoint(
     Instruction *Begin, const PointerAllocaRecord &Record,
     const DataLayout &DL) {
   SmallBitVector Initialized(Record.Layout.Leaves.size());
+  if (Record.ActiveCalls.empty())
+    return true;
   for (Instruction *I = Begin; I; I = I->getNextNode()) {
     if (auto *Store = dyn_cast<StoreInst>(I)) {
       Value *StoredValue = Store->getValueOperand();
@@ -2210,8 +2257,18 @@ bool hasInitializedPointerSlotsBeforeSafepoint(
       continue;
     }
     if (auto *Call = dyn_cast<CallBase>(I);
-        Call && !Call->isMustTailCall() && !isLeafCall(*Call))
-      return Initialized.count() == Record.Layout.Leaves.size();
+        Call && !Call->isMustTailCall() && !isLeafCall(*Call)) {
+      if (auto *OrdinaryCall = dyn_cast<CallInst>(Call);
+          OrdinaryCall &&
+          llvm::is_contained(Record.ActiveCalls, OrdinaryCall))
+        return Initialized.count() == Record.Layout.Leaves.size();
+      // On a normal return, a typed goret call has initialized the complete
+      // logical result object. The caller stack map at that call describes
+      // the old contents, so apply this definition only for later calls.
+      if (auto *OrdinaryCall = dyn_cast<CallInst>(Call);
+          OrdinaryCall && llvm::is_contained(Record.GoRetDefs, OrdinaryCall))
+        Initialized.set();
+    }
   }
   return Initialized.count() == Record.Layout.Leaves.size();
 }
@@ -3092,10 +3149,25 @@ Error rewriteFunction(Function &F) {
   if (Error Err = computePointerFixedArgActivity(F, PointerFixedArgs,
                                                  SafepointCalls, DT))
     return Err;
+  if (Error Err =
+          computePointerAllocaActivity(F, PointerAllocas, SafepointCalls, DT))
+    return Err;
   for (SafepointRecord &Record : Records) {
     for (Value *Address : Record.FixedFrameAddresses) {
       Value *Base = fixedFrameProvenanceBase(Address);
       assert(Base && "live fixed frame address has no fixed base");
+      auto AllocaIt = llvm::find_if(
+          PointerAllocas, [&](const PointerAllocaRecord &Alloca) {
+            return Alloca.Alloca == Base;
+          });
+      // An unobservable caller-side goret carrier is defined by this call.
+      // Its IR pointer is neither a pre-call root nor an escaped address; the
+      // statepoint's typed goret operand is sufficient for SelectionDAG to
+      // materialize and then consume the ABI result area directly.
+      if (AllocaIt != PointerAllocas.end() && !AllocaIt->NeedsStackObject &&
+          !AllocaIt->DeferResult && !AllocaIt->OpenDeferSlot &&
+          llvm::is_contained(AllocaIt->GoRetDefs, Record.Call))
+        continue;
       Record.Live.insert(Base);
     }
     for (Value *Address : Record.DerivedPointers) {
@@ -3108,9 +3180,6 @@ Error rewriteFunction(Function &F) {
   for (const SafepointRecord &Record : Records)
     if (Error Err = validateSafepoint(Record))
       return Err;
-  if (Error Err =
-          computePointerAllocaActivity(F, PointerAllocas, SafepointCalls, DT))
-    return Err;
   protectStackObjectsFromColoring(PointerAllocas);
   preparePointerAllocaStorageForGC(PointerAllocas);
   for (SafepointRecord &Record : llvm::reverse(Records)) {
