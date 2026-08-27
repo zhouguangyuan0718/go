@@ -95,6 +95,15 @@ struct SafepointRecord {
   ValueSet Live;
   ValueSet FixedFrameAddresses;
   ValueSet DerivedPointers;
+  // Aggregate scalarization gives a defined pointer leaf its own SSA identity
+  // so relocating that leaf does not rewrite unrelated uses of the pointer
+  // originally inserted into the aggregate. When both identities are live at
+  // one safepoint, they can nevertheless share that safepoint's root and
+  // relocated definition.
+  SmallVector<std::pair<Value *, Value *>, 4> CoalescedLiveRoots;
+  // Resolve the shared relocate while original call results still exist;
+  // eraseOriginalCalls can replace and erase those root Value identities.
+  SmallVector<std::pair<WeakTrackingVH, CallInst *>, 4> CoalescedRelocates;
   CallInst *Statepoint = nullptr;
   CallInst *Result = nullptr;
   SmallVector<CallInst *, 8> Relocates;
@@ -1507,7 +1516,8 @@ Value *findUniformUninitializedLeaf(Value &Aggregate,
 
 Expected<SmallVector<Value *, 8>>
 extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
-                       Function &F) {
+                       Function &F,
+                       MapVector<Value *, Value *> &DirectPointerLeafSources) {
   IRBuilder<> Builder(F.getContext());
   if (auto *Arg = dyn_cast<Argument>(&Aggregate)) {
     Builder.SetInsertPoint(&F.getEntryBlock(),
@@ -1551,9 +1561,17 @@ extractAggregateLeaves(Value &Aggregate, ArrayRef<AggregateLeaf> Leaves,
     } else if (!Inserted) {
       LeafValue = findUniformUninitializedLeaf(Aggregate, Leaf.Indices);
     }
-    if (!LeafValue)
+    if (!LeafValue) {
       LeafValue = Builder.CreateExtractValue(&Aggregate, Leaf.Indices,
                                              leafName(Aggregate, Leaf.Indices));
+      // Keep the distinct extractvalue identity for relocation repair, but
+      // remember exact insertvalue provenance. If the inserted pointer is also
+      // independently live at a safepoint, both identities represent the same
+      // root there and can share one gc.relocate.
+      if (Inserted && LeafValue->getType()->isPointerTy() &&
+          isTrackedValue(Inserted, LivenessKind::RelocatablePointers))
+        DirectPointerLeafSources[LeafValue] = Inserted;
+    }
     Values.push_back(LeafValue);
   }
   return Values;
@@ -1568,7 +1586,8 @@ Instruction *aggregateUseInsertionPoint(Use &U) {
   return User;
 }
 
-Error scalarizeLivePointerAggregates(Function &F) {
+Error scalarizeLivePointerAggregates(
+    Function &F, MapVector<Value *, Value *> &DirectPointerLeafSources) {
   LivenessData AggregateLiveness =
       computeLiveness(F, LivenessKind::PointerAggregates);
   ValueSet Candidates;
@@ -1597,7 +1616,7 @@ Error scalarizeLivePointerAggregates(Function &F) {
       OriginalUses.push_back(&U);
 
     Expected<SmallVector<Value *, 8>> LeafValuesOrErr =
-        extractAggregateLeaves(*Candidate, Leaves, F);
+        extractAggregateLeaves(*Candidate, Leaves, F, DirectPointerLeafSources);
     if (!LeafValuesOrErr)
       return LeafValuesOrErr.takeError();
     SmallVector<Value *, 8> LeafValues = std::move(*LeafValuesOrErr);
@@ -1640,10 +1659,99 @@ Error scalarizeLivePointerAggregates(Function &F) {
     }
     for (Value *LeafValue : LeafValues)
       if (auto *LeafInst = dyn_cast<Instruction>(LeafValue);
-          LeafInst && LeafInst->use_empty())
+          LeafInst && LeafInst->use_empty()) {
+        DirectPointerLeafSources.erase(LeafInst);
         LeafInst->eraseFromParent();
+      }
   }
   return Error::success();
+}
+
+void coalesceDirectAggregateLeafRoots(
+    SafepointRecord &Record,
+    const MapVector<Value *, Value *> &DirectPointerLeafSources) {
+  auto IsCallArgumentComponent = [&](Value *Candidate) {
+    for (Value *Argument : Record.Call->args()) {
+      if (Argument == Candidate)
+        return true;
+      if (!Argument->getType()->isAggregateType())
+        continue;
+
+      SmallVector<AggregateLeaf, 8> Leaves;
+      SmallVector<unsigned, 4> Path;
+      if (Error Err =
+              enumerateAggregateLeaves(Argument->getType(), Path, Leaves)) {
+        consumeError(std::move(Err));
+        return true;
+      }
+      if (llvm::any_of(Leaves, [&](const AggregateLeaf &Leaf) {
+            return FindInsertedValue(Argument, Leaf.Indices) == Candidate;
+          }))
+        return true;
+    }
+    return false;
+  };
+
+  MapVector<Value *, SmallVector<Value *, 4>> AliasGroups;
+  for (auto [Leaf, DirectSource] : DirectPointerLeafSources) {
+    // Scalarization can be nested. Follow exact insertvalue provenance to its
+    // original scalar root and group the complete alias chain. Choosing one
+    // canonical root per group avoids making an earlier coalescing decision
+    // refer to a root removed by a later nested leaf.
+    SmallVector<Value *, 4> Aliases{Leaf};
+    Value *Root = DirectSource;
+    while (Value *Source = DirectPointerLeafSources.lookup(Root)) {
+      Aliases.push_back(Root);
+      Root = Source;
+    }
+    Aliases.push_back(Root);
+
+    SmallVector<Value *, 4> &Group = AliasGroups[Root];
+    for (Value *Alias : Aliases)
+      if (!llvm::is_contained(Group, Alias))
+        Group.push_back(Alias);
+  }
+
+  for (auto &[Root, Aliases] : AliasGroups) {
+    if (!Record.Live.contains(Root))
+      continue;
+
+    // Go calling conventions can assign equivalent argument and live-through
+    // identities different machine locations. Preserve the whole group if
+    // the original source supplies an argument or multiple aliases do. When
+    // exactly one scalarized leaf supplies an argument, keep that leaf as the
+    // shared root so both roles consume the same relocated identity.
+    Value *CallArgumentLeaf = nullptr;
+    bool PreserveGroup = false;
+    for (Value *Alias : Aliases) {
+      if (!IsCallArgumentComponent(Alias))
+        continue;
+      if (Alias == Root || CallArgumentLeaf) {
+        PreserveGroup = true;
+        break;
+      }
+      CallArgumentLeaf = Alias;
+    }
+    if (PreserveGroup)
+      continue;
+
+    // A scalarized call-argument leaf can replace only the canonical identity
+    // of a direct pointer result. Aggregate extracts, loads, and other carrier
+    // identities can acquire distinct ABI locations even when their IR values
+    // are equal at the call boundary.
+    if (CallArgumentLeaf && !isa<CallInst>(Root))
+      continue;
+
+    Value *Canonical = CallArgumentLeaf ? CallArgumentLeaf : Root;
+    if (!Record.Live.contains(Canonical))
+      continue;
+    for (Value *Alias : Aliases) {
+      if (Alias == Canonical || !Record.Live.contains(Alias))
+        continue;
+      Record.Live.remove(Alias);
+      Record.CoalescedLiveRoots.push_back({Alias, Canonical});
+    }
+  }
 }
 
 Error enumeratePointerFrameLeaves(Type *Ty, const DataLayout &DL,
@@ -2908,6 +3016,16 @@ Error rewriteCall(SafepointRecord &Record,
     Relocate->setCallingConv(CallingConv::Cold);
     Record.Relocates.push_back(Relocate);
   }
+  for (const auto &Coalesced : Record.CoalescedLiveRoots) {
+    Value *Alias = Coalesced.first;
+    Value *Canonical = Coalesced.second;
+    auto Relocate = llvm::find_if(Record.Relocates, [&](CallInst *Call) {
+      return cast<GCRelocateInst>(Call)->getDerivedPtr() == Canonical;
+    });
+    assert(Relocate != Record.Relocates.end() &&
+           "coalesced aggregate alias root is missing its relocate");
+    Record.CoalescedRelocates.push_back({Alias, *Relocate});
+  }
 
   Record.Result = Result;
   return Error::success();
@@ -2980,6 +3098,15 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
     for (CallInst *RelocateCall : Record.Relocates) {
       auto *Relocate = cast<GCRelocateInst>(RelocateCall);
       Definitions[Relocate->getDerivedPtr()].push_back(RelocateCall);
+    }
+    for (const auto &Coalesced : Record.CoalescedRelocates) {
+      Value *Alias = Coalesced.first;
+      // An original call can become unused after all aggregate uses have been
+      // rebuilt. eraseOriginalCalls then deletes it without a replacement,
+      // and there is no remaining alias SSA use to repair.
+      if (!Alias)
+        continue;
+      Definitions[Alias].push_back(Coalesced.second);
     }
 
     Instruction *InsertBefore = Record.Relocates.empty()
@@ -3103,7 +3230,8 @@ Error rewriteFunction(Function &F) {
   SmallVector<PointerFixedArgRecord, 4> PointerFixedArgs;
   if (Error Err = collectPointerFixedArgs(F, PointerFixedArgs))
     return Err;
-  if (Error Err = scalarizeLivePointerAggregates(F))
+  MapVector<Value *, Value *> DirectPointerLeafSources;
+  if (Error Err = scalarizeLivePointerAggregates(F, DirectPointerLeafSources))
     return Err;
   if (Error Err = normalizeMergedDerivedPointers(F))
     return Err;
@@ -3153,11 +3281,12 @@ Error rewriteFunction(Function &F) {
           computePointerAllocaActivity(F, PointerAllocas, SafepointCalls, DT))
     return Err;
   for (SafepointRecord &Record : Records) {
+    coalesceDirectAggregateLeafRoots(Record, DirectPointerLeafSources);
     for (Value *Address : Record.FixedFrameAddresses) {
       Value *Base = fixedFrameProvenanceBase(Address);
       assert(Base && "live fixed frame address has no fixed base");
-      auto AllocaIt = llvm::find_if(
-          PointerAllocas, [&](const PointerAllocaRecord &Alloca) {
+      auto AllocaIt =
+          llvm::find_if(PointerAllocas, [&](const PointerAllocaRecord &Alloca) {
             return Alloca.Alloca == Base;
           });
       // An unobservable caller-side goret carrier is defined by this call.
