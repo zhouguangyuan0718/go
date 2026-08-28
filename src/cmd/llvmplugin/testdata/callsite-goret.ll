@@ -1,6 +1,7 @@
 target triple = "x86_64-unknown-linux-goobj"
 
 %slice = type { ptr, i64, i64 }
+%large_result = type { ptr, i64, i64, i64, i64, i64, i64, i64, i64 }
 
 ; OBJVIEW-LABEL: TEXT call_slice_abi0(SB)
 ; OBJVIEW-NOT: FUNCDATA_StackObjects
@@ -36,20 +37,17 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-NOT: "gc-live"(
 
 ; MIR-LABEL: name: call_slice_abi0
-; The slice argument is forwarded into the outgoing ABI0 frame. Only the
-; statepoint goret lowering's post-call result carrier remains a local object.
-; MIR: stack:
+; The slice argument is forwarded into the outgoing ABI0 frame. The result is
+; used only by bounded scalar loads and does not cross another statepoint, so
+; target call lowering reads those fields directly from the ABI0 result area.
 ; MIR-NOT: name: argument
-; MIR: name: result
-; MIR: entry_values:
+; MIR-NOT: name: result
+; MIR: stack: []
 ; MIR: STATEPOINT {{.*}}@"copySlice<ABI0>"
-; The target copies the ABI0 output frame into the result FrameIndex before
-; ending the call sequence, and the continuation reloads that FrameIndex.
-; No result virtual register crosses the statepoint continuation boundary.
-; MIR: {{(MOV64mr|STR(Q|X)ui)}} {{.*}}%stack.{{[0-9]+}}.result
+; MIR-COUNT-3: {{(MOV64rm|LDRXui)}} {{.*}} :: (load (s64) from stack
 ; MIR: ADJCALLSTACKUP
-; MIR: bb.1.entry.statepoint.cont:
-; MIR: {{(MOV64rm|LDRXui)}} %stack.{{[0-9]+}}.result
+; MIR-NOT: %stack.{{[0-9]+}}.result
+; MIR: RET
 
 declare goabi0 void @"copySlice<ABI0>"(
     ptr byval(%slice) align 8,
@@ -97,7 +95,11 @@ entry:
 ; IR: call coldcc ptr @llvm.experimental.gc.relocate
 
 ; MIR-LABEL: name: live_value_call_slice_abi0
+; A pointer field which crosses the following statepoint must remain backed by
+; the ordinary carrier so statepoint liveness and gc.relocate stay authoritative.
+; MIR: name: live.result
 ; MIR: STATEPOINT {{.*}}@"copySlice<ABI0>"
+; MIR: {{(MOV64mr|STR(Q|X)ui)}} {{.*}}%stack.{{[0-9]+}}.live.result
 ; MIR: STATEPOINT {{.*}}@safepoint
 
 declare goabiinternal void @safepoint()
@@ -139,6 +141,12 @@ entry:
 ; IR-SAME: ptr goret(%slice) align 8 "goretindex"="0" %observed.result
 ; IR-SAME: "deopt"({{.*}}ptr %observed.result, i64 0, i64 24, i64 8, i64 8, i64 0,
 ; IR-SAME: "gc-live"(ptr %observed.result)
+
+; MIR-LABEL: name: observed_call_slice_abi0
+; MIR: name: observed.result
+; MIR: STATEPOINT {{.*}}@"copySlice<ABI0>"
+; MIR: {{(MOV64mr|STR(Q|X)ui)}} {{.*}}%stack.{{[0-9]+}}.observed.result
+; MIR: STATEPOINT {{.*}}@safepoint
 ; IR: call goabiinternal token {{.*}} @llvm.experimental.gc.statepoint
 ; IR-SAME: ptr elementtype(void ()) @safepoint
 ; IR-SAME: "deopt"({{.*}}ptr %observed.result, i64 0, i64 24, i64 8, i64 8, i64 1,
@@ -173,6 +181,58 @@ entry:
   %ret.len = insertvalue %slice %ret.base, i64 %result.len, 1
   %ret.cap = insertvalue %slice %ret.len, i64 %result.cap, 2
   ret %slice %ret.cap
+}
+
+; IR-LABEL: define goabiinternal i64 @bounded_large_goret()
+; More than eight scalar projections deliberately stays on the memory path,
+; keeping large aggregate results out of SelectionDAG SSA lowering.
+; IR: %large.result = alloca %large_result, align 8
+; IR: call goabi0 token {{.*}} @llvm.experimental.gc.statepoint
+; IR-SAME: ptr goret(%large_result) align 8 "goretindex"="0" %large.result
+;
+; MIR-LABEL: name: bounded_large_goret
+; MIR: name: large.result
+; MIR: STATEPOINT {{.*}}@"largeResult<ABI0>"
+; MIR: ADJCALLSTACKUP
+; MIR: {{(MOV64rm|LDRXui)}} %stack.{{[0-9]+}}.large.result
+; MIR: RET
+
+declare goabi0 void @"largeResult<ABI0>"(
+    ptr goret(%large_result) align 8 "goretindex"="0")
+
+define goabiinternal i64 @bounded_large_goret() #0 gc "goallc" {
+entry:
+  %large.result = alloca %large_result, align 8
+  call void @llvm.lifetime.start.p0(ptr %large.result)
+  call goabi0 void @"largeResult<ABI0>"(
+      ptr goret(%large_result) align 8 "goretindex"="0" %large.result)
+  %v0.ptr = load ptr, ptr %large.result, align 8
+  %v0 = ptrtoint ptr %v0.ptr to i64
+  %p1 = getelementptr inbounds i8, ptr %large.result, i64 8
+  %v1 = load i64, ptr %p1, align 8
+  %s1 = add i64 %v0, %v1
+  %p2 = getelementptr inbounds i8, ptr %large.result, i64 16
+  %v2 = load i64, ptr %p2, align 8
+  %s2 = add i64 %s1, %v2
+  %p3 = getelementptr inbounds i8, ptr %large.result, i64 24
+  %v3 = load i64, ptr %p3, align 8
+  %s3 = add i64 %s2, %v3
+  %p4 = getelementptr inbounds i8, ptr %large.result, i64 32
+  %v4 = load i64, ptr %p4, align 8
+  %s4 = add i64 %s3, %v4
+  %p5 = getelementptr inbounds i8, ptr %large.result, i64 40
+  %v5 = load i64, ptr %p5, align 8
+  %s5 = add i64 %s4, %v5
+  %p6 = getelementptr inbounds i8, ptr %large.result, i64 48
+  %v6 = load i64, ptr %p6, align 8
+  %s6 = add i64 %s5, %v6
+  %p7 = getelementptr inbounds i8, ptr %large.result, i64 56
+  %v7 = load i64, ptr %p7, align 8
+  %s7 = add i64 %s6, %v7
+  %p8 = getelementptr inbounds i8, ptr %large.result, i64 64
+  %v8 = load i64, ptr %p8, align 8
+  %s8 = add i64 %s7, %v8
+  ret i64 %s8
 }
 
 declare void @llvm.lifetime.start.p0(ptr nocapture) #1
