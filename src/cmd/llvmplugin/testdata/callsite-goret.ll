@@ -80,6 +80,57 @@ entry:
   ret %slice %ret.cap
 }
 
+; IR-LABEL: define goabiinternal i64 @prior_safepoint_call_slice_abi0()
+; A prior safepoint keeps both future call-carrier addresses in gc-live so
+; stack growth cannot leave a cached address live in its continuation.
+; IR: %prior.argument = alloca %slice, align 8
+; IR: %prior.result = alloca %slice, align 8
+; IR: call goabiinternal token {{.*}} @llvm.experimental.gc.statepoint
+; IR-SAME: ptr elementtype(void ()) @safepoint
+; IR-SAME: "gc-live"({{(ptr %prior.result, ptr %prior.argument|ptr %prior.argument, ptr %prior.result)}})
+; IR: call goabi0 token {{.*}} @llvm.experimental.gc.statepoint
+; IR-SAME: ptr byval(%slice) align 8 %prior.argument
+; IR-SAME: ptr goret(%slice) align 8 "goretindex"="0" %prior.result
+;
+; MIR-LABEL: name: prior_safepoint_call_slice_abi0
+; Direct gc-live uses are address-only for these proven call carriers. Once
+; call lowering forwards their contents to and from the physical ABI0 area,
+; neither local FrameIndex remains. This is also the regression shape in
+; floats.LogSumExp, where earlier ABI0 calls made later carriers gc-live.
+; MIR: stack: []
+; MIR: STATEPOINT {{.*}}@safepoint
+; MIR-COUNT-3: {{(MOV64m(i32|r)|STRXui)}} {{.*}} :: (store (s64) into stack
+; MIR: STATEPOINT {{.*}}@"copySlice<ABI0>"
+; MIR-COUNT-3: {{(MOV64rm|LDRXui)}} {{.*}} :: (load (s64) from stack
+; MIR-NOT: %stack.
+; MIR: RET
+define goabiinternal i64 @prior_safepoint_call_slice_abi0() #0 gc "goallc" {
+entry:
+  %prior.argument = alloca %slice, align 8
+  %prior.result = alloca %slice, align 8
+  call goabiinternal void @safepoint()
+  store ptr null, ptr %prior.argument, align 8
+  %prior.len.address = getelementptr inbounds i8, ptr %prior.argument, i64 8
+  store i64 4, ptr %prior.len.address, align 8
+  %prior.cap.address = getelementptr inbounds i8, ptr %prior.argument, i64 16
+  store i64 8, ptr %prior.cap.address, align 8
+  call void @llvm.lifetime.start.p0(ptr %prior.result)
+  call goabi0 void @"copySlice<ABI0>"(
+      ptr byval(%slice) align 8 %prior.argument,
+      ptr goret(%slice) align 8 "goretindex"="0" %prior.result)
+  %prior.result.base = load ptr, ptr %prior.result, align 8
+  %prior.result.base.bits = ptrtoint ptr %prior.result.base to i64
+  %prior.result.len.address =
+      getelementptr inbounds i8, ptr %prior.result, i64 8
+  %prior.result.len = load i64, ptr %prior.result.len.address, align 8
+  %prior.result.cap.address =
+      getelementptr inbounds i8, ptr %prior.result, i64 16
+  %prior.result.cap = load i64, ptr %prior.result.cap.address, align 8
+  %prior.sum.len = add i64 %prior.result.base.bits, %prior.result.len
+  %prior.sum.cap = add i64 %prior.sum.len, %prior.result.cap
+  ret i64 %prior.sum.cap
+}
+
 ; IR-LABEL: define goabiinternal %slice @live_value_call_slice_abi0(
 ; The carrier address is dead at its defining call, but a pointer loaded from
 ; the returned slice is ordinary SSA data and remains explicitly tracked when
