@@ -81,6 +81,8 @@ static GCRegistry::Add<GoALLCGCStrategy>
                          "GoALLC value-level statepoint strategy");
 
 using ValueSet = SetVector<Value *>;
+using DirectPointerLeafAliasGroups =
+    MapVector<Value *, SmallVector<Value *, 4>>;
 
 struct LivenessData {
   MapVector<BasicBlock *, ValueSet> Kill;
@@ -1667,32 +1669,9 @@ Error scalarizeLivePointerAggregates(
   return Error::success();
 }
 
-void coalesceDirectAggregateLeafRoots(
-    SafepointRecord &Record,
+DirectPointerLeafAliasGroups buildDirectPointerLeafAliasGroups(
     const MapVector<Value *, Value *> &DirectPointerLeafSources) {
-  auto IsCallArgumentComponent = [&](Value *Candidate) {
-    for (Value *Argument : Record.Call->args()) {
-      if (Argument == Candidate)
-        return true;
-      if (!Argument->getType()->isAggregateType())
-        continue;
-
-      SmallVector<AggregateLeaf, 8> Leaves;
-      SmallVector<unsigned, 4> Path;
-      if (Error Err =
-              enumerateAggregateLeaves(Argument->getType(), Path, Leaves)) {
-        consumeError(std::move(Err));
-        return true;
-      }
-      if (llvm::any_of(Leaves, [&](const AggregateLeaf &Leaf) {
-            return FindInsertedValue(Argument, Leaf.Indices) == Candidate;
-          }))
-        return true;
-    }
-    return false;
-  };
-
-  MapVector<Value *, SmallVector<Value *, 4>> AliasGroups;
+  DirectPointerLeafAliasGroups AliasGroups;
   for (auto [Leaf, DirectSource] : DirectPointerLeafSources) {
     // Scalarization can be nested. Follow exact insertvalue provenance to its
     // original scalar root and group the complete alias chain. Choosing one
@@ -1711,8 +1690,41 @@ void coalesceDirectAggregateLeafRoots(
       if (!llvm::is_contained(Group, Alias))
         Group.push_back(Alias);
   }
+  return AliasGroups;
+}
 
-  for (auto &[Root, Aliases] : AliasGroups) {
+std::optional<ValueSet> collectCallArgumentComponents(CallInst &Call) {
+  ValueSet Components;
+  for (Value *Argument : Call.args()) {
+    Components.insert(Argument);
+    if (!Argument->getType()->isAggregateType())
+      continue;
+
+    SmallVector<AggregateLeaf, 8> Leaves;
+    SmallVector<unsigned, 4> Path;
+    if (Error Err =
+            enumerateAggregateLeaves(Argument->getType(), Path, Leaves)) {
+      consumeError(std::move(Err));
+      return std::nullopt;
+    }
+    for (const AggregateLeaf &Leaf : Leaves)
+      if (Value *Component = FindInsertedValue(Argument, Leaf.Indices))
+        Components.insert(Component);
+  }
+  return Components;
+}
+
+void coalesceDirectAggregateLeafRoots(
+    SafepointRecord &Record, const DirectPointerLeafAliasGroups &AliasGroups) {
+  std::optional<ValueSet> CallArgumentComponents =
+      collectCallArgumentComponents(*Record.Call);
+  // If an aggregate call argument cannot be enumerated, preserve every alias
+  // group just as the per-candidate analysis did. Coalescing must remain
+  // fail-closed at ABI carrier boundaries.
+  if (!CallArgumentComponents)
+    return;
+
+  for (const auto &[Root, Aliases] : AliasGroups) {
     if (!Record.Live.contains(Root))
       continue;
 
@@ -1724,7 +1736,7 @@ void coalesceDirectAggregateLeafRoots(
     Value *CallArgumentLeaf = nullptr;
     bool PreserveGroup = false;
     for (Value *Alias : Aliases) {
-      if (!IsCallArgumentComponent(Alias))
+      if (!CallArgumentComponents->contains(Alias))
         continue;
       if (Alias == Root || CallArgumentLeaf) {
         PreserveGroup = true;
@@ -3280,8 +3292,10 @@ Error rewriteFunction(Function &F) {
   if (Error Err =
           computePointerAllocaActivity(F, PointerAllocas, SafepointCalls, DT))
     return Err;
+  DirectPointerLeafAliasGroups DirectPointerLeafAliases =
+      buildDirectPointerLeafAliasGroups(DirectPointerLeafSources);
   for (SafepointRecord &Record : Records) {
-    coalesceDirectAggregateLeafRoots(Record, DirectPointerLeafSources);
+    coalesceDirectAggregateLeafRoots(Record, DirectPointerLeafAliases);
     for (Value *Address : Record.FixedFrameAddresses) {
       Value *Base = fixedFrameProvenanceBase(Address);
       assert(Base && "live fixed frame address has no fixed base");
