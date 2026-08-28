@@ -18,7 +18,46 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: insertvalue %vector_pair {{.*}}<2 x ptr> %value.leaf.0.relocated, 0
 
 ; IR-LABEL: define goabiinternal ptr @insertvalue_across_call(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %value.leaf.0)
 ; IR: insertvalue %pair {{.*}}ptr %value.leaf.0.relocated
+
+; IR-LABEL: define goabiinternal ptr @inserted_pointer_also_live(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %pointer)
+; IR: %pointer.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: insertvalue %pair {{.*}}ptr %pointer.relocated
+; IR: ret ptr %pointer.relocated
+
+; IR-LABEL: define goabiinternal ptr @inserted_call_result_also_live(
+; IR: [[CALL_RESULT:%.*]] = call ptr @llvm.experimental.gc.result.p0
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr [[CALL_RESULT]])
+; IR: [[RELOCATED:%.*]] = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: insertvalue %pair {{.*}}ptr [[RELOCATED]]
+; IR: ret ptr [[RELOCATED]]
+
+; IR-LABEL: define goabiinternal ptr @inserted_pointer_in_call_argument(
+; IR: @llvm.experimental.gc.statepoint{{.*}}@consume_slice{{.*}}{ ptr, i64, i64 } %slice{{.*}}"gc-live"(ptr %pointer, ptr %value.leaf.0)
+; IR: %pointer.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: %value.leaf.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: insertvalue %pair {{.*}}ptr %value.leaf.0.relocated
+; IR: ret ptr %pointer.relocated
+
+; IR-LABEL: define goabiinternal ptr @inserted_leaf_in_call_argument(
+; IR: @llvm.experimental.gc.statepoint{{.*}}@consume_pair{{.*}}"gc-live"(ptr %pointer, ptr %value.leaf.0)
+; IR: %pointer.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: %value.leaf.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: insertvalue %pair {{.*}}ptr %value.leaf.0.relocated
+; IR: ret ptr %pointer.relocated
+
+; IR-LABEL: define goabiinternal ptr @inserted_call_result_leaf_in_call_argument(
+; IR: @llvm.experimental.gc.statepoint{{.*}}@consume_pair{{.*}}"gc-live"(ptr %value.leaf.0)
+; IR: %value.leaf.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: insertvalue %pair {{.*}}ptr %value.leaf.0.relocated
+; IR: ret ptr %value.leaf.0.relocated
+
+; IR-LABEL: define goabiinternal ptr @inserted_pointer_used_by_derived(
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %value.leaf.0, ptr %pointer)
+; IR: %value.leaf.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: %pointer.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
 
 ; IR-LABEL: define goabiinternal ptr @partial_insertvalue_across_call(
 ; IR: %partial.leaf.0 = extractvalue %reflect_value %partial, 0
@@ -55,6 +94,8 @@ target triple = "x86_64-unknown-linux-goobj"
 declare goabiinternal void @safepoint()
 declare goabiinternal void @consume_pair(%pair)
 declare goabiinternal %pair @make_pair(ptr, i64)
+declare goabiinternal ptr @make_pointer()
+declare goabiinternal void @consume_slice({ ptr, i64, i64 })
 declare goabiinternal void @leaf_consume_pair(%pair) #0
 declare goabiinternal void @leaf_consume_nested(%nested) #0
 declare goabiinternal void @leaf_consume_vector_pair(%vector_pair) #0
@@ -110,6 +151,82 @@ entry:
   call goabiinternal void @safepoint()
   call goabiinternal void @leaf_consume_pair(%pair %value)
   %result = extractvalue %pair %value, 0
+  ret ptr %result
+}
+
+; The aggregate leaf and the scalar originally inserted into it are both live
+; after the safepoint. They retain distinct pre-rewrite SSA identities but must
+; share one gc-live root and one relocated definition at this call.
+define goabiinternal ptr @inserted_pointer_also_live(ptr %pointer, i64 %number) gc "goallc" {
+entry:
+  %with_pointer = insertvalue %pair zeroinitializer, ptr %pointer, 0
+  %value = insertvalue %pair %with_pointer, i64 %number, 1
+  call goabiinternal void @safepoint()
+  call goabiinternal void @leaf_consume_pair(%pair %value)
+  ret ptr %pointer
+}
+
+; Keep the same coalescing valid when the shared root is an earlier call result.
+; Rewriting that earlier call replaces and erases its original Value identity.
+define goabiinternal ptr @inserted_call_result_also_live(i64 %number) gc "goallc" {
+entry:
+  %pointer = call goabiinternal ptr @make_pointer()
+  %with_pointer = insertvalue %pair zeroinitializer, ptr %pointer, 0
+  %value = insertvalue %pair %with_pointer, i64 %number, 1
+  call goabiinternal void @safepoint()
+  call goabiinternal void @leaf_consume_pair(%pair %value)
+  ret ptr %pointer
+}
+
+; A source that also supplies the current call's aggregate argument retains a
+; distinct live-through identity. Go calling conventions may place the
+; argument and live-through values in different machine locations.
+define goabiinternal ptr @inserted_pointer_in_call_argument(ptr %pointer, i64 %number) gc "goallc" {
+entry:
+  %with_pointer = insertvalue %pair zeroinitializer, ptr %pointer, 0
+  %value = insertvalue %pair %with_pointer, i64 %number, 1
+  %slice_with_pointer = insertvalue { ptr, i64, i64 } poison, ptr %pointer, 0
+  %slice_with_length = insertvalue { ptr, i64, i64 } %slice_with_pointer, i64 1, 1
+  %slice = insertvalue { ptr, i64, i64 } %slice_with_length, i64 1, 2
+  call goabiinternal void @consume_slice({ ptr, i64, i64 } %slice)
+  call goabiinternal void @leaf_consume_pair(%pair %value)
+  ret ptr %pointer
+}
+
+; An ordinary scalar source and its scalarized call-argument leaf retain
+; distinct roots because the source may represent a separate ABI carrier.
+define goabiinternal ptr @inserted_leaf_in_call_argument(ptr %pointer, i64 %number) gc "goallc" {
+entry:
+  %with_pointer = insertvalue %pair zeroinitializer, ptr %pointer, 0
+  %value = insertvalue %pair %with_pointer, i64 %number, 1
+  call goabiinternal void @consume_pair(%pair %value)
+  call goabiinternal void @leaf_consume_pair(%pair %value)
+  ret ptr %pointer
+}
+
+; A direct pointer call result has no aggregate ABI carrier identity. When its
+; scalarized leaf supplies the current call argument, retain that leaf as the
+; single root and share its relocation with the original result.
+define goabiinternal ptr @inserted_call_result_leaf_in_call_argument(i64 %number) gc "goallc" {
+entry:
+  %pointer = call goabiinternal ptr @make_pointer()
+  %with_pointer = insertvalue %pair zeroinitializer, ptr %pointer, 0
+  %value = insertvalue %pair %with_pointer, i64 %number, 1
+  call goabiinternal void @consume_pair(%pair %value)
+  call goabiinternal void @leaf_consume_pair(%pair %value)
+  ret ptr %pointer
+}
+
+; A source added only as the relocation base for a derived address is not an
+; independently live scalar root and cannot replace the aggregate leaf.
+define goabiinternal ptr @inserted_pointer_used_by_derived(ptr %pointer, i64 %number) gc "goallc" {
+entry:
+  %with_pointer = insertvalue %pair zeroinitializer, ptr %pointer, 0
+  %value = insertvalue %pair %with_pointer, i64 %number, 1
+  %derived = getelementptr i8, ptr %pointer, i64 8
+  call goabiinternal void @safepoint()
+  call goabiinternal void @leaf_consume_pair(%pair %value)
+  %result = load ptr, ptr %derived
   ret ptr %result
 }
 
