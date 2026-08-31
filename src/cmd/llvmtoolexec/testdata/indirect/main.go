@@ -10,10 +10,26 @@ func invoke(fn func(*int), value *int) {
 	fn(value)
 }
 
+type caller interface {
+	call(*int)
+}
+
+type targetType struct{}
+
+//go:noinline
+func (targetType) call(*int) {}
+
+//go:noinline
+//go:nosplit
+func invokeInterface(target caller, value *int) {
+	target.call(value)
+}
+
 //go:noinline
 func target(*int) {}
 
 func main() {
 	var value int
 	invoke(target, &value)
+	invokeInterface(targetType{}, &value)
 }

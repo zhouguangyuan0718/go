@@ -15,6 +15,10 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-NOT: "gc-live"
 ; IR-NOT: @llvm.experimental.gc.relocate
 ; IR: ret void
+; IR-LABEL: define goabiinternal void @leaf_indirect_callee(
+; IR-NOT: @llvm.experimental.gc.statepoint
+; IR: call goabiinternal void %callee() #[[LEAF:[0-9]+]]
+; IR: ret void
 
 ; X86-OBJVIEW-LABEL: TEXT indirect_callee(SB)
 ; X86-OBJVIEW: CALL {{.*}} [0:0]R_CALLIND
@@ -29,6 +33,9 @@ target triple = "x86_64-unknown-linux-goobj"
 ; X86-OBJVIEW-NOT: R_CALLIND
 ; X86-OBJVIEW: R_CALL:consume_pointer
 ; X86-OBJVIEW: R_CALL:runtime.morestack_noctxt
+; X86-OBJVIEW-LABEL: TEXT leaf_indirect_callee(SB)
+; X86-OBJVIEW: CALL {{.*}} [0:0]R_CALLIND
+; X86-OBJVIEW-NOT: runtime.morestack
 
 ; AArch64-OBJVIEW-LABEL: TEXT indirect_callee(SB)
 ; AArch64-OBJVIEW: R_CALLARM64:runtime.morestack_noctxt
@@ -43,6 +50,9 @@ target triple = "x86_64-unknown-linux-goobj"
 ; AArch64-OBJVIEW-NOT: R_CALLIND
 ; AArch64-OBJVIEW: R_CALLARM64:runtime.morestack_noctxt
 ; AArch64-OBJVIEW: R_CALLARM64:consume_pointer
+; AArch64-OBJVIEW-LABEL: TEXT leaf_indirect_callee(SB)
+; AArch64-OBJVIEW: CALL {{.*}} [0:0]R_CALLIND
+; AArch64-OBJVIEW-NOT: runtime.morestack
 
 declare goabiinternal void @consume_pointer(ptr)
 
@@ -80,4 +90,14 @@ entry:
   ret void
 }
 
+; This indirect call is intentionally excluded from statepoint rewriting. The
+; final machine call still needs an R_CALLIND marker for linker stack checking.
+define goabiinternal void @leaf_indirect_callee(ptr %callee) #1 gc "goallc" {
+entry:
+  call goabiinternal void %callee() #2
+  ret void
+}
+
 attributes #0 = { "frame-pointer"="non-leaf" }
+attributes #1 = { "frame-pointer"="non-leaf" "go-nosplit" }
+attributes #2 = { "gc-leaf-function" }
