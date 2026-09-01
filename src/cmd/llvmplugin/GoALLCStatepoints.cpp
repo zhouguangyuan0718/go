@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 #include "GoALLCStatepoints.h"
+#include "GoALLCCPUFeatures.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
@@ -4215,6 +4216,8 @@ Error goallc::prepareStatepointModule(Module &M) {
 Error goallc::rewriteStatepoints(Function &F, TargetMachine &) {
   if (F.isDeclaration())
     return Error::success();
+  if (Error Err = finalizeCPUFeatureTailTransfers(F))
+    return Err;
   lowerPointerAddressConversions(F);
   if (!isGoCallingConv(F.getCallingConv()) || !F.hasGC() ||
       F.getGC() != GoALLCGCName)

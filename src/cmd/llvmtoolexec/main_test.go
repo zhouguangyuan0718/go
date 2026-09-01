@@ -56,6 +56,27 @@ type importObjviewObject struct {
 	} `json:"symbols"`
 }
 
+func nmSymbolCount(output []byte, name string) int {
+	count := 0
+	for line := range strings.SplitSeq(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[2] == name {
+			count++
+		}
+	}
+	return count
+}
+
+func requireNoFMVImplementationNames(t *testing.T, output []byte) {
+	t.Helper()
+	for line := range strings.SplitSeq(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && strings.Contains(fields[2], ".goallc.fmv.") && !strings.HasSuffix(fields[2], ".goallc.fmv.slot") {
+			t.Fatalf("FMV implementation storage suffix leaked into the linked symbol name %q:\n%s", fields[2], output)
+		}
+	}
+}
+
 func TestLLVMCPUFeatureMultiversion(t *testing.T) {
 	llc := os.Getenv("GOALLC_LLC")
 	plugin := os.Getenv("GOALLC_PASS_PLUGIN")
@@ -135,20 +156,20 @@ func TestLLVMCPUFeatureMultiversion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading CPU-feature symbols: %v\n%s", err, nmOutput)
 			}
-			for _, want := range []string{
-				"main.cpuMath.goallc.fmv.baseline",
-				"main.cpuMath.goallc.fmv.sse41",
-				"main.cpuMath.goallc.fmv.fma",
-				"main.cpuMath.goallc.fmv.sse41-fma",
-				"main.cpuMath.goallc.fmv.slot",
+			for _, want := range []struct {
+				name  string
+				count int
+			}{
+				{"main.cpuMath", 6}, // public, four variants, resolver
+				{"main.cpuBits", 4}, // public, two variants, resolver
+				{"main.cpuMath.goallc.fmv.slot", 1},
+				{"main.cpuBits.goallc.fmv.slot", 1},
 			} {
-				if !bytes.Contains(nmOutput, []byte(want)) {
-					t.Fatalf("CPU-feature executable has no %q symbol:\n%s", want, nmOutput)
+				if got := nmSymbolCount(nmOutput, want.name); got != want.count {
+					t.Fatalf("CPU-feature executable has %d %q symbols, want %d:\n%s", got, want.name, want.count, nmOutput)
 				}
 			}
-			if bytes.Contains(nmOutput, []byte("main.cpuMath.goallc.fmv.resolve")) {
-				t.Fatalf("CPU-feature resolver must be embedded in the public dispatcher:\n%s", nmOutput)
-			}
+			requireNoFMVImplementationNames(t, nmOutput)
 
 			objdump := testenv.Command(t, goTool, "tool", "objdump", "-s", "main.cpuMath", executable)
 			objdumpOutput, err := objdump.CombinedOutput()
@@ -160,12 +181,21 @@ func TestLLVMCPUFeatureMultiversion(t *testing.T) {
 					t.Fatalf("CPU-feature assembly has no %q instruction:\n%s", want, objdumpOutput)
 				}
 			}
+			objdump = testenv.Command(t, goTool, "tool", "objdump", "-s", "main.cpuBits", executable)
+			objdumpOutput, err = objdump.CombinedOutput()
+			if err != nil {
+				t.Fatalf("disassembling POPCNT fixture: %v\n%s", err, objdumpOutput)
+			}
+			if !bytes.Contains(objdumpOutput, []byte("POPCNTQ")) {
+				t.Fatalf("CPU-feature assembly has no POPCNTQ instruction:\n%s", objdumpOutput)
+			}
 
 			if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 				for _, godebug := range []string{
 					"cpu.all=off",
 					"cpu.sse41=off",
 					"cpu.fma=off",
+					"cpu.popcnt=off",
 				} {
 					run := testenv.Command(t, executable)
 					run.Env = append([]string(nil), targetEnv...)
@@ -182,6 +212,73 @@ func TestLLVMCPUFeatureMultiversion(t *testing.T) {
 					}
 					if out, err := run.CombinedOutput(); err != nil {
 						t.Fatalf("CPU-feature fixture with GODEBUG=%s: %v\n%s", godebug, err, out)
+					}
+				}
+			}
+		})
+	}
+
+	arm64Env := append(os.Environ(),
+		"CGO_ENABLED=0",
+		"GOCACHE="+t.TempDir(),
+		"GOOS=linux",
+		"GOARCH=arm64",
+		"GOARM64=v8.0",
+	)
+	for _, test := range tests {
+		t.Run("arm64-"+test.name, func(t *testing.T) {
+			executable := filepath.Join(t.TempDir(), "cpufeatures")
+			args := []string{"build", "-a"}
+			if test.toolexec != "" {
+				args = append(args, "-toolexec="+test.toolexec)
+			}
+			args = append(args,
+				"-gcflags="+packagePath+"=-enablellvm",
+				"-o", executable,
+				packageArg,
+			)
+			build := testenv.Command(t, goTool, args...)
+			build.Dir = root
+			build.Env = arm64Env
+			if out, err := build.CombinedOutput(); err != nil {
+				t.Fatalf("building ARM64 CPU-feature fixture: %v\n%s", err, out)
+			}
+
+			nm := testenv.Command(t, goTool, "tool", "nm", executable)
+			nmOutput, err := nm.CombinedOutput()
+			if err != nil {
+				t.Fatalf("reading ARM64 CPU-feature symbols: %v\n%s", err, nmOutput)
+			}
+			for _, want := range []struct {
+				name  string
+				count int
+			}{
+				{"main.cpuAtomic", 4}, // public, two variants, resolver
+				{"main.cpuAtomic.goallc.fmv.slot", 1},
+			} {
+				if got := nmSymbolCount(nmOutput, want.name); got != want.count {
+					t.Fatalf("ARM64 CPU-feature executable has %d %q symbols, want %d:\n%s", got, want.name, want.count, nmOutput)
+				}
+			}
+			requireNoFMVImplementationNames(t, nmOutput)
+
+			if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
+				for _, godebug := range []string{"cpu.atomics=off", "cpu.atomics=on"} {
+					run := testenv.Command(t, executable)
+					run.Env = append([]string(nil), arm64Env...)
+					updated := false
+					for i, entry := range run.Env {
+						if strings.HasPrefix(entry, "GODEBUG=") {
+							run.Env[i] = "GODEBUG=" + godebug
+							updated = true
+							break
+						}
+					}
+					if !updated {
+						run.Env = append(run.Env, "GODEBUG="+godebug)
+					}
+					if out, err := run.CombinedOutput(); err != nil {
+						t.Fatalf("ARM64 CPU-feature fixture with GODEBUG=%s: %v\n%s", godebug, err, out)
 					}
 				}
 			}
