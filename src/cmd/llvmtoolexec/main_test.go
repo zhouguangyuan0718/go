@@ -747,6 +747,9 @@ func TestLLVMIndirectCallStackCheck(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^nosplit: main\.invoke<\d+> \+\d+ -> indirect$`).Match(out) {
 		t.Fatalf("linker stackcheck did not consume R_CALLIND for main.invoke:\n%s", out)
 	}
+	if !regexp.MustCompile(`(?m)^nosplit: main\.invokeInterface<\d+> \+\d+ -> indirect$`).Match(out) {
+		t.Fatalf("linker stackcheck did not consume R_CALLIND for main.invokeInterface:\n%s", out)
+	}
 
 	runFixture := testenv.Command(t, executable)
 	if out, err := runFixture.CombinedOutput(); err != nil {
@@ -779,8 +782,22 @@ func TestLLVMIndirectCallStackCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go tool objdump rejected LLVM GoObj: %v\n%s", err, objdumpOutput)
 	}
-	if !strings.Contains(string(objdumpOutput), "TEXT main.invoke(SB)") ||
-		!strings.Contains(string(objdumpOutput), "R_CALLIND") {
+	objdumpText := string(objdumpOutput)
+	containsCallInd := func(symbol string) bool {
+		start := strings.Index(objdumpText, "TEXT "+symbol+"(SB)")
+		if start < 0 {
+			return false
+		}
+		end := strings.Index(objdumpText[start+1:], "\nTEXT ")
+		if end < 0 {
+			end = len(objdumpText)
+		} else {
+			end += start + 1
+		}
+		return strings.Contains(objdumpText[start:end], "R_CALLIND")
+	}
+	if !containsCallInd("main.invoke") ||
+		!containsCallInd("main.invokeInterface") {
 		t.Fatalf("go tool objdump omitted indirect-call metadata:\n%s", objdumpOutput)
 	}
 }

@@ -98,7 +98,6 @@ bool GoALLCStackMapPrinter::emitStackMaps(StackMaps &SM, AsmPrinter &AP) {
 
       MCContext::GoObjStackMapEntry Entry{CSI.CSOffsetExpr,
                                           CSI.ID,
-                                          CSI.IsIndirectCall,
                                           Info.StackSize,
                                           PointerSize,
                                           static_cast<uint32_t>(NumDeopts),
