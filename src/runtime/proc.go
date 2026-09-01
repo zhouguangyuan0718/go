@@ -799,13 +799,21 @@ func cpuinit(env string) {
 		if cpu.X86.HasFMA {
 			goallcFeatures |= goallcCPUFeatureFMA
 		}
-		atomic.Store64(&goallcCPUFeatures, goallcFeatures|goallcCPUFeaturesInitialized)
+		if cpu.X86.HasPOPCNT {
+			goallcFeatures |= goallcCPUFeaturePOPCNT
+		}
+		goallcCPUFeatures = goallcFeatures | goallcCPUFeaturesInitialized
 
 	case "arm":
 		armHasVFPv4 = cpu.ARM.HasVFPv4
 
 	case "arm64":
 		arm64HasATOMICS = cpu.ARM64.HasATOMICS
+		var goallcFeatures uint64
+		if cpu.ARM64.HasATOMICS {
+			goallcFeatures |= goallcCPUFeatureARM64LSE
+		}
+		goallcCPUFeatures = goallcFeatures | goallcCPUFeaturesInitialized
 
 	case "loong64":
 		loong64HasLAMCAS = cpu.Loong64.HasLAMCAS

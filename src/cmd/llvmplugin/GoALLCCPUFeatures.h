@@ -10,6 +10,7 @@
 
 namespace llvm {
 
+class Function;
 class Module;
 
 namespace goallc {
@@ -19,7 +20,20 @@ namespace goallc {
 // safely invoke it again from the pre-codegen callback.
 Error runEarlyIRPipeline(Module &M);
 
+// Promotes a marked FMV dispatcher which remains terminal after optimization
+// to musttail immediately before statepoint rewriting and instruction
+// selection. Calls made non-terminal by inlining keep ordinary safepoint
+// semantics.
+Error finalizeCPUFeatureTailTransfers(Function &F);
+
 class CPUFeaturesPass : public PassInfoMixin<CPUFeaturesPass> {
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+};
+
+// Exposes the common late finalization contract to opt-based regression tests.
+// Production invokes the same helper from the pre-isel statepoint pass.
+class CPUFeaturesFinalizePass : public PassInfoMixin<CPUFeaturesFinalizePass> {
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
