@@ -1,9 +1,11 @@
 !sum
 - go: SetElem
+  llvmLowering: insert-element
   commutative: false
   documentation: !string |-
     // NAME returns x with the index'th element set to y.
 - go: GetElem
+  llvmLowering: extract-element
   commutative: false
   documentation: !string |-
     // NAME returns the index'th element of x.
