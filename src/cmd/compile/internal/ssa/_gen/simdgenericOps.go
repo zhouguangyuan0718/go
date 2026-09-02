@@ -1375,26 +1375,26 @@ func simdGenericOps() []opData {
 		{name: "broadcast1To64MaskedUint8x16", argLength: 2},                                                                                        // ARCH:amd64
 		{name: "broadcast1To64Uint8x16", argLength: 1},                                                                                              // ARCH:amd64
 		{name: "carrylessMultiplyWidenLoUint64x2", argLength: 2, commutative: true},                                                                 // ARCH:arm64
-		{name: "reduceMaxFloat32x4", argLength: 1},                                                                                                  // ARCH:arm64
-		{name: "reduceMaxInt8x16", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceMaxInt16x8", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceMaxInt32x4", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceMaxUint8x16", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceMaxUint16x8", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceMaxUint32x4", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceMinFloat32x4", argLength: 1},                                                                                                  // ARCH:arm64
-		{name: "reduceMinInt8x16", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceMinInt16x8", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceMinInt32x4", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceMinUint8x16", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceMinUint16x8", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceMinUint32x4", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceSumInt8x16", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceSumInt16x8", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceSumInt32x4", argLength: 1},                                                                                                    // ARCH:arm64
-		{name: "reduceSumUint8x16", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceSumUint16x8", argLength: 1},                                                                                                   // ARCH:arm64
-		{name: "reduceSumUint32x4", argLength: 1},                                                                                                   // ARCH:arm64
+		{name: "reduceMaxFloat32x4", argLength: 1, simd: "lane=float&laneBits=32&lower=reduce-max"},                                                 // ARCH:arm64
+		{name: "reduceMaxInt8x16", argLength: 1, simd: "lane=int&laneBits=8&lower=reduce-max"},                                                      // ARCH:arm64
+		{name: "reduceMaxInt16x8", argLength: 1, simd: "lane=int&laneBits=16&lower=reduce-max"},                                                     // ARCH:arm64
+		{name: "reduceMaxInt32x4", argLength: 1, simd: "lane=int&laneBits=32&lower=reduce-max"},                                                     // ARCH:arm64
+		{name: "reduceMaxUint8x16", argLength: 1, simd: "lane=uint&laneBits=8&lower=reduce-max"},                                                    // ARCH:arm64
+		{name: "reduceMaxUint16x8", argLength: 1, simd: "lane=uint&laneBits=16&lower=reduce-max"},                                                   // ARCH:arm64
+		{name: "reduceMaxUint32x4", argLength: 1, simd: "lane=uint&laneBits=32&lower=reduce-max"},                                                   // ARCH:arm64
+		{name: "reduceMinFloat32x4", argLength: 1, simd: "lane=float&laneBits=32&lower=reduce-min"},                                                 // ARCH:arm64
+		{name: "reduceMinInt8x16", argLength: 1, simd: "lane=int&laneBits=8&lower=reduce-min"},                                                      // ARCH:arm64
+		{name: "reduceMinInt16x8", argLength: 1, simd: "lane=int&laneBits=16&lower=reduce-min"},                                                     // ARCH:arm64
+		{name: "reduceMinInt32x4", argLength: 1, simd: "lane=int&laneBits=32&lower=reduce-min"},                                                     // ARCH:arm64
+		{name: "reduceMinUint8x16", argLength: 1, simd: "lane=uint&laneBits=8&lower=reduce-min"},                                                    // ARCH:arm64
+		{name: "reduceMinUint16x8", argLength: 1, simd: "lane=uint&laneBits=16&lower=reduce-min"},                                                   // ARCH:arm64
+		{name: "reduceMinUint32x4", argLength: 1, simd: "lane=uint&laneBits=32&lower=reduce-min"},                                                   // ARCH:arm64
+		{name: "reduceSumInt8x16", argLength: 1, simd: "lane=int&laneBits=8&lower=reduce-add"},                                                      // ARCH:arm64
+		{name: "reduceSumInt16x8", argLength: 1, simd: "lane=int&laneBits=16&lower=reduce-add"},                                                     // ARCH:arm64
+		{name: "reduceSumInt32x4", argLength: 1, simd: "lane=int&laneBits=32&lower=reduce-add"},                                                     // ARCH:arm64
+		{name: "reduceSumUint8x16", argLength: 1, simd: "lane=uint&laneBits=8&lower=reduce-add"},                                                    // ARCH:arm64
+		{name: "reduceSumUint16x8", argLength: 1, simd: "lane=uint&laneBits=16&lower=reduce-add"},                                                   // ARCH:arm64
+		{name: "reduceSumUint32x4", argLength: 1, simd: "lane=uint&laneBits=32&lower=reduce-add"},                                                   // ARCH:arm64
 		{name: "AESRoundKeyGenAssistUint32x4", argLength: 1, aux: "UInt8"},                                                                          // ARCH:amd64
 		{name: "CeilScaledFloat32x4", argLength: 1, aux: "UInt8"},                                                                                   // ARCH:amd64
 		{name: "CeilScaledFloat32x8", argLength: 1, aux: "UInt8"},                                                                                   // ARCH:amd64

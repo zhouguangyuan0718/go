@@ -14,6 +14,9 @@ const (
 	goALLCSIMDLowerSubSaturated
 	goALLCSIMDLowerExtractElement
 	goALLCSIMDLowerInsertElement
+	goALLCSIMDLowerReduceAdd
+	goALLCSIMDLowerReduceMax
+	goALLCSIMDLowerReduceMin
 	goALLCSIMDLowerMul
 	goALLCSIMDLowerDiv
 	goALLCSIMDLowerAnd

@@ -1,15 +1,18 @@
 !sum
 - go: reduceSum
+  llvmLowering: reduce-add
   commutative: false
   documentation: !string |-
     // NAME reduces x by summing all elements. The sum is placed in element 0
     // of the result; other elements are zeroed.
 - go: reduceMax
+  llvmLowering: reduce-max
   commutative: false
   documentation: !string |-
     // NAME reduces x by taking the maximum of all elements. The maximum is placed
     // in element 0 of the result; other elements are zeroed.
 - go: reduceMin
+  llvmLowering: reduce-min
   commutative: false
   documentation: !string |-
     // NAME reduces x by taking the minimum of all elements. The minimum is placed

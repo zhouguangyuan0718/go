@@ -2010,6 +2010,25 @@ func (lfc *LLVMFuncContext) simdBinaryIntrinsic(v *Value, laneType llvm.Type, la
 	})
 }
 
+// simdReduction preserves the generic SSA contract used by Go's ARM64 SIMD
+// operations: the scalar reduction result is in lane zero and every other lane
+// is zero. The public API's following GetElem(0) lets LLVM eliminate this
+// temporary vector while the native Go backend can retain its existing rules.
+func (lfc *LLVMFuncContext) simdReduction(v *Value, laneType llvm.Type, lanes int, name string) llvm.Value {
+	operationType := llvm.VectorType(laneType, lanes)
+	if lanes*llvmSIMDLaneWidth(laneType) != int(v.Type.Size())*8 {
+		v.Fatalf("%s lane type does not match its SIMD width", v.Op)
+	}
+	x := lfc.simdValueAs(v, v.Args[0], operationType, ".x")
+	sig := llvm.FunctionType(laneType, []llvm.Type{operationType}, false)
+	fn := getOrInsertLLVMIntrinsic(name, sig)
+	reduced := lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String()+".reduced")
+	zero := llvm.ConstNull(operationType)
+	index := llvm.ConstInt(GlobalCtxt.Int32Type(), 0, false)
+	result := lfc.b.CreateInsertElement(zero, reduced, index, v.String()+".lanes")
+	return lfc.simdLaneResult(v, result)
+}
+
 func (lfc *LLVMFuncContext) simdIntegerCompare(v *Value, laneType llvm.Type, lanes int, pred llvm.IntPredicate) llvm.Value {
 	x, y := lfc.simdLaneOperands(v, laneType, lanes)
 	condition := lfc.b.CreateICmp(pred, x, y, v.String()+".condition")
@@ -2105,6 +2124,45 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 		index := llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(v.AuxInt), false)
 		result := lfc.b.CreateInsertElement(x, element, index, v.String()+".lanes")
 		return finish(lfc.simdLaneResult(v, result))
+	case goALLCSIMDLowerReduceAdd, goALLCSIMDLowerReduceMax, goALLCSIMDLowerReduceMin:
+		if len(v.Args) != 1 {
+			v.Fatalf("%s has %d generated SIMD operands, want 1", v.Op, len(v.Args))
+		}
+		var operation string
+		switch info.lowering {
+		case goALLCSIMDLowerReduceAdd:
+			if isFloat {
+				v.Fatalf("%s generated SIMD reduction add is not integer", v.Op)
+			}
+			operation = "add"
+		case goALLCSIMDLowerReduceMax:
+			switch info.lane {
+			case goALLCSIMDLaneInt:
+				operation = "smax"
+			case goALLCSIMDLaneUint:
+				operation = "umax"
+			case goALLCSIMDLaneFloat:
+				operation = "fmaximum"
+			}
+		case goALLCSIMDLowerReduceMin:
+			switch info.lane {
+			case goALLCSIMDLaneInt:
+				operation = "smin"
+			case goALLCSIMDLaneUint:
+				operation = "umin"
+			case goALLCSIMDLaneFloat:
+				operation = "fminimum"
+			}
+		}
+		if operation == "" {
+			v.Fatalf("%s has unsupported generated SIMD reduction lane kind %d", v.Op, info.lane)
+		}
+		typeName := fmt.Sprintf("i%d", laneBits)
+		if isFloat {
+			typeName = fmt.Sprintf("f%d", laneBits)
+		}
+		name := fmt.Sprintf("llvm.vector.reduce.%s.v%d%s", operation, lanes, typeName)
+		return finish(lfc.simdReduction(v, laneType, lanes, name))
 	case goALLCSIMDLowerAdd:
 		if isFloat {
 			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFAdd))
