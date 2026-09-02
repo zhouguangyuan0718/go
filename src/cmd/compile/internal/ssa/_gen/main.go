@@ -283,6 +283,7 @@ func goALLCSIMDOpLiteral(encoded string) string {
 		"": "goALLCSIMDLowerNone", "add": "goALLCSIMDLowerAdd", "sub": "goALLCSIMDLowerSub",
 		"sat-add": "goALLCSIMDLowerAddSaturated", "sat-sub": "goALLCSIMDLowerSubSaturated",
 		"extract-element": "goALLCSIMDLowerExtractElement", "insert-element": "goALLCSIMDLowerInsertElement",
+		"reduce-add": "goALLCSIMDLowerReduceAdd", "reduce-max": "goALLCSIMDLowerReduceMax", "reduce-min": "goALLCSIMDLowerReduceMin",
 		"mul": "goALLCSIMDLowerMul", "div": "goALLCSIMDLowerDiv", "and": "goALLCSIMDLowerAnd",
 		"or": "goALLCSIMDLowerOr", "xor": "goALLCSIMDLowerXor", "andnot": "goALLCSIMDLowerAndNot",
 		"ornot": "goALLCSIMDLowerOrNot", "not": "goALLCSIMDLowerNot", "neg": "goALLCSIMDLowerNeg",
