@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"simd/archsimd/_gen/sgutil"
 	"slices"
 	"sort"
 	"strings"
@@ -52,6 +53,7 @@ type arch struct {
 
 type opData struct {
 	name              string
+	simd              string // versioned GoALLC SIMD descriptor from simdgen
 	reg               regInfo
 	asm               string
 	typ               string // default result type
@@ -245,6 +247,66 @@ func main() {
 
 func outFile(file string) string {
 	return *outDir + "/" + file
+}
+
+func goALLCSIMDConst(kind, value string, values map[string]string) string {
+	if c, ok := values[value]; ok {
+		return c
+	}
+	log.Fatalf("unknown GoALLC SIMD %s %q", kind, value)
+	return ""
+}
+
+func goALLCSIMDArchLiteral(d sgutil.SIMDArchData) string {
+	fields := ""
+	if d.CPUProfile != "" {
+		fields = fmt.Sprintf("cpuProfile:%q", d.CPUProfile)
+	}
+	if d.OperandOrder != "" {
+		if fields != "" {
+			fields += ", "
+		}
+		fields += fmt.Sprintf("operandOrder:%q", d.OperandOrder)
+	}
+	return "goALLCSIMDArchInfo{" + fields + "}"
+}
+
+func goALLCSIMDOpLiteral(encoded string) string {
+	d, err := sgutil.DecodeSIMDOpData(encoded)
+	if err != nil {
+		log.Fatalf("invalid GoALLC SIMD descriptor: %v", err)
+	}
+	if d.LaneBits <= 0 || d.LaneBits > 255 {
+		log.Fatalf("GoALLC SIMD descriptor lane width does not fit: %d", d.LaneBits)
+	}
+	lowering := goALLCSIMDConst("lowering", d.Lowering, map[string]string{
+		"": "goALLCSIMDLowerNone", "add": "goALLCSIMDLowerAdd", "sub": "goALLCSIMDLowerSub",
+		"mul": "goALLCSIMDLowerMul", "div": "goALLCSIMDLowerDiv", "and": "goALLCSIMDLowerAnd",
+		"or": "goALLCSIMDLowerOr", "xor": "goALLCSIMDLowerXor", "andnot": "goALLCSIMDLowerAndNot",
+		"ornot": "goALLCSIMDLowerOrNot", "not": "goALLCSIMDLowerNot", "neg": "goALLCSIMDLowerNeg",
+		"abs": "goALLCSIMDLowerAbs", "equal": "goALLCSIMDLowerEqual", "not-equal": "goALLCSIMDLowerNotEqual",
+		"greater": "goALLCSIMDLowerGreater", "greater-equal": "goALLCSIMDLowerGreaterEqual",
+		"less": "goALLCSIMDLowerLess", "less-equal": "goALLCSIMDLowerLessEqual",
+	})
+	lane := goALLCSIMDConst("lane", d.Lane, map[string]string{
+		"int": "goALLCSIMDLaneInt", "uint": "goALLCSIMDLaneUint", "float": "goALLCSIMDLaneFloat",
+	})
+	archFields := ""
+	for _, arch := range []string{"amd64", "arm64"} {
+		data, ok := d.Arch[arch]
+		if !ok {
+			continue
+		}
+		if data != (sgutil.SIMDArchData{}) {
+			archFields += fmt.Sprintf(", %s:%s", arch, goALLCSIMDArchLiteral(data))
+		}
+	}
+	for arch := range d.Arch {
+		if arch != "amd64" && arch != "arm64" {
+			log.Fatalf("unknown GoALLC SIMD architecture %q", arch)
+		}
+	}
+	return fmt.Sprintf("goALLCSIMDOpInfo{lowering:%s, lane:%s, laneBits:%d%s}", lowering, lane, d.LaneBits, archFields)
 }
 
 func genOp() {
@@ -477,6 +539,32 @@ func genOp() {
 			fmt.Fprintln(w, "},") // close reg info
 			fmt.Fprintln(w, "},") // close op
 		}
+	}
+	fmt.Fprintln(w, "}")
+
+	type simdDescriptor struct {
+		op      string
+		encoded string
+	}
+	var simdDescriptors []simdDescriptor
+	for _, a := range archs {
+		for _, v := range a.ops {
+			if v.simd != "" {
+				simdDescriptors = append(simdDescriptors, simdDescriptor{"Op" + a.Name() + v.name, v.simd})
+			}
+		}
+	}
+	if len(simdDescriptors) >= 1<<16 {
+		log.Fatalf("too many GoALLC SIMD descriptors: %d", len(simdDescriptors))
+	}
+	fmt.Fprintln(w, "var goALLCSIMDOpcodeIndex = [...]uint16{")
+	for i, d := range simdDescriptors {
+		fmt.Fprintf(w, "%s:%d,\n", d.op, i+1)
+	}
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w, "var goALLCSIMDOpTable = [...]goALLCSIMDOpInfo{{},")
+	for _, d := range simdDescriptors {
+		fmt.Fprintf(w, "%s,\n", goALLCSIMDOpLiteral(d.encoded))
 	}
 	fmt.Fprintln(w, "}")
 

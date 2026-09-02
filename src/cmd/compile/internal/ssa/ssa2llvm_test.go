@@ -9,6 +9,7 @@ package ssa
 import (
 	"bytes"
 	"cmd/compile/internal/abi"
+	"fmt"
 	"internal/buildcfg"
 	"os"
 	"strings"
@@ -34,6 +35,46 @@ func (n *llvmTestTypeName) Sym() *types.Sym { return n.sym }
 func (*llvmTestTypeName) Pos() src.XPos     { return src.NoXPos }
 func (*llvmTestTypeName) Type() *types.Type { return nil }
 
+func llvmTestSIMDType(name string, elem *types.Type, lanes int64) *types.Type {
+	pkg := types.NewPkg("simd/archsimd", "archsimd")
+	width := elem.Size() * lanes * 8
+	tag := types.NewNamed(&llvmTestTypeName{sym: pkg.Lookup(fmt.Sprintf("v%d", width))})
+	tag.SetUnderlying(types.NewStruct([]*types.Field{
+		types.NewField(src.NoXPos, nil, types.NewArray(types.NewSignature(nil, nil, nil), 0)),
+	}))
+	types.CalcStructSize(tag)
+
+	typ := types.NewNamed(&llvmTestTypeName{sym: pkg.Lookup(name)})
+	typ.SetUnderlying(types.NewStruct([]*types.Field{
+		types.NewField(src.NoXPos, pkg.Lookup("simd"), tag),
+		types.NewField(src.NoXPos, pkg.Lookup("vals"), types.NewArray(elem, lanes)),
+	}))
+	types.CalcStructSize(typ)
+	if !typ.IsSIMD() {
+		panic(fmt.Sprintf("test type %v was not recognized as SIMD", typ))
+	}
+	return typ
+}
+
+func llvmTestIRVectorType(typ llvm.Type) string {
+	if typ.TypeKind() != llvm.VectorTypeKind {
+		panic(fmt.Sprintf("test type %v is not an LLVM vector", typ))
+	}
+	elem := typ.ElementType()
+	var lane string
+	switch elem.TypeKind() {
+	case llvm.IntegerTypeKind:
+		lane = fmt.Sprintf("i%d", elem.IntTypeWidth())
+	case llvm.FloatTypeKind:
+		lane = "float"
+	case llvm.DoubleTypeKind:
+		lane = "double"
+	default:
+		panic(fmt.Sprintf("unsupported LLVM test vector element %v", elem))
+	}
+	return fmt.Sprintf("<%d x %s>", typ.VectorSize(), lane)
+}
+
 func TestLLVMABICarrierPreservesNamedAggregateIdentity(t *testing.T) {
 	pkg := types.NewPkg("runtime", "runtime")
 	namedSlice := types.NewNamed(&llvmTestTypeName{sym: pkg.Lookup("slice")})
@@ -54,6 +95,149 @@ func TestLLVMABICarrierPreservesNamedAggregateIdentity(t *testing.T) {
 	}
 	if got, other := getLLVMABIType(namedSlice), getLLVMABIType(builtinSlice); got == other {
 		t.Fatalf("named ABI carrier unexpectedly collapsed to builtin carrier %v", got)
+	}
+}
+
+func TestLLVMNaturalSIMDABIType(t *testing.T) {
+	if !buildcfg.Experiment.SIMD {
+		t.Skip("requires GOEXPERIMENT=simd")
+	}
+
+	oldTypes := type2lTypes
+	type2lTypes = make(map[*types.Type]llvm.Type)
+	defer func() {
+		type2lTypes = oldTypes
+	}()
+
+	for _, test := range []struct {
+		name  string
+		elem  *types.Type
+		lanes int64
+		kind  llvm.TypeKind
+		bits  int
+	}{
+		{name: "int32x4", elem: types.Types[types.TINT32], lanes: 4, kind: llvm.IntegerTypeKind, bits: 32},
+		{name: "float32x8", elem: types.Types[types.TFLOAT32], lanes: 8, kind: llvm.FloatTypeKind},
+		{name: "float64x8", elem: types.Types[types.TFLOAT64], lanes: 8, kind: llvm.DoubleTypeKind},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			typ := llvmTestSIMDType(test.name, test.elem, test.lanes)
+			got := getLLVMType(typ)
+			if got.TypeKind() != llvm.VectorTypeKind || got.VectorSize() != int(test.lanes) || got.ElementType().TypeKind() != test.kind {
+				t.Fatalf("SIMD type = %v, want %d lanes of kind %v", got, test.lanes, test.kind)
+			}
+			if test.bits != 0 && got.ElementType().IntTypeWidth() != test.bits {
+				t.Fatalf("SIMD element width = %d, want %d", got.ElementType().IntTypeWidth(), test.bits)
+			}
+			if abi := getLLVMABIType(typ); abi != got {
+				t.Fatalf("SIMD ABI type = %v, want storage type %v", abi, got)
+			}
+		})
+	}
+}
+
+func TestLLVMWidthOnlySIMDValuesKeepNaturalOperationTypes(t *testing.T) {
+	if !buildcfg.Experiment.SIMD {
+		t.Skip("requires GOEXPERIMENT=simd")
+	}
+
+	oldTypes := type2lTypes
+	oldModule := CurrentModule
+	type2lTypes = make(map[*types.Type]llvm.Type)
+	defer func() {
+		type2lTypes = oldTypes
+		CurrentModule = oldModule
+	}()
+
+	floatType := llvmTestSIMDType("float32x4", types.Types[types.TFLOAT32], 4)
+	vectorType := getLLVMType(floatType)
+	module := GlobalCtxt.NewModule("width_only_simd_values")
+	CurrentModule = module
+	builder := GlobalCtxt.NewBuilder()
+	t.Cleanup(module.Dispose)
+	t.Cleanup(builder.Dispose)
+
+	function := llvm.AddFunction(module, "chain", llvm.FunctionType(vectorType, []llvm.Type{vectorType, vectorType}, false))
+	builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
+	context := &LLVMFuncContext{
+		F:  &Func{Config: &Config{arch: "arm64"}},
+		Vs: make(map[ID]llvm.Value),
+		b:  builder,
+	}
+	x := &Value{ID: 1, Op: OpArg, Type: floatType}
+	y := &Value{ID: 2, Op: OpArg, Type: floatType}
+	context.Vs[x.ID] = function.Param(0)
+	context.Vs[y.ID] = function.Param(1)
+	add := &Value{ID: 3, Op: OpAddFloat32x4, Type: types.TypeVec128, Args: []*Value{x, y}}
+	mul := &Value{ID: 4, Op: OpMulFloat32x4, Type: types.TypeVec128, Args: []*Value{add, y}}
+	builder.CreateRet(context.GenLV(mul))
+
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("LLVM verifier rejected width-only SIMD values: %v\n%s", err, module.String())
+	}
+	ir := module.String()
+	for _, want := range []string{"fadd <4 x float>", "fmul <4 x float>", "ret <4 x float>"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("LLVM IR does not contain %q\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "bitcast ") {
+		t.Fatalf("same-shape SIMD chain introduced a carrier bitcast\n%s", ir)
+	}
+}
+
+func TestLLVMSIMDLaneViewsAreOnDemand(t *testing.T) {
+	if !buildcfg.Experiment.SIMD {
+		t.Skip("requires GOEXPERIMENT=simd")
+	}
+
+	oldTypes := type2lTypes
+	oldModule := CurrentModule
+	type2lTypes = make(map[*types.Type]llvm.Type)
+	defer func() {
+		type2lTypes = oldTypes
+		CurrentModule = oldModule
+	}()
+
+	floatType := llvmTestSIMDType("float32x4", types.Types[types.TFLOAT32], 4)
+	intType := llvmTestSIMDType("int32x4", types.Types[types.TINT32], 4)
+	floatVectorType := getLLVMType(floatType)
+	intVectorType := getLLVMType(intType)
+	module := GlobalCtxt.NewModule("on_demand_simd_lane_views")
+	CurrentModule = module
+	builder := GlobalCtxt.NewBuilder()
+	t.Cleanup(module.Dispose)
+	t.Cleanup(builder.Dispose)
+
+	function := llvm.AddFunction(module, "chain", llvm.FunctionType(intVectorType, []llvm.Type{floatVectorType, floatVectorType}, false))
+	builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
+	context := &LLVMFuncContext{
+		F:  &Func{Config: &Config{arch: "arm64"}},
+		Vs: make(map[ID]llvm.Value),
+		b:  builder,
+	}
+	x := &Value{ID: 1, Op: OpArg, Type: floatType}
+	y := &Value{ID: 2, Op: OpArg, Type: floatType}
+	context.Vs[x.ID] = function.Param(0)
+	context.Vs[y.ID] = function.Param(1)
+	add := &Value{ID: 3, Op: OpAddInt32x4, Type: types.TypeVec128, Args: []*Value{x, y}}
+	xor := &Value{ID: 4, Op: OpXorInt32x4, Type: types.TypeVec128, Args: []*Value{add, add}}
+	builder.CreateRet(context.GenLV(xor))
+
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("LLVM verifier rejected on-demand SIMD lane views: %v\n%s", err, module.String())
+	}
+	ir := module.String()
+	for _, want := range []string{"add <4 x i32>", "xor <4 x i32>", "ret <4 x i32>"} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("LLVM IR does not contain %q\n%s", want, ir)
+		}
+	}
+	if got := strings.Count(ir, "bitcast <4 x float>"); got != 2 {
+		t.Fatalf("lane reinterpretation emitted %d float-to-int views, want 2\n%s", got, ir)
+	}
+	if got := strings.Count(ir, "bitcast "); got != 2 {
+		t.Fatalf("integer SIMD chain emitted %d total bitcasts after its two input views, want 2\n%s", got, ir)
 	}
 }
 
@@ -637,6 +821,32 @@ func TestEmitLateGoObjBuiltinDeclarations(t *testing.T) {
 	}
 }
 
+func TestLLVMGoObjImportsDeduplicateMidwayImports(t *testing.T) {
+	simdFingerprint := goobj.FingerprintType{1, 2, 3, 4, 5, 6, 7, 8}
+	bridgeFingerprint := goobj.FingerprintType{8, 7, 6, 5, 4, 3, 2, 1}
+	imports := []goobj.ImportedPkg{
+		{Pkg: "simd", Fingerprint: simdFingerprint},
+		{Pkg: "simd/internal/bridge", Fingerprint: bridgeFingerprint},
+		{Pkg: "simd", Fingerprint: simdFingerprint},
+	}
+
+	got, err := llvmGoObjImports(imports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("unique import count = %d, want 2", len(got))
+	}
+	if got[0] != imports[0] || got[1] != imports[1] {
+		t.Fatalf("unique imports = %v, want first-seen order %v", got, imports[:2])
+	}
+
+	imports[2].Fingerprint = bridgeFingerprint
+	if _, err := llvmGoObjImports(imports); err == nil {
+		t.Fatal("conflicting duplicate import was accepted")
+	}
+}
+
 func TestLLVMAMD64MapPackedByteLowering(t *testing.T) {
 	oldTypes := type2lTypes
 	oldModule := CurrentModule
@@ -757,87 +967,91 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 		CurrentModule = oldModule
 	}()
 
-	carrier := getLLVMType(types.TypeVec128)
-	if carrier.TypeKind() != llvm.VectorTypeKind || carrier.VectorSize() != 16 || carrier.ElementType() != GlobalCtxt.Int8Type() {
-		t.Fatalf("Vec128 LLVM carrier is not <16 x i8>")
-	}
-
 	for _, test := range []struct {
 		name  string
+		elem  *types.Type
+		lanes int64
 		op    Op
 		wants []string
 	}{
-		{"add-int8", OpAddInt8x16, []string{"add <16 x i8>"}},
-		{"add-int16", OpAddInt16x8, []string{"add <8 x i16>"}},
-		{"add-int32", OpAddInt32x4, []string{"add <4 x i32>"}},
-		{"add-int64", OpAddInt64x2, []string{"add <2 x i64>"}},
-		{"add-float32", OpAddFloat32x4, []string{"fadd <4 x float>"}},
-		{"add-float64", OpAddFloat64x2, []string{"fadd <2 x double>"}},
-		{"sub-int16", OpSubUint16x8, []string{"sub <8 x i16>"}},
-		{"sub-float64", OpSubFloat64x2, []string{"fsub <2 x double>"}},
-		{"mul-int8", OpMulInt8x16, []string{"mul <16 x i8>"}},
-		{"mul-float32", OpMulFloat32x4, []string{"fmul <4 x float>"}},
-		{"div-float64", OpDivFloat64x2, []string{"fdiv <2 x double>"}},
-		{"and", OpAndInt64x2, []string{"and <16 x i8>"}},
-		{"or", OpOrUint32x4, []string{"or <16 x i8>"}},
-		{"xor", OpXorInt16x8, []string{"xor <16 x i8>"}},
-		{"and-not", OpAndNotUint8x16, []string{"xor <16 x i8>", "and <16 x i8>"}},
-		{"or-not", OpOrNotInt32x4, []string{"xor <16 x i8>", "or <16 x i8>"}},
+		{"add-int8", types.Types[types.TINT8], 16, OpAddInt8x16, []string{"add <16 x i8>"}},
+		{"add-int16", types.Types[types.TINT16], 8, OpAddInt16x8, []string{"add <8 x i16>"}},
+		{"add-int32", types.Types[types.TINT32], 4, OpAddInt32x4, []string{"add <4 x i32>"}},
+		{"add-int64", types.Types[types.TINT64], 2, OpAddInt64x2, []string{"add <2 x i64>"}},
+		{"add-float32", types.Types[types.TFLOAT32], 4, OpAddFloat32x4, []string{"fadd <4 x float>"}},
+		{"add-float64", types.Types[types.TFLOAT64], 2, OpAddFloat64x2, []string{"fadd <2 x double>"}},
+		{"sub-int16", types.Types[types.TUINT16], 8, OpSubUint16x8, []string{"sub <8 x i16>"}},
+		{"sub-float64", types.Types[types.TFLOAT64], 2, OpSubFloat64x2, []string{"fsub <2 x double>"}},
+		{"mul-int8", types.Types[types.TINT8], 16, OpMulInt8x16, []string{"mul <16 x i8>"}},
+		{"mul-float32", types.Types[types.TFLOAT32], 4, OpMulFloat32x4, []string{"fmul <4 x float>"}},
+		{"div-float64", types.Types[types.TFLOAT64], 2, OpDivFloat64x2, []string{"fdiv <2 x double>"}},
+		{"and", types.Types[types.TINT64], 2, OpAndInt64x2, []string{"and <2 x i64>"}},
+		{"or", types.Types[types.TUINT32], 4, OpOrUint32x4, []string{"or <4 x i32>"}},
+		{"xor", types.Types[types.TINT16], 8, OpXorInt16x8, []string{"xor <8 x i16>"}},
+		{"and-not", types.Types[types.TUINT8], 16, OpAndNotUint8x16, []string{"xor <16 x i8>", "and <16 x i8>"}},
+		{"or-not", types.Types[types.TINT32], 4, OpOrNotInt32x4, []string{"xor <4 x i32>", "or <4 x i32>"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			typ := llvmTestSIMDType(test.name, test.elem, test.lanes)
+			vectorType := getLLVMType(typ)
 			module := GlobalCtxt.NewModule("generic_vec128_" + test.name)
 			CurrentModule = module
 			builder := GlobalCtxt.NewBuilder()
 			t.Cleanup(module.Dispose)
 			t.Cleanup(builder.Dispose)
 
-			function := llvm.AddFunction(module, test.name, llvm.FunctionType(carrier, []llvm.Type{carrier, carrier}, false))
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(vectorType, []llvm.Type{vectorType, vectorType}, false))
 			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
 			context := &LLVMFuncContext{
 				F:  &Func{Config: &Config{arch: "arm64"}},
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
-			x := &Value{ID: 1, Op: OpArg, Type: types.TypeVec128}
-			y := &Value{ID: 2, Op: OpArg, Type: types.TypeVec128}
+			x := &Value{ID: 1, Op: OpArg, Type: typ}
+			y := &Value{ID: 2, Op: OpArg, Type: typ}
 			context.Vs[x.ID] = function.Param(0)
 			context.Vs[y.ID] = function.Param(1)
-			result := &Value{ID: 3, Op: test.op, Type: types.TypeVec128, Args: []*Value{x, y}}
+			result := &Value{ID: 3, Op: test.op, Type: typ, Args: []*Value{x, y}}
 			builder.CreateRet(context.GenLV(result))
 
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("LLVM verifier rejected generic Vec128 lowering: %v\n%s", err, module.String())
 			}
 			ir := module.String()
-			for _, want := range append(test.wants, "ret <16 x i8>") {
+			for _, want := range append(test.wants, "ret "+llvmTestIRVectorType(vectorType)) {
 				if !strings.Contains(ir, want) {
 					t.Errorf("generic Vec128 IR does not contain %q\n%s", want, ir)
 				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("generic Vec128 lowering introduced a carrier bitcast\n%s", ir)
 			}
 		})
 	}
 
 	t.Run("amd64-andnot-operand-order", func(t *testing.T) {
+		typ := llvmTestSIMDType("andnot-int8", types.Types[types.TINT8], 16)
+		vectorType := getLLVMType(typ)
 		module := GlobalCtxt.NewModule("generic_vec128_amd64_andnot")
 		CurrentModule = module
 		builder := GlobalCtxt.NewBuilder()
 		t.Cleanup(module.Dispose)
 		t.Cleanup(builder.Dispose)
 
-		function := llvm.AddFunction(module, "andnot", llvm.FunctionType(carrier, []llvm.Type{carrier, carrier}, false))
+		function := llvm.AddFunction(module, "andnot", llvm.FunctionType(vectorType, []llvm.Type{vectorType, vectorType}, false))
 		builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
 		context := &LLVMFuncContext{
-			F:  &Func{Config: &Config{arch: "amd64"}},
+			F:  &Func{Config: &Config{arch: "amd64"}, Entry: &Block{CPUfeatures: CPUavx}},
 			Vs: make(map[ID]llvm.Value),
 			b:  builder,
 		}
 		// simdgen's AMD64 intrinsic table passes method y before method x so
 		// VPANDN receives the order required by that target instruction.
-		methodY := &Value{ID: 1, Op: OpArg, Type: types.TypeVec128}
-		methodX := &Value{ID: 2, Op: OpArg, Type: types.TypeVec128}
+		methodY := &Value{ID: 1, Op: OpArg, Type: typ}
+		methodX := &Value{ID: 2, Op: OpArg, Type: typ}
 		context.Vs[methodY.ID] = function.Param(0)
 		context.Vs[methodX.ID] = function.Param(1)
-		result := &Value{ID: 3, Op: OpAndNotInt8x16, Type: types.TypeVec128, Args: []*Value{methodY, methodX}}
+		result := &Value{ID: 3, Op: OpAndNotInt8x16, Type: typ, Args: []*Value{methodY, methodX}}
 		builder.CreateRet(context.GenLV(result))
 
 		if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -851,147 +1065,166 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 
 	for _, test := range []struct {
 		name  string
+		elem  *types.Type
+		lanes int64
 		op    Op
 		wants []string
 	}{
-		{"not", OpNotUint64x2, []string{"xor <16 x i8>"}},
-		{"neg-int32", OpNegInt32x4, []string{"sub <4 x i32> zeroinitializer"}},
-		{"neg-float32", OpNegFloat32x4, []string{"fneg <4 x float>"}},
-		{"abs-int64", OpAbsInt64x2, []string{"icmp slt <2 x i64>", "sub <2 x i64>", "select <2 x i1>"}},
-		{"abs-float64", OpAbsFloat64x2, []string{"call <2 x double> @llvm.fabs.v2f64"}},
+		{"not", types.Types[types.TUINT64], 2, OpNotUint64x2, []string{"xor <2 x i64>"}},
+		{"neg-int32", types.Types[types.TINT32], 4, OpNegInt32x4, []string{"sub <4 x i32> zeroinitializer"}},
+		{"neg-float32", types.Types[types.TFLOAT32], 4, OpNegFloat32x4, []string{"fneg <4 x float>"}},
+		{"abs-int64", types.Types[types.TINT64], 2, OpAbsInt64x2, []string{"icmp slt <2 x i64>", "sub <2 x i64>", "select <2 x i1>"}},
+		{"abs-float64", types.Types[types.TFLOAT64], 2, OpAbsFloat64x2, []string{"call <2 x double> @llvm.fabs.v2f64"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			typ := llvmTestSIMDType(test.name, test.elem, test.lanes)
+			vectorType := getLLVMType(typ)
 			module := GlobalCtxt.NewModule("generic_vec128_" + test.name)
 			CurrentModule = module
 			builder := GlobalCtxt.NewBuilder()
 			t.Cleanup(module.Dispose)
 			t.Cleanup(builder.Dispose)
 
-			function := llvm.AddFunction(module, test.name, llvm.FunctionType(carrier, []llvm.Type{carrier}, false))
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(vectorType, []llvm.Type{vectorType}, false))
 			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
 			context := &LLVMFuncContext{
 				F:  &Func{Config: &Config{arch: "arm64"}},
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
-			x := &Value{ID: 1, Op: OpArg, Type: types.TypeVec128}
+			x := &Value{ID: 1, Op: OpArg, Type: typ}
 			context.Vs[x.ID] = function.Param(0)
-			result := &Value{ID: 2, Op: test.op, Type: types.TypeVec128, Args: []*Value{x}}
+			result := &Value{ID: 2, Op: test.op, Type: typ, Args: []*Value{x}}
 			builder.CreateRet(context.GenLV(result))
 
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("LLVM verifier rejected generic Vec128 lowering: %v\n%s", err, module.String())
 			}
 			ir := module.String()
-			for _, want := range append(test.wants, "ret <16 x i8>") {
+			for _, want := range append(test.wants, "ret "+llvmTestIRVectorType(vectorType)) {
 				if !strings.Contains(ir, want) {
 					t.Errorf("generic Vec128 IR does not contain %q\n%s", want, ir)
 				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("generic Vec128 lowering introduced a carrier bitcast\n%s", ir)
 			}
 		})
 	}
 
 	for _, test := range []struct {
-		name  string
-		op    Op
-		wants []string
+		name     string
+		elem     *types.Type
+		maskElem *types.Type
+		lanes    int64
+		op       Op
+		wants    []string
 	}{
-		{"equal-int8", OpEqualInt8x16, []string{"icmp eq <16 x i8>", "sext <16 x i1>"}},
-		{"not-equal-int64", OpNotEqualUint64x2, []string{"icmp ne <2 x i64>", "sext <2 x i1>"}},
-		{"greater-signed", OpGreaterInt16x8, []string{"icmp sgt <8 x i16>", "sext <8 x i1>"}},
-		{"greater-unsigned", OpGreaterUint32x4, []string{"icmp ugt <4 x i32>", "sext <4 x i1>"}},
-		{"greater-equal-signed", OpGreaterEqualInt64x2, []string{"icmp sge <2 x i64>", "sext <2 x i1>"}},
-		{"greater-equal-unsigned", OpGreaterEqualUint8x16, []string{"icmp uge <16 x i8>", "sext <16 x i1>"}},
-		{"less-signed", OpLessInt32x4, []string{"icmp slt <4 x i32>", "sext <4 x i1>"}},
-		{"less-unsigned", OpLessUint16x8, []string{"icmp ult <8 x i16>", "sext <8 x i1>"}},
-		{"less-equal-signed", OpLessEqualInt8x16, []string{"icmp sle <16 x i8>", "sext <16 x i1>"}},
-		{"less-equal-unsigned", OpLessEqualUint32x4, []string{"icmp ule <4 x i32>", "sext <4 x i1>"}},
-		{"equal-float32", OpEqualFloat32x4, []string{"fcmp oeq <4 x float>", "sext <4 x i1>"}},
-		{"not-equal-float64", OpNotEqualFloat64x2, []string{"fcmp une <2 x double>", "sext <2 x i1>"}},
-		{"greater-float32", OpGreaterFloat32x4, []string{"fcmp ogt <4 x float>", "sext <4 x i1>"}},
-		{"greater-equal-float64", OpGreaterEqualFloat64x2, []string{"fcmp oge <2 x double>", "sext <2 x i1>"}},
-		{"less-float32", OpLessFloat32x4, []string{"fcmp olt <4 x float>", "sext <4 x i1>"}},
-		{"less-equal-float64", OpLessEqualFloat64x2, []string{"fcmp ole <2 x double>", "sext <2 x i1>"}},
+		{"equal-int8", types.Types[types.TINT8], types.Types[types.TINT8], 16, OpEqualInt8x16, []string{"icmp eq <16 x i8>", "sext <16 x i1>"}},
+		{"greater-signed", types.Types[types.TINT16], types.Types[types.TINT16], 8, OpGreaterInt16x8, []string{"icmp sgt <8 x i16>", "sext <8 x i1>"}},
+		{"greater-unsigned", types.Types[types.TUINT32], types.Types[types.TINT32], 4, OpGreaterUint32x4, []string{"icmp ugt <4 x i32>", "sext <4 x i1>"}},
+		{"greater-equal-signed", types.Types[types.TINT64], types.Types[types.TINT64], 2, OpGreaterEqualInt64x2, []string{"icmp sge <2 x i64>", "sext <2 x i1>"}},
+		{"greater-equal-unsigned", types.Types[types.TUINT8], types.Types[types.TINT8], 16, OpGreaterEqualUint8x16, []string{"icmp uge <16 x i8>", "sext <16 x i1>"}},
+		{"equal-float32", types.Types[types.TFLOAT32], types.Types[types.TINT32], 4, OpEqualFloat32x4, []string{"fcmp oeq <4 x float>", "sext <4 x i1>"}},
+		{"not-equal-float64", types.Types[types.TFLOAT64], types.Types[types.TINT64], 2, OpNotEqualFloat64x2, []string{"fcmp une <2 x double>", "sext <2 x i1>"}},
+		{"greater-float32", types.Types[types.TFLOAT32], types.Types[types.TINT32], 4, OpGreaterFloat32x4, []string{"fcmp ogt <4 x float>", "sext <4 x i1>"}},
+		{"greater-equal-float64", types.Types[types.TFLOAT64], types.Types[types.TINT64], 2, OpGreaterEqualFloat64x2, []string{"fcmp oge <2 x double>", "sext <2 x i1>"}},
+		{"less-float32", types.Types[types.TFLOAT32], types.Types[types.TINT32], 4, OpLessFloat32x4, []string{"fcmp olt <4 x float>", "sext <4 x i1>"}},
+		{"less-equal-float64", types.Types[types.TFLOAT64], types.Types[types.TINT64], 2, OpLessEqualFloat64x2, []string{"fcmp ole <2 x double>", "sext <2 x i1>"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			inputType := llvmTestSIMDType(test.name+"-input", test.elem, test.lanes)
+			maskType := llvmTestSIMDType(test.name+"-mask", test.maskElem, test.lanes)
+			inputVectorType := getLLVMType(inputType)
+			maskVectorType := getLLVMType(maskType)
 			module := GlobalCtxt.NewModule("generic_vec128_" + test.name)
 			CurrentModule = module
 			builder := GlobalCtxt.NewBuilder()
 			t.Cleanup(module.Dispose)
 			t.Cleanup(builder.Dispose)
 
-			function := llvm.AddFunction(module, test.name, llvm.FunctionType(carrier, []llvm.Type{carrier, carrier}, false))
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(maskVectorType, []llvm.Type{inputVectorType, inputVectorType}, false))
 			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
 			context := &LLVMFuncContext{
 				F:  &Func{Config: &Config{arch: "arm64"}},
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
-			x := &Value{ID: 1, Op: OpArg, Type: types.TypeVec128}
-			y := &Value{ID: 2, Op: OpArg, Type: types.TypeVec128}
+			x := &Value{ID: 1, Op: OpArg, Type: inputType}
+			y := &Value{ID: 2, Op: OpArg, Type: inputType}
 			context.Vs[x.ID] = function.Param(0)
 			context.Vs[y.ID] = function.Param(1)
-			result := &Value{ID: 3, Op: test.op, Type: types.TypeVec128, Args: []*Value{x, y}}
+			result := &Value{ID: 3, Op: test.op, Type: maskType, Args: []*Value{x, y}}
 			builder.CreateRet(context.GenLV(result))
 
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("LLVM verifier rejected Vec128 compare lowering: %v\n%s", err, module.String())
 			}
 			ir := module.String()
-			for _, want := range append(test.wants, "ret <16 x i8>") {
+			for _, want := range append(test.wants, "ret "+llvmTestIRVectorType(maskVectorType)) {
 				if !strings.Contains(ir, want) {
 					t.Errorf("Vec128 compare IR does not contain %q\n%s", want, ir)
 				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("Vec128 compare lowering introduced a carrier bitcast\n%s", ir)
 			}
 		})
 	}
 
 	for _, test := range []struct {
 		name  string
+		elem  *types.Type
+		lanes int64
 		op    Op
 		wants []string
 	}{
-		{"bit-select", OpbitSelectInt8x16, []string{"and <16 x i8> %0, %2", "xor <16 x i8> %2", "and <16 x i8> %1"}},
-		{"bit-select-not", OpbitSelectNotInt8x16, []string{"and <16 x i8> %1, %2", "xor <16 x i8> %2", "and <16 x i8> %0"}},
-		{"wasm-bit-select", OpBitSelectUint32x4, []string{"and <16 x i8> %0, %2", "and <16 x i8> %1"}},
-		{"amd64-blend", OpblendInt8x16, []string{"icmp slt <16 x i8> %2", "select <16 x i1>"}},
+		{"bit-select", types.Types[types.TINT8], 16, OpbitSelectInt8x16, []string{"and <16 x i8> %0, %2", "xor <16 x i8> %2", "and <16 x i8> %1"}},
+		{"bit-select-not", types.Types[types.TINT8], 16, OpbitSelectNotInt8x16, []string{"and <16 x i8> %1, %2", "xor <16 x i8> %2", "and <16 x i8> %0"}},
+		{"amd64-blend", types.Types[types.TINT8], 16, OpblendInt8x16, []string{"icmp slt <16 x i8> %2", "select <16 x i1>"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			typ := llvmTestSIMDType(test.name, test.elem, test.lanes)
+			vectorType := getLLVMType(typ)
 			module := GlobalCtxt.NewModule("generic_vec128_" + test.name)
 			CurrentModule = module
 			builder := GlobalCtxt.NewBuilder()
 			t.Cleanup(module.Dispose)
 			t.Cleanup(builder.Dispose)
 
-			function := llvm.AddFunction(module, test.name, llvm.FunctionType(carrier, []llvm.Type{carrier, carrier, carrier}, false))
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(vectorType, []llvm.Type{vectorType, vectorType, vectorType}, false))
 			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
 			context := &LLVMFuncContext{
 				F:  &Func{Config: &Config{arch: "arm64"}},
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
-			x := &Value{ID: 1, Op: OpArg, Type: types.TypeVec128}
-			y := &Value{ID: 2, Op: OpArg, Type: types.TypeVec128}
-			mask := &Value{ID: 3, Op: OpArg, Type: types.TypeVec128}
+			x := &Value{ID: 1, Op: OpArg, Type: typ}
+			y := &Value{ID: 2, Op: OpArg, Type: typ}
+			mask := &Value{ID: 3, Op: OpArg, Type: typ}
 			context.Vs[x.ID] = function.Param(0)
 			context.Vs[y.ID] = function.Param(1)
 			context.Vs[mask.ID] = function.Param(2)
-			result := &Value{ID: 4, Op: test.op, Type: types.TypeVec128, Args: []*Value{x, y, mask}}
+			result := &Value{ID: 4, Op: test.op, Type: typ, Args: []*Value{x, y, mask}}
 			builder.CreateRet(context.GenLV(result))
 
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("LLVM verifier rejected Vec128 select lowering: %v\n%s", err, module.String())
 			}
 			ir := module.String()
-			for _, want := range append(test.wants, "ret <16 x i8>") {
+			for _, want := range append(test.wants, "ret "+llvmTestIRVectorType(vectorType)) {
 				if !strings.Contains(ir, want) {
 					t.Errorf("Vec128 select IR does not contain %q\n%s", want, ir)
 				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("Vec128 select lowering introduced a carrier bitcast\n%s", ir)
 			}
 		})
 	}
 
 	t.Run("zero-load-store-alignment", func(t *testing.T) {
+		typ := llvmTestSIMDType("memory-int32", types.Types[types.TINT32], 4)
 		module := GlobalCtxt.NewModule("generic_vec128_memory")
 		CurrentModule = module
 		builder := GlobalCtxt.NewBuilder()
@@ -1006,14 +1239,14 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 			Vs: make(map[ID]llvm.Value),
 			b:  builder,
 		}
-		vecPointer := types.NewPtr(types.TypeVec128)
+		vecPointer := types.NewPtr(typ)
 		src := &Value{ID: 1, Op: OpArg, Type: vecPointer}
 		dst := &Value{ID: 2, Op: OpArg, Type: vecPointer}
 		context.Vs[src.ID] = function.Param(0)
 		context.Vs[dst.ID] = function.Param(1)
-		loaded := &Value{ID: 3, Op: OpLoad, Type: types.TypeVec128, Args: []*Value{src}}
-		zero := &Value{ID: 4, Op: OpZeroSIMD, Type: types.TypeVec128}
-		sum := &Value{ID: 5, Op: OpAddInt8x16, Type: types.TypeVec128, Args: []*Value{loaded, zero}}
+		loaded := &Value{ID: 3, Op: OpLoad, Type: typ, Args: []*Value{src}}
+		zero := &Value{ID: 4, Op: OpZeroSIMD, Type: typ}
+		sum := &Value{ID: 5, Op: OpAddInt32x4, Type: typ, Args: []*Value{loaded, zero}}
 		store := &Value{ID: 6, Op: OpStore, Type: types.TypeMem, Args: []*Value{dst, sum}}
 		context.GenLV(store)
 		builder.CreateRetVoid()
@@ -1023,17 +1256,203 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 		}
 		ir := module.String()
 		for _, want := range []string{
-			"load <16 x i8>, ptr %0, align 8",
-			"add <16 x i8>",
+			"load <4 x i32>, ptr %0, align 8",
+			"add <4 x i32>",
 			"zeroinitializer",
-			"store <16 x i8>",
+			"store <4 x i32>",
 			"ptr %1, align 8",
 		} {
 			if !strings.Contains(ir, want) {
 				t.Errorf("Vec128 memory IR does not contain %q\n%s", want, ir)
 			}
 		}
+		if strings.Contains(ir, "bitcast ") {
+			t.Errorf("Vec128 memory lowering introduced a carrier bitcast\n%s", ir)
+		}
 	})
+}
+
+func TestLLVMGenericWideSIMDLowering(t *testing.T) {
+	oldTypes := type2lTypes
+	oldModule := CurrentModule
+	type2lTypes = make(map[*types.Type]llvm.Type)
+	defer func() {
+		type2lTypes = oldTypes
+		CurrentModule = oldModule
+	}()
+
+	for _, test := range []struct {
+		name       string
+		elem       *types.Type
+		resultElem *types.Type
+		lanes      int64
+		op         Op
+		arity      int
+		wants      []string
+	}{
+		{name: "vec256-add-int8", elem: types.Types[types.TINT8], resultElem: types.Types[types.TINT8], lanes: 32, op: OpAddInt8x32, arity: 2, wants: []string{"add <32 x i8>"}},
+		{name: "vec256-sub-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 16, op: OpSubInt16x16, arity: 2, wants: []string{"sub <16 x i16>"}},
+		{name: "vec256-mul-int32", elem: types.Types[types.TINT32], resultElem: types.Types[types.TINT32], lanes: 8, op: OpMulInt32x8, arity: 2, wants: []string{"mul <8 x i32>"}},
+		{name: "vec256-div-float64", elem: types.Types[types.TFLOAT64], resultElem: types.Types[types.TFLOAT64], lanes: 4, op: OpDivFloat64x4, arity: 2, wants: []string{"fdiv <4 x double>"}},
+		{name: "vec256-and", elem: types.Types[types.TINT64], resultElem: types.Types[types.TINT64], lanes: 4, op: OpAndInt64x4, arity: 2, wants: []string{"and <4 x i64>"}},
+		{name: "vec256-abs-int64", elem: types.Types[types.TINT64], resultElem: types.Types[types.TINT64], lanes: 4, op: OpAbsInt64x4, arity: 1, wants: []string{"icmp slt <4 x i64>", "select <4 x i1>"}},
+		{name: "vec256-greater-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 16, op: OpGreaterInt16x16, arity: 2, wants: []string{"icmp sgt <16 x i16>", "sext <16 x i1>"}},
+		{name: "vec512-add-int8", elem: types.Types[types.TINT8], resultElem: types.Types[types.TINT8], lanes: 64, op: OpAddInt8x64, arity: 2, wants: []string{"add <64 x i8>"}},
+		{name: "vec512-sub-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 32, op: OpSubInt16x32, arity: 2, wants: []string{"sub <32 x i16>"}},
+		{name: "vec512-mul-int32", elem: types.Types[types.TINT32], resultElem: types.Types[types.TINT32], lanes: 16, op: OpMulInt32x16, arity: 2, wants: []string{"mul <16 x i32>"}},
+		{name: "vec512-div-float64", elem: types.Types[types.TFLOAT64], resultElem: types.Types[types.TFLOAT64], lanes: 8, op: OpDivFloat64x8, arity: 2, wants: []string{"fdiv <8 x double>"}},
+		{name: "vec512-xor", elem: types.Types[types.TINT64], resultElem: types.Types[types.TINT64], lanes: 8, op: OpXorInt64x8, arity: 2, wants: []string{"xor <8 x i64>"}},
+		{name: "vec512-abs-int64", elem: types.Types[types.TINT64], resultElem: types.Types[types.TINT64], lanes: 8, op: OpAbsInt64x8, arity: 1, wants: []string{"icmp slt <8 x i64>", "select <8 x i1>"}},
+		{name: "vec512-less-equal-uint16", elem: types.Types[types.TUINT16], resultElem: types.Types[types.TINT16], lanes: 32, op: OpLessEqualUint16x32, arity: 2, wants: []string{"icmp ule <32 x i16>", "sext <32 x i1>"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inputType := llvmTestSIMDType(test.name+"-input", test.elem, test.lanes)
+			resultType := llvmTestSIMDType(test.name+"-result", test.resultElem, test.lanes)
+			inputVectorType := getLLVMType(inputType)
+			resultVectorType := getLLVMType(resultType)
+
+			module := GlobalCtxt.NewModule("generic_" + test.name)
+			CurrentModule = module
+			builder := GlobalCtxt.NewBuilder()
+			t.Cleanup(module.Dispose)
+			t.Cleanup(builder.Dispose)
+
+			params := make([]llvm.Type, test.arity)
+			for i := range params {
+				params[i] = inputVectorType
+			}
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(resultVectorType, params, false))
+			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
+			context := &LLVMFuncContext{
+				F:  &Func{Config: &Config{arch: "amd64"}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}},
+				Vs: make(map[ID]llvm.Value),
+				b:  builder,
+			}
+			args := make([]*Value, test.arity)
+			for i := range args {
+				args[i] = &Value{ID: ID(i + 1), Op: OpArg, Type: inputType}
+				context.Vs[args[i].ID] = function.Param(i)
+			}
+			result := &Value{ID: ID(test.arity + 1), Op: test.op, Type: resultType, Args: args}
+			builder.CreateRet(context.GenLV(result))
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("LLVM verifier rejected %s lowering: %v\n%s", test.name, err, module.String())
+			}
+			ir := module.String()
+			for _, want := range append(test.wants, "ret "+llvmTestIRVectorType(resultVectorType)) {
+				if !strings.Contains(ir, want) {
+					t.Errorf("%s IR does not contain %q\n%s", test.name, want, ir)
+				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("%s lowering introduced a carrier bitcast\n%s", test.name, ir)
+			}
+		})
+	}
+}
+
+func TestGoALLCGeneratedSIMDDescriptors(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		op         Op
+		lowering   goALLCSIMDLowering
+		lane       goALLCSIMDLane
+		laneBits   uint8
+		amdProfile string
+	}{
+		{
+			name: "128-bit-add", op: OpAddInt8x16,
+			lowering: goALLCSIMDLowerAdd,
+			lane:     goALLCSIMDLaneInt, laneBits: 8,
+			amdProfile: goCPUProfileX86AVX,
+		},
+		{
+			name: "256-bit-avx2-add", op: OpAddInt8x32,
+			lowering: goALLCSIMDLowerAdd,
+			lane:     goALLCSIMDLaneInt, laneBits: 8,
+			amdProfile: goCPUProfileX86AVX2,
+		},
+		{
+			name: "512-bit-avx512-add", op: OpAddInt8x64,
+			lowering: goALLCSIMDLowerAdd,
+			lane:     goALLCSIMDLaneInt, laneBits: 8,
+			amdProfile: goCPUProfileX86AVX512,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info, ok := goALLCSIMDInfo(test.op)
+			if !ok {
+				t.Fatalf("missing generated descriptor for %s", test.op)
+			}
+			if info.lowering != test.lowering || info.lane != test.lane || info.laneBits != test.laneBits {
+				t.Fatalf("generated descriptor for %s = %#v", test.op, info)
+			}
+			if info.amd64.cpuProfile != test.amdProfile {
+				t.Fatalf("generated AMD64 profile for %s = %q, want %q", test.op, info.amd64.cpuProfile, test.amdProfile)
+			}
+		})
+	}
+
+	andNot, ok := goALLCSIMDInfo(OpAndNotInt8x16)
+	if !ok {
+		t.Fatal("missing generated AndNot descriptor")
+	}
+	if andNot.amd64.operandOrder != "21" || andNot.arm64.operandOrder != "" {
+		t.Fatalf("generated AndNot operand orders = amd64:%q arm64:%q", andNot.amd64.operandOrder, andNot.arm64.operandOrder)
+	}
+
+	if _, ok := goALLCSIMDInfo(OpNotEqualUint64x2); ok {
+		t.Fatal("wasm-only op unexpectedly received an LLVM lowering descriptor")
+	}
+
+	if _, ok := goALLCSIMDInfo(OpAddSaturatedInt8x16); ok {
+		t.Fatal("unmarked saturated add unexpectedly received a lowering descriptor")
+	}
+}
+
+func TestLLVMCPUProfileCoverage(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		required string
+		floor    string
+		want     bool
+	}{
+		{name: "same", required: goCPUProfileX86AVX2, floor: goCPUProfileX86AVX2, want: true},
+		{name: "avx2-covers-avx", required: goCPUProfileX86AVX, floor: goCPUProfileX86AVX2, want: true},
+		{name: "avx512-covers-avx2", required: goCPUProfileX86AVX2, floor: goCPUProfileX86AVX512, want: true},
+		{name: "avx-does-not-cover-avx2", required: goCPUProfileX86AVX2, floor: goCPUProfileX86AVX, want: false},
+		{name: "width-floor-does-not-cover-fma", required: goCPUProfileX86FMA, floor: goCPUProfileX86AVX2, want: false},
+		{name: "no-floor", required: goCPUProfileX86AVX, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := llvmCPUProfileCoveredByFloor(test.required, test.floor); got != test.want {
+				t.Fatalf("llvmCPUProfileCoveredByFloor(%q, %q) = %v, want %v", test.required, test.floor, got, test.want)
+			}
+		})
+	}
+}
+
+func TestLLVMX86CPUFeatureProfile(t *testing.T) {
+	for _, test := range []struct {
+		field string
+		want  string
+	}{
+		{field: "HasAVX", want: goCPUProfileX86AVX},
+		{field: "HasAVX2", want: goCPUProfileX86AVX2},
+		{field: "HasAVX512", want: goCPUProfileX86AVX512},
+		{field: "HasFMA", want: goCPUProfileX86FMA},
+		{field: "HasSSE41", want: goCPUProfileX86SSE41},
+		{field: "HasPOPCNT", want: goCPUProfileX86POPCNT},
+		{field: "HasAVX512GFNI"},
+		{field: "HasAVXVNNI"},
+	} {
+		t.Run(test.field, func(t *testing.T) {
+			if got := llvmX86CPUFeatureProfile(test.field); got != test.want {
+				t.Fatalf("llvmX86CPUFeatureProfile(%q) = %q, want %q", test.field, got, test.want)
+			}
+		})
+	}
 }
 
 func TestLLVMSIMDFeatureFloor(t *testing.T) {
@@ -1041,17 +1460,26 @@ func TestLLVMSIMDFeatureFloor(t *testing.T) {
 		name     string
 		arch     string
 		features CPUfeatures
+		funcName string
 		want     string
 	}{
 		{name: "amd64-avx", arch: "amd64", features: CPUavx, want: goCPUProfileX86AVX},
-		{name: "amd64-avx2-closure", arch: "amd64", features: CPUavx | CPUavx2, want: goCPUProfileX86AVX},
+		{name: "amd64-avx2", arch: "amd64", features: CPUavx | CPUavx2, want: goCPUProfileX86AVX2},
+		{name: "amd64-avx512", arch: "amd64", features: CPUavx | CPUavx2 | CPUavx512, want: goCPUProfileX86AVX512},
+		{name: "amd64-midway-128", arch: "amd64", funcName: "simd.Int8s.Add@simd128", want: goCPUProfileX86AVX},
+		{name: "amd64-midway-256", arch: "amd64", features: CPUavx, funcName: "simd.Int8s.Add@simd256", want: goCPUProfileX86AVX2},
+		{name: "amd64-midway-512", arch: "amd64", features: CPUavx, funcName: "simd.Int8s.Add@simd512", want: goCPUProfileX86AVX512},
 		{name: "amd64-none", arch: "amd64", features: CPUNone},
-		{name: "arm64", arch: "arm64", features: CPUavx},
+		{name: "arm64", arch: "arm64", features: CPUavx, funcName: "simd.Int8s.Add@simd512"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := &Func{
 				Config: &Config{arch: test.arch},
 				Entry:  &Block{CPUfeatures: test.features},
+				Name:   test.funcName,
+			}
+			if test.funcName != "" {
+				f.OwnAux = &AuxCall{Fn: &obj.LSym{Name: test.funcName}}
 			}
 			if got := llvmSIMDFeatureFloor(f); got != test.want {
 				t.Fatalf("llvmSIMDFeatureFloor() = %q, want %q", got, test.want)

@@ -35,6 +35,7 @@ type LLVMFuncContext struct {
 	HasOpenDeferBits    bool
 	OpenDeferSlots      map[llvmLocalKey]int
 	RequiredCPUFeatures map[string]bool
+	CPUFeatureGuards    map[string][]llvm.Value
 	F                   *Func
 	LF                  llvm.Value
 	DISubprogram        llvm.Metadata
@@ -110,6 +111,8 @@ const goCPUFeatureFloorAttr = "goallc.cpu.feature-floor"
 
 const (
 	goCPUProfileX86AVX    = "x86.avx"
+	goCPUProfileX86AVX2   = "x86.avx2"
+	goCPUProfileX86AVX512 = "x86.avx512"
 	goCPUProfileX86FMA    = "x86.fma"
 	goCPUProfileX86SSE41  = "x86.sse41"
 	goCPUProfileX86POPCNT = "x86.popcnt"
@@ -194,10 +197,35 @@ func llvmTypeContainsABIPad(typ llvm.Type) bool {
 	return false
 }
 
-// getLLVMABIType makes a non-empty carrier only at a top-level zero-sized ABI
-// boundary. The original zero-sized layout remains in the wrapper, so
-// DataLayout supplies its Go alignment without storing that alignment in an
-// attribute.
+// llvmNaturalSIMDType extracts the lane shape retained by a concrete source
+// SIMD declaration. Width-only compiler-internal TypeVec values return false.
+func llvmNaturalSIMDType(typ *types.Type) (llvm.Type, bool) {
+	// Generated archsimd values have exactly two fields: a zero-sized SIMD tag
+	// and a full-width [lanes]element field. Validate that canonical layout
+	// instead of accepting an arbitrary struct containing a conveniently-sized
+	// array.
+	if !typ.IsStruct() || typ.NumFields() != 2 {
+		return llvm.Type{}, false
+	}
+	tag, field := typ.FieldType(0), typ.FieldType(1)
+	if !tag.IsSIMD() || tag.Size() != 0 || !field.IsArray() || field.Size() != typ.Size() || field.NumElem() == 0 {
+		return llvm.Type{}, false
+	}
+	elem := field.Elem()
+	if (!elem.IsInteger() && !elem.IsFloat()) || elem.Size()*field.NumElem() != typ.Size() {
+		return llvm.Type{}, false
+	}
+	lane := getLLVMType(elem)
+	switch lane.TypeKind() {
+	case llvm.IntegerTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind:
+		return llvm.VectorType(lane, int(field.NumElem())), true
+	}
+	return llvm.Type{}, false
+}
+
+// getLLVMABIType selects the physical call-boundary carrier. A top-level
+// zero-sized boundary gets a non-empty carrier so DataLayout can preserve its
+// Go alignment.
 func getLLVMABIType(typ *types.Type) llvm.Type {
 	storage := getLLVMType(typ)
 	if typ.Size() == 0 {
@@ -608,18 +636,87 @@ func llvmRequiredARM64CPUProfile(arch string, baselineHasFeature bool, profile s
 	return profile
 }
 
+func llvmFunctionName(f *Func) string {
+	name := f.Name
+	if f.OwnAux != nil && f.OwnAux.Fn != nil {
+		name = f.OwnAux.Fn.Name
+	}
+	return name
+}
+
+func llvmMidwaySIMDFeatureFloor(f *Func) (string, bool) {
+	switch name := llvmFunctionName(f); {
+	case strings.Contains(name, "@simd512"):
+		return goCPUProfileX86AVX512, true
+	case strings.Contains(name, "@simd256"):
+		return goCPUProfileX86AVX2, true
+	case strings.Contains(name, "@simd128"):
+		return goCPUProfileX86AVX, true
+	case strings.Contains(name, "@simd0"):
+		return "", true
+	}
+	return "", false
+}
+
 // llvmSIMDFeatureFloor returns the function-wide target features established
-// by Go's SSA CPU-feature analysis in the entry block. They can come from a
-// SIMD signature or from an unconditionally executed entry-block SIMD value.
-// In particular, a Midway-specialized function is reached only after the
-// portable simd dispatcher has selected a hardware vector width. This is a
-// precondition, not a new runtime dispatch request: the shared early
-// CPU-feature pass consumes the attribute and adds the target feature.
+// by Go's SSA CPU-feature analysis in the entry block or by a Midway variant's
+// selected width. The generic Vec256 ABI itself needs AVX, while @simd256 is
+// reached only after the portable dispatcher has observed HasAVX2; keep those
+// two contracts distinct. This is a precondition, not a new runtime dispatch
+// request: the shared early CPU-feature pass consumes the attribute and adds
+// the target feature.
 func llvmSIMDFeatureFloor(f *Func) string {
-	if f.Config.arch == "amd64" && f.Entry.CPUfeatures.hasFeature(CPUavx) {
+	if f.Config.arch != "amd64" {
+		return ""
+	}
+	if floor, midway := llvmMidwaySIMDFeatureFloor(f); midway {
+		return floor
+	}
+	features := CPUNone
+	if f.Entry != nil {
+		features = f.Entry.CPUfeatures
+	}
+	switch {
+	case features.hasFeature(CPUavx512):
+		return goCPUProfileX86AVX512
+	case features.hasFeature(CPUavx2):
+		return goCPUProfileX86AVX2
+	case features.hasFeature(CPUavx):
 		return goCPUProfileX86AVX
 	}
 	return ""
+}
+
+func llvmCPUProfileCoveredByFloor(required, floor string) bool {
+	if required == "" || required == floor {
+		return true
+	}
+	switch floor {
+	case goCPUProfileX86AVX2:
+		return required == goCPUProfileX86AVX
+	case goCPUProfileX86AVX512:
+		return required == goCPUProfileX86AVX || required == goCPUProfileX86AVX2
+	}
+	return false
+}
+
+func llvmCPUProfileCoveredByBaseline(arch, profile string) bool {
+	switch arch {
+	case "amd64":
+		level := 0
+		switch profile {
+		case goCPUProfileX86SSE41, goCPUProfileX86POPCNT:
+			level = 2
+		case goCPUProfileX86AVX, goCPUProfileX86AVX2, goCPUProfileX86FMA:
+			level = 3
+		case goCPUProfileX86AVX512:
+			level = 4
+		}
+		return level != 0 && buildcfg.GOAMD64 >= level
+	case "arm64":
+		return profile == goCPUProfileARM64LSE && buildcfg.GOARM64.LSE
+	}
+	return profile == ""
 }
 
 func (lfc *LLVMFuncContext) requireCPUFeature(instruction llvm.Value, profile string) {
@@ -634,11 +731,14 @@ func (lfc *LLVMFuncContext) requireCPUFeature(instruction llvm.Value, profile st
 		lfc.RequiredCPUFeatures = make(map[string]bool)
 	}
 	lfc.RequiredCPUFeatures[profile] = true
-	profiles := make([]string, 0, 4)
+	profiles := make([]string, 0, 7)
 	for _, candidate := range []string{
 		goCPUProfileX86FMA,
 		goCPUProfileX86SSE41,
 		goCPUProfileX86POPCNT,
+		goCPUProfileX86AVX,
+		goCPUProfileX86AVX2,
+		goCPUProfileX86AVX512,
 		goCPUProfileARM64LSE,
 	} {
 		if lfc.RequiredCPUFeatures[candidate] {
@@ -646,6 +746,98 @@ func (lfc *LLVMFuncContext) requireCPUFeature(instruction llvm.Value, profile st
 		}
 	}
 	lfc.LF.AddTargetDependentFunctionAttr(goCPUMultiversionAttr, strings.Join(profiles, ","))
+}
+
+func llvmX86CPUFeatureProfile(field string) string {
+	switch field {
+	case "HasAVX":
+		return goCPUProfileX86AVX
+	case "HasAVX2":
+		return goCPUProfileX86AVX2
+	case "HasAVX512":
+		return goCPUProfileX86AVX512
+	case "HasFMA":
+		return goCPUProfileX86FMA
+	case "HasSSE41":
+		return goCPUProfileX86SSE41
+	case "HasPOPCNT":
+		return goCPUProfileX86POPCNT
+	}
+	return ""
+}
+
+// llvmX86CPUFeatureField recognizes the ordinary internal/cpu.X86 field load
+// used by archsimd feature checks. Keep this LLVM-only matching separate from
+// the native SSA CPU-feature analysis.
+func llvmX86CPUFeatureField(v *Value) string {
+	if v.Op != OpLoad || len(v.Args) == 0 {
+		return ""
+	}
+	offPtr := v.Args[0]
+	if offPtr.Op != OpOffPtr || len(offPtr.Args) == 0 {
+		return ""
+	}
+	addr := offPtr.Args[0]
+	if addr.Op != OpAddr || len(addr.Args) == 0 || addr.Args[0].Op != OpSB {
+		return ""
+	}
+	sym, ok := addr.Aux.(*obj.LSym)
+	if !ok || sym.Name != "internal/cpu.X86" {
+		return ""
+	}
+	t := addr.Type
+	if !t.IsPtr() {
+		v.Fatalf("The symbol %s is not a pointer, found %v instead", sym.Name, t)
+	}
+	t = t.Elem()
+	if !t.IsStruct() {
+		v.Fatalf("The referent of symbol %s is not a struct, found %v instead", sym.Name, t)
+	}
+	for _, field := range t.Fields() {
+		if offPtr.AuxInt == field.Offset && field.Sym != nil {
+			return field.Sym.Name
+		}
+	}
+	return ""
+}
+
+func (lfc *LLVMFuncContext) recordCPUFeatureGuard(v *Value, load llvm.Value) {
+	if lfc.F.Config.arch != "amd64" {
+		return
+	}
+	field := llvmX86CPUFeatureField(v)
+	if profile := llvmX86CPUFeatureProfile(field); profile != "" {
+		if lfc.CPUFeatureGuards == nil {
+			lfc.CPUFeatureGuards = make(map[string][]llvm.Value)
+		}
+		lfc.CPUFeatureGuards[profile] = append(lfc.CPUFeatureGuards[profile], load)
+	}
+}
+
+func (lfc *LLVMFuncContext) markRequiredCPUFeatureGuards() {
+	kind := GlobalCtxt.MDKindID(goCPUGuardMD)
+	for profile := range lfc.RequiredCPUFeatures {
+		metadata := GlobalCtxt.MDNode([]llvm.Metadata{GlobalCtxt.MDString(profile)})
+		for _, load := range lfc.CPUFeatureGuards[profile] {
+			load.SetMetadata(kind, metadata)
+		}
+	}
+}
+
+func (lfc *LLVMFuncContext) requireGeneratedSIMDCPUFeature(v *Value, instruction llvm.Value, info goALLCSIMDOpInfo) {
+	arch := lfc.F.Config.arch
+	profile := info.archInfo(arch).cpuProfile
+	if profile == "" || llvmCPUProfileCoveredByBaseline(arch, profile) {
+		return
+	}
+	floor := llvmSIMDFeatureFloor(lfc.F)
+	if llvmCPUProfileCoveredByFloor(profile, floor) {
+		return
+	}
+	if _, midway := llvmMidwaySIMDFeatureFloor(lfc.F); midway {
+		v.Fatalf("%s requires CPU profile %q beyond Midway feature floor %q", v.Op, profile, floor)
+	}
+	lfc.requireCPUFeature(instruction, profile)
 }
 
 func (lfc *LLVMFuncContext) requireARM64LSE(v *Value, instruction llvm.Value) {
@@ -1673,18 +1865,17 @@ func llvmAMD64ByteVectorType() llvm.Type {
 	return llvm.VectorType(GlobalCtxt.Int8Type(), 16)
 }
 
-// llvmSIMDType is the canonical first-class carrier used at Go SSA and ABI
-// boundaries. Lane-sensitive operations bitcast this byte vector locally;
-// keeping one carrier type prevents source-level Int8x16, Uint32x4, and
-// Float64x2 names from creating distinct calling conventions for the same Go
-// register value.
-func llvmSIMDType(typ *types.Type) llvm.Type {
+// llvmSIMDCarrierType is the fallback representation for Go's width-only SSA
+// SIMD types. Concrete source SIMD types use their natural lane vector; only
+// values whose Go SSA type has intentionally forgotten that shape need this
+// carrier.
+func llvmSIMDCarrierType(typ *types.Type) llvm.Type {
 	if typ == types.TypeMask {
 		return GlobalCtxt.Int64Type()
 	}
-	switch typ.Size() {
-	case 16:
-		return llvmAMD64ByteVectorType()
+	switch size := typ.Size(); size {
+	case 16, 32, 64:
+		return llvm.VectorType(GlobalCtxt.Int8Type(), int(size))
 	default:
 		base.Fatalf("unsupported SIMD width %d for %v in LLVM lowering", typ.Size(), typ)
 		return llvm.Type{}
@@ -1695,60 +1886,101 @@ type llvmSIMDBinaryBuilder func(llvm.Value, llvm.Value, string) llvm.Value
 
 type llvmSIMDUnaryBuilder func(llvm.Value, string) llvm.Value
 
-func (lfc *LLVMFuncContext) simdLaneOperands(v *Value, laneType llvm.Type, lanes int) (llvm.Type, llvm.Value, llvm.Value) {
-	carrier := getLLVMType(v.Type)
-	x, y := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1])
-	if carrier != llvmSIMDType(types.TypeVec128) || x.Type() != carrier || y.Type() != carrier {
-		v.Fatalf("%s requires <16 x i8> operands and result", v.Op)
+func llvmSIMDLaneWidth(typ llvm.Type) int {
+	switch typ.TypeKind() {
+	case llvm.IntegerTypeKind:
+		return typ.IntTypeWidth()
+	case llvm.FloatTypeKind:
+		return 32
+	case llvm.DoubleTypeKind:
+		return 64
+	default:
+		base.Fatalf("unsupported LLVM SIMD lane type %v", typ)
+		return 0
 	}
-
-	operationType := llvm.VectorType(laneType, lanes)
-	if x.Type() != operationType {
-		x = lfc.b.CreateBitCast(x, operationType, v.String()+".x")
-		y = lfc.b.CreateBitCast(y, operationType, v.String()+".y")
-	}
-	return carrier, x, y
 }
 
-func (lfc *LLVMFuncContext) simdLaneResult(v *Value, carrier llvm.Type, result llvm.Value) llvm.Value {
-	if result.Type() != carrier {
-		result = lfc.b.CreateBitCast(result, carrier, v.String())
+func llvmSIMDVectorWidth(typ llvm.Type) (int, bool) {
+	if typ.TypeKind() != llvm.VectorTypeKind {
+		return 0, false
+	}
+	lane := typ.ElementType()
+	switch lane.TypeKind() {
+	case llvm.IntegerTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind:
+		return typ.VectorSize() * llvmSIMDLaneWidth(lane), true
+	default:
+		return 0, false
+	}
+}
+
+// simdValueAs returns the lane view required by one LLVM operation. The Go
+// SSA value remains unchanged; a bitcast is emitted only when its currently
+// materialized LLVM value has a different equal-width vector shape.
+func (lfc *LLVMFuncContext) simdValueAs(user, value *Value, want llvm.Type, suffix string) llvm.Value {
+	lVal := lfc.GenLV(value)
+	if lVal.Type() == want {
+		return lVal
+	}
+	if !value.Type.IsSIMD() {
+		user.Fatalf("%s has non-SIMD operand %s", user.Op, value.LongString())
+	}
+	gotWidth, gotOK := llvmSIMDVectorWidth(lVal.Type())
+	wantWidth, wantOK := llvmSIMDVectorWidth(want)
+	if !gotOK || !wantOK || gotWidth != wantWidth || int64(wantWidth) != value.Type.Size()*8 {
+		user.Fatalf("%s cannot view LLVM operand %v as %v", user.Op, lVal.Type(), want)
+	}
+	return lfc.b.CreateBitCast(lVal, want, user.String()+suffix)
+}
+
+func (lfc *LLVMFuncContext) simdLaneOperands(v *Value, laneType llvm.Type, lanes int) (llvm.Value, llvm.Value) {
+	operationType := llvm.VectorType(laneType, lanes)
+	if lanes*llvmSIMDLaneWidth(laneType) != int(v.Type.Size())*8 {
+		v.Fatalf("%s lane type does not match its SIMD width", v.Op)
+	}
+	x := lfc.simdValueAs(v, v.Args[0], operationType, ".x")
+	y := lfc.simdValueAs(v, v.Args[1], operationType, ".y")
+	return x, y
+}
+
+func (lfc *LLVMFuncContext) simdLaneResult(v *Value, result llvm.Value) llvm.Value {
+	width, ok := llvmSIMDVectorWidth(result.Type())
+	if !ok || int64(width) != v.Type.Size()*8 {
+		v.Fatalf("%s has LLVM result %v with the wrong SIMD width", v.Op, result.Type())
 	}
 	return result
 }
 
 func (lfc *LLVMFuncContext) simdBinary(v *Value, laneType llvm.Type, lanes int, build llvmSIMDBinaryBuilder) llvm.Value {
-	carrier, x, y := lfc.simdLaneOperands(v, laneType, lanes)
-	return lfc.simdLaneResult(v, carrier, build(x, y, v.String()+".lanes"))
+	x, y := lfc.simdLaneOperands(v, laneType, lanes)
+	return lfc.simdLaneResult(v, build(x, y, v.String()+".lanes"))
 }
 
 func (lfc *LLVMFuncContext) simdUnary(v *Value, laneType llvm.Type, lanes int, build llvmSIMDUnaryBuilder) llvm.Value {
-	carrier := getLLVMType(v.Type)
-	x := lfc.GenLV(v.Args[0])
-	if carrier != llvmSIMDType(types.TypeVec128) || x.Type() != carrier {
-		v.Fatalf("%s requires a <16 x i8> operand and result", v.Op)
-	}
 	operationType := llvm.VectorType(laneType, lanes)
-	if x.Type() != operationType {
-		x = lfc.b.CreateBitCast(x, operationType, v.String()+".x")
+	if lanes*llvmSIMDLaneWidth(laneType) != int(v.Type.Size())*8 {
+		v.Fatalf("%s lane type does not match its SIMD width", v.Op)
 	}
-	return lfc.simdLaneResult(v, carrier, build(x, v.String()+".lanes"))
+	x := lfc.simdValueAs(v, v.Args[0], operationType, ".x")
+	return lfc.simdLaneResult(v, build(x, v.String()+".lanes"))
 }
 
-func (lfc *LLVMFuncContext) simdAndNot(v *Value, useOr bool) llvm.Value {
-	carrier, x, y := lfc.simdLaneOperands(v, GlobalCtxt.Int8Type(), 16)
-	// AMD64's VPANDN computes ^arg0 & arg1, so simdgen deliberately builds the
-	// generic AndNot op with method arguments in 2,1 order. AArch64's VBIC and
-	// OrNot's VORN use the source order. Recover the API-level x &^ y here before
-	// expressing it as target-independent LLVM IR.
-	if !useOr && lfc.F.Config.arch == "amd64" {
+func (lfc *LLVMFuncContext) simdAndNot(v *Value, info goALLCSIMDOpInfo, laneType llvm.Type, lanes int, useOr bool) llvm.Value {
+	x, y := lfc.simdLaneOperands(v, laneType, lanes)
+	// simdgen records the API-to-instruction operand permutation per
+	// architecture. Recover the API-level order before expressing the operation
+	// as target-independent LLVM IR.
+	switch order := info.archInfo(lfc.F.Config.arch).operandOrder; order {
+	case "":
+	case "21":
 		x, y = y, x
+	default:
+		v.Fatalf("%s has unsupported generated SIMD operand order %q", v.Op, order)
 	}
 	notY := lfc.b.CreateNot(y, v.String()+".not")
 	if useOr {
-		return lfc.simdLaneResult(v, carrier, lfc.b.CreateOr(x, notY, v.String()+".lanes"))
+		return lfc.simdLaneResult(v, lfc.b.CreateOr(x, notY, v.String()+".lanes"))
 	}
-	return lfc.simdLaneResult(v, carrier, lfc.b.CreateAnd(x, notY, v.String()+".lanes"))
+	return lfc.simdLaneResult(v, lfc.b.CreateAnd(x, notY, v.String()+".lanes"))
 }
 
 func (lfc *LLVMFuncContext) simdIntegerAbs(v *Value, laneType llvm.Type, lanes int) llvm.Value {
@@ -1769,26 +2001,186 @@ func (lfc *LLVMFuncContext) simdUnaryIntrinsic(v *Value, laneType llvm.Type, lan
 }
 
 func (lfc *LLVMFuncContext) simdIntegerCompare(v *Value, laneType llvm.Type, lanes int, pred llvm.IntPredicate) llvm.Value {
-	carrier, x, y := lfc.simdLaneOperands(v, laneType, lanes)
+	x, y := lfc.simdLaneOperands(v, laneType, lanes)
 	condition := lfc.b.CreateICmp(pred, x, y, v.String()+".condition")
 	mask := lfc.b.CreateSExt(condition, x.Type(), v.String()+".mask")
-	return lfc.simdLaneResult(v, carrier, mask)
+	return lfc.simdLaneResult(v, mask)
 }
 
 func (lfc *LLVMFuncContext) simdFloatCompare(v *Value, laneType, maskLaneType llvm.Type, lanes int, pred llvm.FloatPredicate) llvm.Value {
-	carrier, x, y := lfc.simdLaneOperands(v, laneType, lanes)
+	x, y := lfc.simdLaneOperands(v, laneType, lanes)
 	condition := lfc.b.CreateFCmp(pred, x, y, v.String()+".condition")
 	maskType := llvm.VectorType(maskLaneType, lanes)
 	mask := lfc.b.CreateSExt(condition, maskType, v.String()+".mask")
-	return lfc.simdLaneResult(v, carrier, mask)
+	return lfc.simdLaneResult(v, mask)
+}
+
+func llvmGeneratedSIMDLaneType(info goALLCSIMDOpInfo) llvm.Type {
+	switch info.lane {
+	case goALLCSIMDLaneInt, goALLCSIMDLaneUint:
+		switch info.laneBits {
+		case 8:
+			return GlobalCtxt.Int8Type()
+		case 16:
+			return GlobalCtxt.Int16Type()
+		case 32:
+			return GlobalCtxt.Int32Type()
+		case 64:
+			return GlobalCtxt.Int64Type()
+		}
+	case goALLCSIMDLaneFloat:
+		switch info.laneBits {
+		case 32:
+			return GlobalCtxt.FloatType()
+		case 64:
+			return GlobalCtxt.DoubleType()
+		}
+	}
+	return llvm.Type{}
+}
+
+func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
+	info, ok := goALLCSIMDInfo(v.Op)
+	if !ok || info.lowering == goALLCSIMDLowerNone {
+		return llvm.Value{}, false
+	}
+	if len(v.Args) == 0 {
+		v.Fatalf("%s has no SIMD operand", v.Op)
+	}
+	laneType := llvmGeneratedSIMDLaneType(info)
+	if laneType.IsNil() {
+		v.Fatalf("%s has unsupported generated SIMD lane kind %d width %d", v.Op, info.lane, info.laneBits)
+	}
+	width := int(v.Type.Size()) * 8
+	if width%int(info.laneBits) != 0 {
+		v.Fatalf("%s lane width %d does not divide result width %d", v.Op, info.laneBits, width)
+	}
+	lanes := width / int(info.laneBits)
+	laneBits := int(info.laneBits)
+	isFloat := info.lane == goALLCSIMDLaneFloat
+	finish := func(result llvm.Value) (llvm.Value, bool) {
+		lfc.requireGeneratedSIMDCPUFeature(v, result, info)
+		return result, true
+	}
+
+	switch info.lowering {
+	case goALLCSIMDLowerAdd:
+		if isFloat {
+			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFAdd))
+		}
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateAdd))
+	case goALLCSIMDLowerSub:
+		if isFloat {
+			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFSub))
+		}
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateSub))
+	case goALLCSIMDLowerMul:
+		if isFloat {
+			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFMul))
+		}
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateMul))
+	case goALLCSIMDLowerDiv:
+		if !isFloat {
+			v.Fatalf("%s generated SIMD division is not floating point", v.Op)
+		}
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFDiv))
+	case goALLCSIMDLowerAnd:
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateAnd))
+	case goALLCSIMDLowerOr:
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateOr))
+	case goALLCSIMDLowerXor:
+		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateXor))
+	case goALLCSIMDLowerAndNot:
+		return finish(lfc.simdAndNot(v, info, laneType, lanes, false))
+	case goALLCSIMDLowerOrNot:
+		return finish(lfc.simdAndNot(v, info, laneType, lanes, true))
+	case goALLCSIMDLowerNot:
+		return finish(lfc.simdUnary(v, laneType, lanes, lfc.b.CreateNot))
+	case goALLCSIMDLowerNeg:
+		if isFloat {
+			return finish(lfc.simdUnary(v, laneType, lanes, lfc.b.CreateFNeg))
+		}
+		return finish(lfc.simdUnary(v, laneType, lanes, lfc.b.CreateNeg))
+	case goALLCSIMDLowerAbs:
+		if isFloat {
+			name := fmt.Sprintf("llvm.fabs.v%df%d", lanes, laneBits)
+			return finish(lfc.simdUnaryIntrinsic(v, laneType, lanes, name))
+		}
+		return finish(lfc.simdIntegerAbs(v, laneType, lanes))
+	}
+
+	if isFloat {
+		var pred llvm.FloatPredicate
+		switch info.lowering {
+		case goALLCSIMDLowerEqual:
+			pred = llvm.FloatOEQ
+		case goALLCSIMDLowerNotEqual:
+			pred = llvm.FloatUNE
+		case goALLCSIMDLowerGreater:
+			pred = llvm.FloatOGT
+		case goALLCSIMDLowerGreaterEqual:
+			pred = llvm.FloatOGE
+		case goALLCSIMDLowerLess:
+			pred = llvm.FloatOLT
+		case goALLCSIMDLowerLessEqual:
+			pred = llvm.FloatOLE
+		default:
+			v.Fatalf("%s has unsupported generated floating SIMD lowering %d", v.Op, info.lowering)
+		}
+		maskLaneType := GlobalCtxt.Int32Type()
+		if laneBits == 64 {
+			maskLaneType = GlobalCtxt.Int64Type()
+		}
+		return finish(lfc.simdFloatCompare(v, laneType, maskLaneType, lanes, pred))
+	}
+
+	var pred llvm.IntPredicate
+	signed := info.lane == goALLCSIMDLaneInt
+	switch info.lowering {
+	case goALLCSIMDLowerEqual:
+		pred = llvm.IntEQ
+	case goALLCSIMDLowerNotEqual:
+		pred = llvm.IntNE
+	case goALLCSIMDLowerGreater:
+		if signed {
+			pred = llvm.IntSGT
+		} else {
+			pred = llvm.IntUGT
+		}
+	case goALLCSIMDLowerGreaterEqual:
+		if signed {
+			pred = llvm.IntSGE
+		} else {
+			pred = llvm.IntUGE
+		}
+	case goALLCSIMDLowerLess:
+		if signed {
+			pred = llvm.IntSLT
+		} else {
+			pred = llvm.IntULT
+		}
+	case goALLCSIMDLowerLessEqual:
+		if signed {
+			pred = llvm.IntSLE
+		} else {
+			pred = llvm.IntULE
+		}
+	default:
+		v.Fatalf("%s has unsupported generated integer SIMD lowering %d", v.Op, info.lowering)
+	}
+	return finish(lfc.simdIntegerCompare(v, laneType, lanes, pred))
 }
 
 func (lfc *LLVMFuncContext) simdBitSelect(v *Value, invertMask bool) llvm.Value {
-	carrier := getLLVMType(v.Type)
-	x, y, mask := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
-	if carrier != llvmSIMDType(types.TypeVec128) || x.Type() != carrier || y.Type() != carrier || mask.Type() != carrier {
-		v.Fatalf("%s requires <16 x i8> operands and result", v.Op)
+	switch v.Op {
+	case OpbitSelectInt8x16, OpbitSelectNotInt8x16:
+	default:
+		v.Fatalf("unsupported SIMD bit-select operation %s", v.Op)
 	}
+	resultType := llvmAMD64ByteVectorType()
+	x := lfc.simdValueAs(v, v.Args[0], resultType, ".x")
+	y := lfc.simdValueAs(v, v.Args[1], resultType, ".y")
+	mask := lfc.simdValueAs(v, v.Args[2], resultType, ".mask")
 	if invertMask {
 		x, y = y, x
 	}
@@ -1798,11 +2190,10 @@ func (lfc *LLVMFuncContext) simdBitSelect(v *Value, invertMask bool) llvm.Value 
 }
 
 func (lfc *LLVMFuncContext) simdBlendBytes(v *Value) llvm.Value {
-	carrier := getLLVMType(v.Type)
-	x, y, mask := lfc.GenLV(v.Args[0]), lfc.GenLV(v.Args[1]), lfc.GenLV(v.Args[2])
-	if carrier != llvmSIMDType(types.TypeVec128) || x.Type() != carrier || y.Type() != carrier || mask.Type() != carrier {
-		v.Fatalf("%s requires <16 x i8> operands and result", v.Op)
-	}
+	carrier := llvmAMD64ByteVectorType()
+	x := lfc.simdValueAs(v, v.Args[0], carrier, ".x")
+	y := lfc.simdValueAs(v, v.Args[1], carrier, ".y")
+	mask := lfc.simdValueAs(v, v.Args[2], carrier, ".mask")
 	// VPBLENDVB selects y when the high bit of the corresponding mask byte is
 	// set. Go SIMD masks are canonical zero/all-ones bytes, but retaining the
 	// sign-bit rule here also preserves the exact private intrinsic semantics.
@@ -2762,6 +3153,10 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	var lVal llvm.Value
 	arg0 := func() llvm.Value { return lfc.GenLV(v.Args[0]) }
 	arg1 := func() llvm.Value { return lfc.GenLV(v.Args[1]) }
+	if generated, ok := lfc.lowerGeneratedSIMD(v); ok {
+		lfc.Vs[v.ID] = generated
+		return generated
+	}
 	switch v.Op {
 	case OpInitMem, OpSB, OpWBend:
 		// LLVM models memory ordering through instruction dependencies, not an
@@ -2905,205 +3300,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.aggregate(v, v.Args)
 	case OpZeroSIMD:
 		lVal = llvm.ConstNull(getLLVMType(v.Type))
-	case OpAddInt8x16, OpAddUint8x16:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateAdd)
-	case OpAddInt16x8, OpAddUint16x8:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int16Type(), 8, lfc.b.CreateAdd)
-	case OpAddInt32x4, OpAddUint32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int32Type(), 4, lfc.b.CreateAdd)
-	case OpAddInt64x2, OpAddUint64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int64Type(), 2, lfc.b.CreateAdd)
-	case OpAddFloat32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.FloatType(), 4, lfc.b.CreateFAdd)
-	case OpAddFloat64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.DoubleType(), 2, lfc.b.CreateFAdd)
-	case OpSubInt8x16, OpSubUint8x16:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateSub)
-	case OpSubInt16x8, OpSubUint16x8:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int16Type(), 8, lfc.b.CreateSub)
-	case OpSubInt32x4, OpSubUint32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int32Type(), 4, lfc.b.CreateSub)
-	case OpSubInt64x2, OpSubUint64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int64Type(), 2, lfc.b.CreateSub)
-	case OpSubFloat32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.FloatType(), 4, lfc.b.CreateFSub)
-	case OpSubFloat64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.DoubleType(), 2, lfc.b.CreateFSub)
-	case OpMulInt8x16, OpMulUint8x16:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateMul)
-	case OpMulInt16x8, OpMulUint16x8:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int16Type(), 8, lfc.b.CreateMul)
-	case OpMulInt32x4, OpMulUint32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int32Type(), 4, lfc.b.CreateMul)
-	case OpMulInt64x2, OpMulUint64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int64Type(), 2, lfc.b.CreateMul)
-	case OpMulFloat32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.FloatType(), 4, lfc.b.CreateFMul)
-	case OpMulFloat64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.DoubleType(), 2, lfc.b.CreateFMul)
-	case OpDivFloat32x4:
-		lVal = lfc.simdBinary(v, GlobalCtxt.FloatType(), 4, lfc.b.CreateFDiv)
-	case OpDivFloat64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.DoubleType(), 2, lfc.b.CreateFDiv)
-	case OpAndInt8x16, OpAndUint8x16,
-		OpAndInt16x8, OpAndUint16x8,
-		OpAndInt32x4, OpAndUint32x4,
-		OpAndInt64x2, OpAndUint64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateAnd)
-	case OpOrInt8x16, OpOrUint8x16,
-		OpOrInt16x8, OpOrUint16x8,
-		OpOrInt32x4, OpOrUint32x4,
-		OpOrInt64x2, OpOrUint64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateOr)
-	case OpXorInt8x16, OpXorUint8x16,
-		OpXorInt16x8, OpXorUint16x8,
-		OpXorInt32x4, OpXorUint32x4,
-		OpXorInt64x2, OpXorUint64x2:
-		lVal = lfc.simdBinary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateXor)
-	case OpAndNotInt8x16, OpAndNotUint8x16,
-		OpAndNotInt16x8, OpAndNotUint16x8,
-		OpAndNotInt32x4, OpAndNotUint32x4,
-		OpAndNotInt64x2, OpAndNotUint64x2:
-		lVal = lfc.simdAndNot(v, false)
-	case OpOrNotInt8x16, OpOrNotUint8x16,
-		OpOrNotInt16x8, OpOrNotUint16x8,
-		OpOrNotInt32x4, OpOrNotUint32x4,
-		OpOrNotInt64x2, OpOrNotUint64x2:
-		lVal = lfc.simdAndNot(v, true)
-	case OpNotInt8x16, OpNotUint8x16,
-		OpNotInt16x8, OpNotUint16x8,
-		OpNotInt32x4, OpNotUint32x4,
-		OpNotInt64x2, OpNotUint64x2:
-		lVal = lfc.simdUnary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateNot)
-	case OpNegInt8x16:
-		lVal = lfc.simdUnary(v, GlobalCtxt.Int8Type(), 16, lfc.b.CreateNeg)
-	case OpNegInt16x8:
-		lVal = lfc.simdUnary(v, GlobalCtxt.Int16Type(), 8, lfc.b.CreateNeg)
-	case OpNegInt32x4:
-		lVal = lfc.simdUnary(v, GlobalCtxt.Int32Type(), 4, lfc.b.CreateNeg)
-	case OpNegInt64x2:
-		lVal = lfc.simdUnary(v, GlobalCtxt.Int64Type(), 2, lfc.b.CreateNeg)
-	case OpNegFloat32x4:
-		lVal = lfc.simdUnary(v, GlobalCtxt.FloatType(), 4, lfc.b.CreateFNeg)
-	case OpNegFloat64x2:
-		lVal = lfc.simdUnary(v, GlobalCtxt.DoubleType(), 2, lfc.b.CreateFNeg)
-	case OpAbsInt8x16:
-		lVal = lfc.simdIntegerAbs(v, GlobalCtxt.Int8Type(), 16)
-	case OpAbsInt16x8:
-		lVal = lfc.simdIntegerAbs(v, GlobalCtxt.Int16Type(), 8)
-	case OpAbsInt32x4:
-		lVal = lfc.simdIntegerAbs(v, GlobalCtxt.Int32Type(), 4)
-	case OpAbsInt64x2:
-		lVal = lfc.simdIntegerAbs(v, GlobalCtxt.Int64Type(), 2)
-	case OpAbsFloat32x4:
-		lVal = lfc.simdUnaryIntrinsic(v, GlobalCtxt.FloatType(), 4, "llvm.fabs.v4f32")
-	case OpAbsFloat64x2:
-		lVal = lfc.simdUnaryIntrinsic(v, GlobalCtxt.DoubleType(), 2, "llvm.fabs.v2f64")
-	case OpEqualInt8x16, OpEqualUint8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntEQ)
-	case OpEqualInt16x8, OpEqualUint16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntEQ)
-	case OpEqualInt32x4, OpEqualUint32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntEQ)
-	case OpEqualInt64x2, OpEqualUint64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntEQ)
-	case OpNotEqualInt8x16, OpNotEqualUint8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntNE)
-	case OpNotEqualInt16x8, OpNotEqualUint16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntNE)
-	case OpNotEqualInt32x4, OpNotEqualUint32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntNE)
-	case OpNotEqualInt64x2, OpNotEqualUint64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntNE)
-	case OpGreaterInt8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntSGT)
-	case OpGreaterInt16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntSGT)
-	case OpGreaterInt32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntSGT)
-	case OpGreaterInt64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntSGT)
-	case OpGreaterUint8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntUGT)
-	case OpGreaterUint16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntUGT)
-	case OpGreaterUint32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntUGT)
-	case OpGreaterUint64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntUGT)
-	case OpGreaterEqualInt8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntSGE)
-	case OpGreaterEqualInt16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntSGE)
-	case OpGreaterEqualInt32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntSGE)
-	case OpGreaterEqualInt64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntSGE)
-	case OpGreaterEqualUint8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntUGE)
-	case OpGreaterEqualUint16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntUGE)
-	case OpGreaterEqualUint32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntUGE)
-	case OpGreaterEqualUint64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntUGE)
-	case OpLessInt8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntSLT)
-	case OpLessInt16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntSLT)
-	case OpLessInt32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntSLT)
-	case OpLessInt64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntSLT)
-	case OpLessUint8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntULT)
-	case OpLessUint16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntULT)
-	case OpLessUint32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntULT)
-	case OpLessEqualInt8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntSLE)
-	case OpLessEqualInt16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntSLE)
-	case OpLessEqualInt32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntSLE)
-	case OpLessEqualInt64x2:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int64Type(), 2, llvm.IntSLE)
-	case OpLessEqualUint8x16:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int8Type(), 16, llvm.IntULE)
-	case OpLessEqualUint16x8:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int16Type(), 8, llvm.IntULE)
-	case OpLessEqualUint32x4:
-		lVal = lfc.simdIntegerCompare(v, GlobalCtxt.Int32Type(), 4, llvm.IntULE)
-	case OpEqualFloat32x4:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.FloatType(), GlobalCtxt.Int32Type(), 4, llvm.FloatOEQ)
-	case OpEqualFloat64x2:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.DoubleType(), GlobalCtxt.Int64Type(), 2, llvm.FloatOEQ)
-	case OpNotEqualFloat32x4:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.FloatType(), GlobalCtxt.Int32Type(), 4, llvm.FloatUNE)
-	case OpNotEqualFloat64x2:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.DoubleType(), GlobalCtxt.Int64Type(), 2, llvm.FloatUNE)
-	case OpGreaterFloat32x4:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.FloatType(), GlobalCtxt.Int32Type(), 4, llvm.FloatOGT)
-	case OpGreaterFloat64x2:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.DoubleType(), GlobalCtxt.Int64Type(), 2, llvm.FloatOGT)
-	case OpGreaterEqualFloat32x4:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.FloatType(), GlobalCtxt.Int32Type(), 4, llvm.FloatOGE)
-	case OpGreaterEqualFloat64x2:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.DoubleType(), GlobalCtxt.Int64Type(), 2, llvm.FloatOGE)
-	case OpLessFloat32x4:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.FloatType(), GlobalCtxt.Int32Type(), 4, llvm.FloatOLT)
-	case OpLessFloat64x2:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.DoubleType(), GlobalCtxt.Int64Type(), 2, llvm.FloatOLT)
-	case OpLessEqualFloat32x4:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.FloatType(), GlobalCtxt.Int32Type(), 4, llvm.FloatOLE)
-	case OpLessEqualFloat64x2:
-		lVal = lfc.simdFloatCompare(v, GlobalCtxt.DoubleType(), GlobalCtxt.Int64Type(), 2, llvm.FloatOLE)
-	case OpBitSelectInt8x16, OpBitSelectUint8x16,
-		OpBitSelectInt16x8, OpBitSelectUint16x8,
-		OpBitSelectInt32x4, OpBitSelectUint32x4,
-		OpBitSelectInt64x2, OpBitSelectUint64x2,
-		OpbitSelectInt8x16:
+	case OpbitSelectInt8x16:
 		lVal = lfc.simdBitSelect(v, false)
 	case OpbitSelectNotInt8x16:
 		lVal = lfc.simdBitSelect(v, true)
@@ -3282,6 +3479,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		lVal = lfc.populationCount(v)
 	case OpCondSelect:
 		x, y := arg0(), arg1()
+		if v.Type.IsSIMD() && x.Type().TypeKind() == llvm.VectorTypeKind {
+			y = lfc.simdValueAs(v, v.Args[1], x.Type(), ".y")
+			cond := lfc.llvmCondition(lfc.GenLV(v.Args[2]), v.String()+".cond")
+			lVal = lfc.b.CreateSelect(cond, x, y, v.String())
+			break
+		}
 		if x.Type() != y.Type() || x.Type() != getLLVMType(v.Type) {
 			v.Fatalf("%s has incompatible LLVM value types", v.Op)
 		}
@@ -3323,6 +3526,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpCopy:
 		lVal = arg0()
 		if v.Type.IsMemory() || v.Type.IsVoid() {
+			break
+		}
+		if v.Type.IsSIMD() && lVal.Type().TypeKind() == llvm.VectorTypeKind {
+			if width, ok := llvmSIMDVectorWidth(lVal.Type()); !ok || int64(width) != v.Type.Size()*8 {
+				v.Fatalf("%s has incompatible LLVM SIMD operand %v", v.Op, lVal.Type())
+			}
 			break
 		}
 		lVal = lfc.reshapeLLVMValue(v, lVal, v.Args[0].Type, v.Type, v.String()+".reshape")
@@ -3586,6 +3795,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 		addr = lfc.llvmAddressPointer(v, addr, v.Args[0].Type, v.String()+".addr")
 		lVal = lfc.b.CreateLoad(typ, addr, v.String())
+		if v.Op == OpLoad {
+			lfc.recordCPUFeatureGuard(v, lVal)
+		}
 		if v.Type.IsSIMD() {
 			lVal.SetAlignment(int(v.Type.Alignment()))
 		}
@@ -4089,6 +4301,7 @@ func LLVMCompile(f *Func) {
 		DeferResultKeys:     map[ID]llvmLocalKey{},
 		OpenDeferSlots:      map[llvmLocalKey]int{},
 		RequiredCPUFeatures: map[string]bool{},
+		CPUFeatureGuards:    map[string][]llvm.Value{},
 		F:                   f,
 		b:                   GlobalCtxt.NewBuilder(),
 		ReturnType:          sig.ReturnType,
@@ -4676,6 +4889,7 @@ func LLVMCompile(f *Func) {
 	}
 	FCtxt.FinishPhi()
 	FCtxt.expandNilCheckIntrinsics()
+	FCtxt.markRequiredCPUFeatureGuards()
 	FCtxt.MappingName()
 
 	err := llvm.VerifyFunction(FCtxt.LF, llvm.PrintMessageAction)
@@ -4704,7 +4918,10 @@ func getLLVMType(typ *types.Type) llvm.Type {
 		return t
 	}
 	if typ.IsSIMD() {
-		lType := llvmSIMDType(typ)
+		lType, ok := llvmNaturalSIMDType(typ)
+		if !ok {
+			lType = llvmSIMDCarrierType(typ)
+		}
 		type2lTypes[typ] = lType
 		return lType
 	}
