@@ -5,6 +5,7 @@
   documentation: !string |-
     // NAME adds corresponding elements of two vectors.
 - go: AddSaturated
+  llvmLowering: sat-add
   commutative: true
   documentation: !string |-
     // NAME adds corresponding elements of two vectors with saturation.
@@ -14,6 +15,7 @@
   documentation: !string |-
     // NAME subtracts corresponding elements of two vectors.
 - go: SubSaturated
+  llvmLowering: sat-sub
   commutative: false
   documentation: !string |-
     // NAME subtracts corresponding elements of two vectors with saturation.
