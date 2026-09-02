@@ -53,6 +53,7 @@ func goALLCCPUProfile(arch, feature string) string {
 }
 
 var goALLCVectorTypeRE = regexp.MustCompile(`^(Int|Uint|Float)(8|16|32|64)x([0-9]+)$`)
+var goALLCScalarTypeRE = regexp.MustCompile(`^(int|uint|float)(8|16|32|64)$`)
 
 func goALLCLaneFromGoType(goType *string) (base string, elemBits, lanes int, ok bool) {
 	if goType == nil {
@@ -66,6 +67,33 @@ func goALLCLaneFromGoType(goType *string) (base string, elemBits, lanes int, ok 
 	elemBits, _ = strconv.Atoi(m[2])
 	lanes, _ = strconv.Atoi(m[3])
 	return base, elemBits, lanes, true
+}
+
+func goALLCScalarLane(operand Operand) (base string, elemBits int, ok bool) {
+	if operand.Go != nil {
+		m := goALLCScalarTypeRE.FindStringSubmatch(*operand.Go)
+		if m != nil {
+			elemBits, _ = strconv.Atoi(m[2])
+			return m[1], elemBits, true
+		}
+	}
+	basePtr := operand.Base
+	if operand.OverwriteBase != nil {
+		basePtr = operand.OverwriteBase
+	}
+	if basePtr == nil {
+		return "", 0, false
+	}
+	elemBitsPtr := operand.ElemBits
+	if operand.OverwriteBits != nil {
+		elemBitsPtr = operand.OverwriteBits
+	} else if elemBitsPtr == nil {
+		elemBitsPtr = operand.Bits
+	}
+	if elemBitsPtr == nil || (operand.TreatLikeAScalarOfSize == nil && operand.Lanes != nil && *operand.Lanes != 1) {
+		return "", 0, false
+	}
+	return *basePtr, *elemBitsPtr, true
 }
 
 func goALLCGenericOutputShape(op Operation, fallback outShape) outShape {
@@ -102,6 +130,7 @@ func goALLCPrimaryLane(op Operation) (base string, elemBits, lanes int) {
 var goALLCLoweringArity = map[string]int{
 	"add": 2, "sub": 2, "mul": 2, "div": 2,
 	"sat-add": 2, "sat-sub": 2,
+	"extract-element": 1, "insert-element": 2,
 	"and": 2, "or": 2, "xor": 2, "andnot": 2, "ornot": 2,
 	"not": 1, "neg": 1, "abs": 1,
 	"equal": 2, "not-equal": 2, "greater": 2,
@@ -113,14 +142,25 @@ func validateGoALLCLowering(op, genericOp Operation, lowering string, genericIn 
 	if !ok {
 		panic(fmt.Errorf("simdgen: unknown LLVM lowering %q for %s", lowering, op.GenericName()))
 	}
-	if genericIn != PureVregIn || genericOut != OneVregOut || genericImm != NoImm || genericMask != NoMask {
-		panic(fmt.Errorf("simdgen: LLVM lowering %q requires an unmasked register-only operation: %s has in=%s out=%s imm=%s mask=%s", lowering, op.GenericName(), goALLCShapeName(genericIn), goALLCShapeName(genericOut), goALLCShapeName(genericImm), goALLCShapeName(genericMask)))
+	wantOut, wantImm := OneVregOut, NoImm
+	switch lowering {
+	case "extract-element":
+		wantOut, wantImm = OneGregOut, VarImm
+	case "insert-element":
+		wantImm = VarImm
+	}
+	if genericIn != PureVregIn || genericOut != wantOut || genericImm != wantImm || genericMask != NoMask {
+		panic(fmt.Errorf("simdgen: LLVM lowering %q has unsupported shape: %s has in=%s out=%s imm=%s mask=%s", lowering, op.GenericName(), goALLCShapeName(genericIn), goALLCShapeName(genericOut), goALLCShapeName(genericImm), goALLCShapeName(genericMask)))
 	}
 	if len(genericOp.In) != wantArity {
 		panic(fmt.Errorf("simdgen: LLVM lowering %q for %s has %d inputs, want %d", lowering, op.GenericName(), len(genericOp.In), wantArity))
 	}
 	if len(genericOp.Out) != 1 {
 		panic(fmt.Errorf("simdgen: LLVM lowering %q for %s has %d outputs, want 1", lowering, op.GenericName(), len(genericOp.Out)))
+	}
+	if (lowering == "extract-element" || lowering == "insert-element") &&
+		(genericOp.In[0].Class != "vreg" || genericOp.In[0].TreatLikeAScalarOfSize != nil) {
+		panic(fmt.Errorf("simdgen: LLVM lowering %q requires the vector as the first input for %s", lowering, op.GenericName()))
 	}
 	wantBase, wantElemBits, wantLanes := goALLCPrimaryLane(genericOp)
 	width := genericOp.VectorWidth()
@@ -130,7 +170,16 @@ func validateGoALLCLowering(op, genericOp Operation, lowering string, genericIn 
 	if (lowering == "sat-add" || lowering == "sat-sub") && wantBase != "int" && wantBase != "uint" {
 		panic(fmt.Errorf("simdgen: LLVM lowering %q requires integer lanes for %s", lowering, op.GenericName()))
 	}
+	scalarInputs := 0
 	for _, in := range genericOp.In {
+		if in.Class == "greg" || in.TreatLikeAScalarOfSize != nil {
+			scalarInputs++
+			base, elemBits, ok := goALLCScalarLane(in)
+			if !ok || base != wantBase || elemBits != wantElemBits {
+				panic(fmt.Errorf("simdgen: LLVM lowering %q has incompatible scalar input for %s", lowering, op.GenericName()))
+			}
+			continue
+		}
 		base, elemBits, lanes, ok := goALLCLaneFromGoType(in.Go)
 		if !ok && in.Base != nil && in.ElemBits != nil && in.Lanes != nil {
 			base, elemBits, lanes, ok = *in.Base, *in.ElemBits, *in.Lanes, true
@@ -140,8 +189,32 @@ func validateGoALLCLowering(op, genericOp Operation, lowering string, genericIn 
 		}
 	}
 	out := genericOp.Out[0]
-	if out.Class != "mask" && (out.Class != "vreg" || out.Bits == nil || *out.Bits != width) {
+	if lowering == "extract-element" {
+		wantScalar := fmt.Sprintf("%s%d", wantBase, wantElemBits)
+		if scalarInputs != 0 || out.Class != "greg" || op.goNormalType() != wantScalar {
+			panic(fmt.Errorf("simdgen: LLVM lowering %q requires one vector input and a %s output for %s", lowering, wantScalar, op.GenericName()))
+		}
+	} else if lowering == "insert-element" {
+		if scalarInputs != 1 || out.Class != "vreg" || out.Bits == nil || *out.Bits != width {
+			panic(fmt.Errorf("simdgen: LLVM lowering %q requires one vector and one scalar input for %s", lowering, op.GenericName()))
+		}
+	} else if scalarInputs != 0 || out.Class != "mask" && (out.Class != "vreg" || out.Bits == nil || *out.Bits != width) {
 		panic(fmt.Errorf("simdgen: LLVM lowering %q has incompatible output shape for %s", lowering, op.GenericName()))
+	}
+	if lowering == "extract-element" || lowering == "insert-element" {
+		immediates := 0
+		for _, in := range op.In {
+			if in.Class != "immediate" || in.ImmOffset == nil || in.Const != nil {
+				continue
+			}
+			immediates++
+			if *in.ImmOffset != "0" || in.ImmMax == nil || *in.ImmMax != wantLanes-1 {
+				panic(fmt.Errorf("simdgen: LLVM lowering %q requires an unshifted lane index limited to %d for %s", lowering, wantLanes-1, op.GenericName()))
+			}
+		}
+		if immediates != 1 {
+			panic(fmt.Errorf("simdgen: LLVM lowering %q requires one lane index for %s", lowering, op.GenericName()))
+		}
 	}
 }
 

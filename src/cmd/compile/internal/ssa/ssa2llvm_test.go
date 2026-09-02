@@ -1276,6 +1276,72 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 	})
 }
 
+func TestLLVMGenericSIMDElementLowering(t *testing.T) {
+	oldTypes := type2lTypes
+	oldModule := CurrentModule
+	type2lTypes = make(map[*types.Type]llvm.Type)
+	defer func() {
+		type2lTypes = oldTypes
+		CurrentModule = oldModule
+	}()
+
+	for _, test := range []struct {
+		name        string
+		elem        *types.Type
+		llvmElement string
+		lanes       int64
+		index       int64
+		get, set    Op
+	}{
+		{name: "int8", elem: types.Types[types.TINT8], llvmElement: "i8", lanes: 16, index: 11, get: OpGetElemInt8x16, set: OpSetElemInt8x16},
+		{name: "uint32", elem: types.Types[types.TUINT32], llvmElement: "i32", lanes: 4, index: 2, get: OpGetElemUint32x4, set: OpSetElemUint32x4},
+		{name: "float64", elem: types.Types[types.TFLOAT64], llvmElement: "double", lanes: 2, index: 1, get: OpGetElemFloat64x2, set: OpSetElemFloat64x2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			vectorGoType := llvmTestSIMDType("element-"+test.name, test.elem, test.lanes)
+			vectorType := getLLVMType(vectorGoType)
+			elementType := getLLVMType(test.elem)
+			module := GlobalCtxt.NewModule("generic_element_" + test.name)
+			CurrentModule = module
+			builder := GlobalCtxt.NewBuilder()
+			t.Cleanup(module.Dispose)
+			t.Cleanup(builder.Dispose)
+
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(vectorType, []llvm.Type{vectorType, elementType}, false))
+			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
+			context := &LLVMFuncContext{
+				F:  &Func{Config: &Config{arch: "amd64"}, Entry: &Block{CPUfeatures: CPUavx}},
+				Vs: make(map[ID]llvm.Value),
+				b:  builder,
+			}
+			x := &Value{ID: 1, Op: OpArg, Type: vectorGoType}
+			y := &Value{ID: 2, Op: OpArg, Type: test.elem}
+			context.Vs[x.ID] = function.Param(0)
+			context.Vs[y.ID] = function.Param(1)
+			extracted := &Value{ID: 3, Op: test.get, Type: test.elem, AuxInt: test.index, Args: []*Value{x}}
+			context.GenLV(extracted)
+			inserted := &Value{ID: 4, Op: test.set, Type: vectorGoType, AuxInt: test.index, Args: []*Value{x, y}}
+			builder.CreateRet(context.GenLV(inserted))
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("LLVM verifier rejected %s element lowering: %v\n%s", test.name, err, module.String())
+			}
+			ir := module.String()
+			for _, want := range []string{
+				fmt.Sprintf("extractelement %s %%0, i32 %d", llvmTestIRVectorType(vectorType), test.index),
+				fmt.Sprintf("insertelement %s %%0, %s %%1, i32 %d", llvmTestIRVectorType(vectorType), test.llvmElement, test.index),
+			} {
+				if !strings.Contains(ir, want) {
+					t.Errorf("element IR does not contain %q\n%s", want, ir)
+				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("element lowering introduced a carrier bitcast\n%s", ir)
+			}
+		})
+	}
+}
+
 func TestLLVMGenericWideSIMDLowering(t *testing.T) {
 	oldTypes := type2lTypes
 	oldModule := CurrentModule
@@ -1395,6 +1461,18 @@ func TestGoALLCGeneratedSIMDDescriptors(t *testing.T) {
 			lowering: goALLCSIMDLowerSubSaturated,
 			lane:     goALLCSIMDLaneInt, laneBits: 16,
 			amdProfile: goCPUProfileX86AVX512,
+		},
+		{
+			name: "128-bit-element-extract", op: OpGetElemFloat64x2,
+			lowering: goALLCSIMDLowerExtractElement,
+			lane:     goALLCSIMDLaneFloat, laneBits: 64,
+			amdProfile: goCPUProfileX86AVX,
+		},
+		{
+			name: "128-bit-element-insert", op: OpSetElemUint16x8,
+			lowering: goALLCSIMDLowerInsertElement,
+			lane:     goALLCSIMDLaneUint, laneBits: 16,
+			amdProfile: goCPUProfileX86AVX,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
