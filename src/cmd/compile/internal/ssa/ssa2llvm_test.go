@@ -1424,6 +1424,72 @@ func TestLLVMGenericWideSIMDLowering(t *testing.T) {
 	}
 }
 
+func TestLLVMGeneratedSIMDReductions(t *testing.T) {
+	if !buildcfg.Experiment.SIMD {
+		t.Skip("requires GOEXPERIMENT=simd")
+	}
+
+	oldTypes := type2lTypes
+	oldModule := CurrentModule
+	type2lTypes = make(map[*types.Type]llvm.Type)
+	defer func() {
+		type2lTypes = oldTypes
+		CurrentModule = oldModule
+	}()
+
+	for _, test := range []struct {
+		name  string
+		elem  *types.Type
+		lanes int64
+		op    Op
+		want  string
+	}{
+		{name: "add-int8", elem: types.Types[types.TINT8], lanes: 16, op: OpreduceSumInt8x16, want: "call i8 @llvm.vector.reduce.add.v16i8"},
+		{name: "max-int16", elem: types.Types[types.TINT16], lanes: 8, op: OpreduceMaxInt16x8, want: "call i16 @llvm.vector.reduce.smax.v8i16"},
+		{name: "min-uint32", elem: types.Types[types.TUINT32], lanes: 4, op: OpreduceMinUint32x4, want: "call i32 @llvm.vector.reduce.umin.v4i32"},
+		{name: "max-float32", elem: types.Types[types.TFLOAT32], lanes: 4, op: OpreduceMaxFloat32x4, want: "call float @llvm.vector.reduce.fmaximum.v4f32"},
+		{name: "min-float32", elem: types.Types[types.TFLOAT32], lanes: 4, op: OpreduceMinFloat32x4, want: "call float @llvm.vector.reduce.fminimum.v4f32"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			vectorGoType := llvmTestSIMDType("reduce-"+test.name, test.elem, test.lanes)
+			vectorType := getLLVMType(vectorGoType)
+			module := GlobalCtxt.NewModule("reduce_" + test.name)
+			CurrentModule = module
+			builder := GlobalCtxt.NewBuilder()
+			t.Cleanup(module.Dispose)
+			t.Cleanup(builder.Dispose)
+
+			function := llvm.AddFunction(module, test.name, llvm.FunctionType(vectorType, []llvm.Type{vectorType}, false))
+			builder.SetInsertPointAtEnd(llvm.AddBasicBlock(function, "entry"))
+			context := &LLVMFuncContext{
+				F:  &Func{Config: &Config{arch: "arm64"}, Entry: &Block{}},
+				Vs: make(map[ID]llvm.Value),
+				b:  builder,
+			}
+			x := &Value{ID: 1, Op: OpArg, Type: vectorGoType}
+			context.Vs[x.ID] = function.Param(0)
+			result := &Value{ID: 2, Op: test.op, Type: types.TypeVec128, Args: []*Value{x}}
+			builder.CreateRet(context.GenLV(result))
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("LLVM verifier rejected %s reduction: %v\n%s", test.name, err, module.String())
+			}
+			ir := module.String()
+			for _, want := range []string{
+				test.want,
+				"insertelement " + llvmTestIRVectorType(vectorType) + " zeroinitializer",
+			} {
+				if !strings.Contains(ir, want) {
+					t.Errorf("%s reduction IR does not contain %q\n%s", test.name, want, ir)
+				}
+			}
+			if strings.Contains(ir, "bitcast ") {
+				t.Errorf("%s reduction introduced a carrier bitcast\n%s", test.name, ir)
+			}
+		})
+	}
+}
+
 func TestGoALLCGeneratedSIMDDescriptors(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1473,6 +1539,16 @@ func TestGoALLCGeneratedSIMDDescriptors(t *testing.T) {
 			lowering: goALLCSIMDLowerInsertElement,
 			lane:     goALLCSIMDLaneUint, laneBits: 16,
 			amdProfile: goCPUProfileX86AVX,
+		},
+		{
+			name: "128-bit-arm64-reduce-sum", op: OpreduceSumInt32x4,
+			lowering: goALLCSIMDLowerReduceAdd,
+			lane:     goALLCSIMDLaneInt, laneBits: 32,
+		},
+		{
+			name: "128-bit-arm64-reduce-float-max", op: OpreduceMaxFloat32x4,
+			lowering: goALLCSIMDLowerReduceMax,
+			lane:     goALLCSIMDLaneFloat, laneBits: 32,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

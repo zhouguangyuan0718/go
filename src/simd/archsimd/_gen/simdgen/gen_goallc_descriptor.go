@@ -131,6 +131,7 @@ var goALLCLoweringArity = map[string]int{
 	"add": 2, "sub": 2, "mul": 2, "div": 2,
 	"sat-add": 2, "sat-sub": 2,
 	"extract-element": 1, "insert-element": 2,
+	"reduce-add": 1, "reduce-max": 1, "reduce-min": 1,
 	"and": 2, "or": 2, "xor": 2, "andnot": 2, "ornot": 2,
 	"not": 1, "neg": 1, "abs": 1,
 	"equal": 2, "not-equal": 2, "greater": 2,
@@ -168,6 +169,9 @@ func validateGoALLCLowering(op, genericOp Operation, lowering string, genericIn 
 		panic(fmt.Errorf("simdgen: LLVM lowering %q has invalid lane shape %s%d x %d for %s", lowering, wantBase, wantElemBits, wantLanes, op.GenericName()))
 	}
 	if (lowering == "sat-add" || lowering == "sat-sub") && wantBase != "int" && wantBase != "uint" {
+		panic(fmt.Errorf("simdgen: LLVM lowering %q requires integer lanes for %s", lowering, op.GenericName()))
+	}
+	if lowering == "reduce-add" && wantBase != "int" && wantBase != "uint" {
 		panic(fmt.Errorf("simdgen: LLVM lowering %q requires integer lanes for %s", lowering, op.GenericName()))
 	}
 	scalarInputs := 0
