@@ -982,6 +982,10 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 		{"add-float64", types.Types[types.TFLOAT64], 2, OpAddFloat64x2, []string{"fadd <2 x double>"}},
 		{"sub-int16", types.Types[types.TUINT16], 8, OpSubUint16x8, []string{"sub <8 x i16>"}},
 		{"sub-float64", types.Types[types.TFLOAT64], 2, OpSubFloat64x2, []string{"fsub <2 x double>"}},
+		{"sat-add-int8", types.Types[types.TINT8], 16, OpAddSaturatedInt8x16, []string{"call <16 x i8> @llvm.sadd.sat.v16i8"}},
+		{"sat-add-uint32", types.Types[types.TUINT32], 4, OpAddSaturatedUint32x4, []string{"call <4 x i32> @llvm.uadd.sat.v4i32"}},
+		{"sat-sub-int64", types.Types[types.TINT64], 2, OpSubSaturatedInt64x2, []string{"call <2 x i64> @llvm.ssub.sat.v2i64"}},
+		{"sat-sub-uint16", types.Types[types.TUINT16], 8, OpSubSaturatedUint16x8, []string{"call <8 x i16> @llvm.usub.sat.v8i16"}},
 		{"mul-int8", types.Types[types.TINT8], 16, OpMulInt8x16, []string{"mul <16 x i8>"}},
 		{"mul-float32", types.Types[types.TFLOAT32], 4, OpMulFloat32x4, []string{"fmul <4 x float>"}},
 		{"div-float64", types.Types[types.TFLOAT64], 2, OpDivFloat64x2, []string{"fdiv <2 x double>"}},
@@ -1292,6 +1296,7 @@ func TestLLVMGenericWideSIMDLowering(t *testing.T) {
 	}{
 		{name: "vec256-add-int8", elem: types.Types[types.TINT8], resultElem: types.Types[types.TINT8], lanes: 32, op: OpAddInt8x32, arity: 2, wants: []string{"add <32 x i8>"}},
 		{name: "vec256-sub-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 16, op: OpSubInt16x16, arity: 2, wants: []string{"sub <16 x i16>"}},
+		{name: "vec256-sat-add-uint8", elem: types.Types[types.TUINT8], resultElem: types.Types[types.TUINT8], lanes: 32, op: OpAddSaturatedUint8x32, arity: 2, wants: []string{"call <32 x i8> @llvm.uadd.sat.v32i8"}},
 		{name: "vec256-mul-int32", elem: types.Types[types.TINT32], resultElem: types.Types[types.TINT32], lanes: 8, op: OpMulInt32x8, arity: 2, wants: []string{"mul <8 x i32>"}},
 		{name: "vec256-div-float64", elem: types.Types[types.TFLOAT64], resultElem: types.Types[types.TFLOAT64], lanes: 4, op: OpDivFloat64x4, arity: 2, wants: []string{"fdiv <4 x double>"}},
 		{name: "vec256-and", elem: types.Types[types.TINT64], resultElem: types.Types[types.TINT64], lanes: 4, op: OpAndInt64x4, arity: 2, wants: []string{"and <4 x i64>"}},
@@ -1299,6 +1304,7 @@ func TestLLVMGenericWideSIMDLowering(t *testing.T) {
 		{name: "vec256-greater-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 16, op: OpGreaterInt16x16, arity: 2, wants: []string{"icmp sgt <16 x i16>", "sext <16 x i1>"}},
 		{name: "vec512-add-int8", elem: types.Types[types.TINT8], resultElem: types.Types[types.TINT8], lanes: 64, op: OpAddInt8x64, arity: 2, wants: []string{"add <64 x i8>"}},
 		{name: "vec512-sub-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 32, op: OpSubInt16x32, arity: 2, wants: []string{"sub <32 x i16>"}},
+		{name: "vec512-sat-sub-int16", elem: types.Types[types.TINT16], resultElem: types.Types[types.TINT16], lanes: 32, op: OpSubSaturatedInt16x32, arity: 2, wants: []string{"call <32 x i16> @llvm.ssub.sat.v32i16"}},
 		{name: "vec512-mul-int32", elem: types.Types[types.TINT32], resultElem: types.Types[types.TINT32], lanes: 16, op: OpMulInt32x16, arity: 2, wants: []string{"mul <16 x i32>"}},
 		{name: "vec512-div-float64", elem: types.Types[types.TFLOAT64], resultElem: types.Types[types.TFLOAT64], lanes: 8, op: OpDivFloat64x8, arity: 2, wants: []string{"fdiv <8 x double>"}},
 		{name: "vec512-xor", elem: types.Types[types.TINT64], resultElem: types.Types[types.TINT64], lanes: 8, op: OpXorInt64x8, arity: 2, wants: []string{"xor <8 x i64>"}},
@@ -1379,6 +1385,17 @@ func TestGoALLCGeneratedSIMDDescriptors(t *testing.T) {
 			lane:     goALLCSIMDLaneInt, laneBits: 8,
 			amdProfile: goCPUProfileX86AVX512,
 		},
+		{
+			name: "128-bit-arm64-saturated-add", op: OpAddSaturatedUint32x4,
+			lowering: goALLCSIMDLowerAddSaturated,
+			lane:     goALLCSIMDLaneUint, laneBits: 32,
+		},
+		{
+			name: "512-bit-avx512-saturated-sub", op: OpSubSaturatedInt16x32,
+			lowering: goALLCSIMDLowerSubSaturated,
+			lane:     goALLCSIMDLaneInt, laneBits: 16,
+			amdProfile: goCPUProfileX86AVX512,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			info, ok := goALLCSIMDInfo(test.op)
@@ -1406,9 +1423,6 @@ func TestGoALLCGeneratedSIMDDescriptors(t *testing.T) {
 		t.Fatal("wasm-only op unexpectedly received an LLVM lowering descriptor")
 	}
 
-	if _, ok := goALLCSIMDInfo(OpAddSaturatedInt8x16); ok {
-		t.Fatal("unmarked saturated add unexpectedly received a lowering descriptor")
-	}
 }
 
 func TestLLVMCPUProfileCoverage(t *testing.T) {
