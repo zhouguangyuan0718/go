@@ -282,6 +282,7 @@ func goALLCSIMDOpLiteral(encoded string) string {
 	lowering := goALLCSIMDConst("lowering", d.Lowering, map[string]string{
 		"": "goALLCSIMDLowerNone", "add": "goALLCSIMDLowerAdd", "sub": "goALLCSIMDLowerSub",
 		"sat-add": "goALLCSIMDLowerAddSaturated", "sat-sub": "goALLCSIMDLowerSubSaturated",
+		"extract-element": "goALLCSIMDLowerExtractElement", "insert-element": "goALLCSIMDLowerInsertElement",
 		"mul": "goALLCSIMDLowerMul", "div": "goALLCSIMDLowerDiv", "and": "goALLCSIMDLowerAnd",
 		"or": "goALLCSIMDLowerOr", "xor": "goALLCSIMDLowerXor", "andnot": "goALLCSIMDLowerAndNot",
 		"ornot": "goALLCSIMDLowerOrNot", "not": "goALLCSIMDLowerNot", "neg": "goALLCSIMDLowerNeg",

@@ -2061,9 +2061,15 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 	if laneType.IsNil() {
 		v.Fatalf("%s has unsupported generated SIMD lane kind %d width %d", v.Op, info.lane, info.laneBits)
 	}
-	width := int(v.Type.Size()) * 8
+	if len(v.Args) == 0 {
+		v.Fatalf("%s has no generated SIMD operands", v.Op)
+	}
+	if !v.Args[0].Type.IsSIMD() {
+		v.Fatalf("%s has non-SIMD primary operand %s", v.Op, v.Args[0].LongString())
+	}
+	width := int(v.Args[0].Type.Size()) * 8
 	if width%int(info.laneBits) != 0 {
-		v.Fatalf("%s lane width %d does not divide result width %d", v.Op, info.laneBits, width)
+		v.Fatalf("%s lane width %d does not divide vector width %d", v.Op, info.laneBits, width)
 	}
 	lanes := width / int(info.laneBits)
 	laneBits := int(info.laneBits)
@@ -2074,6 +2080,31 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 	}
 
 	switch info.lowering {
+	case goALLCSIMDLowerExtractElement:
+		if len(v.Args) != 1 || v.AuxInt < 0 || int(v.AuxInt) >= lanes {
+			v.Fatalf("%s has invalid generated SIMD extract index %d", v.Op, v.AuxInt)
+		}
+		operationType := llvm.VectorType(laneType, lanes)
+		x := lfc.simdValueAs(v, v.Args[0], operationType, ".x")
+		index := llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(v.AuxInt), false)
+		result := lfc.b.CreateExtractElement(x, index, v.String()+".lane")
+		if result.Type() != getLLVMType(v.Type) {
+			v.Fatalf("%s has LLVM result %v, want %v", v.Op, result.Type(), getLLVMType(v.Type))
+		}
+		return finish(result)
+	case goALLCSIMDLowerInsertElement:
+		if len(v.Args) != 2 || v.AuxInt < 0 || int(v.AuxInt) >= lanes {
+			v.Fatalf("%s has invalid generated SIMD insert index %d", v.Op, v.AuxInt)
+		}
+		operationType := llvm.VectorType(laneType, lanes)
+		x := lfc.simdValueAs(v, v.Args[0], operationType, ".x")
+		element := lfc.GenLV(v.Args[1])
+		if element.Type() != laneType {
+			v.Fatalf("%s has LLVM element %v, want %v", v.Op, element.Type(), laneType)
+		}
+		index := llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(v.AuxInt), false)
+		result := lfc.b.CreateInsertElement(x, element, index, v.String()+".lanes")
+		return finish(lfc.simdLaneResult(v, result))
 	case goALLCSIMDLowerAdd:
 		if isFloat {
 			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFAdd))
