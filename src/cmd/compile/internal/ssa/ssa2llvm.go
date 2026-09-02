@@ -2002,6 +2002,14 @@ func (lfc *LLVMFuncContext) simdUnaryIntrinsic(v *Value, laneType llvm.Type, lan
 	})
 }
 
+func (lfc *LLVMFuncContext) simdBinaryIntrinsic(v *Value, laneType llvm.Type, lanes int, name string) llvm.Value {
+	return lfc.simdBinary(v, laneType, lanes, func(x, y llvm.Value, valueName string) llvm.Value {
+		sig := llvm.FunctionType(x.Type(), []llvm.Type{x.Type(), x.Type()}, false)
+		fn := getOrInsertLLVMIntrinsic(name, sig)
+		return lfc.b.CreateCall(sig, fn, []llvm.Value{x, y}, valueName)
+	})
+}
+
 func (lfc *LLVMFuncContext) simdIntegerCompare(v *Value, laneType llvm.Type, lanes int, pred llvm.IntPredicate) llvm.Value {
 	x, y := lfc.simdLaneOperands(v, laneType, lanes)
 	condition := lfc.b.CreateICmp(pred, x, y, v.String()+".condition")
@@ -2076,6 +2084,20 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFSub))
 		}
 		return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateSub))
+	case goALLCSIMDLowerAddSaturated, goALLCSIMDLowerSubSaturated:
+		if isFloat {
+			v.Fatalf("%s generated SIMD saturated arithmetic is not integer", v.Op)
+		}
+		prefix := "s"
+		if info.lane == goALLCSIMDLaneUint {
+			prefix = "u"
+		}
+		operation := "add"
+		if info.lowering == goALLCSIMDLowerSubSaturated {
+			operation = "sub"
+		}
+		name := fmt.Sprintf("llvm.%s%s.sat.v%di%d", prefix, operation, lanes, laneBits)
+		return finish(lfc.simdBinaryIntrinsic(v, laneType, lanes, name))
 	case goALLCSIMDLowerMul:
 		if isFloat {
 			return finish(lfc.simdBinary(v, laneType, lanes, lfc.b.CreateFMul))

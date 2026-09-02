@@ -10,6 +10,8 @@ const (
 	goALLCSIMDLowerNone goALLCSIMDLowering = iota
 	goALLCSIMDLowerAdd
 	goALLCSIMDLowerSub
+	goALLCSIMDLowerAddSaturated
+	goALLCSIMDLowerSubSaturated
 	goALLCSIMDLowerMul
 	goALLCSIMDLowerDiv
 	goALLCSIMDLowerAnd

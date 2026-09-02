@@ -101,6 +101,7 @@ func goALLCPrimaryLane(op Operation) (base string, elemBits, lanes int) {
 
 var goALLCLoweringArity = map[string]int{
 	"add": 2, "sub": 2, "mul": 2, "div": 2,
+	"sat-add": 2, "sat-sub": 2,
 	"and": 2, "or": 2, "xor": 2, "andnot": 2, "ornot": 2,
 	"not": 1, "neg": 1, "abs": 1,
 	"equal": 2, "not-equal": 2, "greater": 2,
@@ -125,6 +126,9 @@ func validateGoALLCLowering(op, genericOp Operation, lowering string, genericIn 
 	width := genericOp.VectorWidth()
 	if width != wantElemBits*wantLanes || (wantBase != "int" && wantBase != "uint" && wantBase != "float") {
 		panic(fmt.Errorf("simdgen: LLVM lowering %q has invalid lane shape %s%d x %d for %s", lowering, wantBase, wantElemBits, wantLanes, op.GenericName()))
+	}
+	if (lowering == "sat-add" || lowering == "sat-sub") && wantBase != "int" && wantBase != "uint" {
+		panic(fmt.Errorf("simdgen: LLVM lowering %q requires integer lanes for %s", lowering, op.GenericName()))
 	}
 	for _, in := range genericOp.In {
 		base, elemBits, lanes, ok := goALLCLaneFromGoType(in.Go)
