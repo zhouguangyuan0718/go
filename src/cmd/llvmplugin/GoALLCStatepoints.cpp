@@ -2310,7 +2310,28 @@ Error scalarizeLivePointerAggregates(
         });
         if (Match != Leaves.end()) {
           size_t Index = std::distance(Leaves.begin(), Match);
-          Extract->replaceAllUsesWith(LeafValues[Index]);
+          Value *Replacement = LeafValues[Index];
+
+          // A leaf extracted from one aggregate can be inserted into another
+          // aggregate which is scalarized first. The second scalarization
+          // replaces and erases the original extract, so splice Replacement
+          // into every recorded direct-provenance chain before deleting it.
+          // Leaving either the key or source behind would make the raw
+          // Value * alias table depend on allocator reuse and could coalesce
+          // an unrelated root's relocate.
+          Value *InheritedSource =
+              DirectPointerLeafSources.lookup(Extract);
+          DirectPointerLeafSources.erase(Extract);
+          DirectPointerLeafSources.erase(Replacement);
+          for (auto &[Leaf, DirectSource] : DirectPointerLeafSources) {
+            (void)Leaf;
+            if (DirectSource == Extract)
+              DirectSource = Replacement;
+          }
+          if (InheritedSource && InheritedSource != Replacement)
+            DirectPointerLeafSources[Replacement] = InheritedSource;
+
+          Extract->replaceAllUsesWith(Replacement);
           Extract->eraseFromParent();
           continue;
         }

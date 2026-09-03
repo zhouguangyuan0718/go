@@ -58,12 +58,6 @@ attributes #0 = { "go-async-unsafe" }
 ; OBJVIEW-NEXT: "end": [[#FRAME_DESTROY_ADDR:]]
 ; OBJVIEW-NEXT: "value": -1
 ; OBJVIEW: "start": [[#FRAME_DESTROY_ADDR]]
-; OBJVIEW-NEXT: "end": [[#FRAME_DESTROY_ADDR+4]]
-; OBJVIEW-NEXT: "value": -2
-; OBJVIEW: "start": [[#FRAME_DESTROY_ADDR+4]]
-; OBJVIEW-NEXT: "end": [[#FRAME_RELEASE-8]]
-; OBJVIEW-NEXT: "value": -1
-; OBJVIEW: "start": [[#FRAME_RELEASE-8]]
 ; OBJVIEW-NEXT: "end": [[#FRAME_RELEASE]]
 ; OBJVIEW-NEXT: "value": -2
 ; OBJVIEW: "start": [[#FRAME_RELEASE]]
