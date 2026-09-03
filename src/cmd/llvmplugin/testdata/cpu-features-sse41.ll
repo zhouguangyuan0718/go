@@ -30,6 +30,21 @@ declare double @llvm.floor.f64(double)
 ; CHECK-INLINE: %{{.*}} = tail call double %target.i(double %x), !dbg ![[CALLERLOC]], !callees !{{[0-9]+}}, !inline_history !{{[0-9]+}}
 ; CHECK-INLINE: fadd double
 ; CHECK-INLINE-NOT: !goallc.cpu.dispatcher.inline
+; CHECK-INLINE-LABEL: define internal double @"round<goallc.fmv.baseline>"(
+; CHECK-INLINE-SAME: #[[INLINE_BASELINE:[0-9]+]]
+; CHECK-INLINE-LABEL: define internal double @"round<goallc.fmv.sse41>"(
+; CHECK-INLINE-SAME: #[[INLINE_SSE41:[0-9]+]]
+; CHECK-INLINE-LABEL: define internal double @"round<goallc.fmv.resolve>"(
+; CHECK-INLINE: uninitialized:
+; CHECK-INLINE-NEXT: %[[BASELINE_CALL:.*]] = musttail call double @"round<goallc.fmv.baseline>"(double %x) #[[NOINLINE_CALL:[0-9]+]]
+; CHECK-INLINE-NEXT: ret double %[[BASELINE_CALL]]
+; CHECK-INLINE-NOT: call double @fallback
+; CHECK-INLINE: select:
+; Only the resolver edge is noinline; compatible callers may still inline the
+; physical variants.
+; CHECK-INLINE-DAG: attributes #[[INLINE_BASELINE]] = { "target-cpu"="x86-64" }
+; CHECK-INLINE-DAG: attributes #[[INLINE_SSE41]] = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) "target-cpu"="x86-64" "target-features"="+sse4.1" }
+; CHECK-INLINE-DAG: attributes #[[NOINLINE_CALL]] = { noinline }
 ; CHECK-INLINE: ![[CALLERSP:[0-9]+]] = distinct !DISubprogram(name: "round.caller"
 ; CHECK-INLINE: ![[CALLERLOC]] = distinct !DILocation(line: 20, column: 1, scope: ![[CALLERSP]])
 
@@ -78,6 +93,7 @@ entry:
 }
 
 ; CHECK-LABEL: define internal double @"round<goallc.fmv.baseline>"(
+; CHECK-SAME: #[[BASELINE:[0-9]+]]
 ; CHECK-NOT: !goobj.symbol.flags
 ; CHECK-SAME: !goobj.func.info ![[FUNCINFO]]
 ; CHECK-NOT: !goobj.symbol.flags
@@ -106,7 +122,7 @@ entry:
 ; CHECK: and i64 %features, 64
 ; CHECK: br i1
 ; CHECK: uninitialized:
-; CHECK: musttail call double @"round<goallc.fmv.baseline>"(double %x)
+; CHECK: musttail call double @"round<goallc.fmv.baseline>"(double %x) #[[EARLY_NOINLINE_CALL:[0-9]+]]
 ; CHECK: select:
 ; CHECK: and i64 %features, 4
 ; CHECK: select i1 {{.*}}, ptr @"round<goallc.fmv.sse41>", ptr @"round<goallc.fmv.baseline>"
@@ -115,7 +131,9 @@ entry:
 
 ; CHECK-DAG: attributes #[[EARLY_DISPATCH]] = {{.*}}"go-nosplit" "goallc.cpu.tail-transfers" {{.*}}"target-cpu"="x86-64"
 ; CHECK-DAG: attributes #[[RESOLVER_ATTRS]] = {{.*}}noinline{{.*}}"go-nosplit"
-; CHECK-DAG: attributes #[[SSE41]] = {{.*}}"target-cpu"="x86-64" {{.*}}"target-features"="+sse4.1"
+; CHECK-DAG: attributes #[[BASELINE]] = { "target-cpu"="x86-64" }
+; CHECK-DAG: attributes #[[SSE41]] = { "target-cpu"="x86-64" "target-features"="+sse4.1" }
+; CHECK-DAG: attributes #[[EARLY_NOINLINE_CALL]] = { noinline }
 ; CHECK-NOT: !goobj.debug.inline.required
 ; CHECK: !goallc.cpu.fmv.done = !{![[DONE:[0-9]+]]}
 ; CHECK: ![[NONPACKAGE]] = !{i1 true}
