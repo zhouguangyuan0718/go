@@ -4901,6 +4901,7 @@ func LLVMCompile(f *Func) {
 	}
 	setGoObjFunctionFlags(FCtxt.LF, f.OwnAux.Fn)
 	setGoObjFunctionInfo(FCtxt.LF, f.OwnAux.Fn)
+	setGoObjFunctionArgInfo(FCtxt.LF, f.OwnAux.Fn)
 	inParams := f.OwnAux.ABIInfo().InParams()
 	if got, want := len(inParams), int(f.OwnAux.NArgs()); got != want {
 		f.fe.Fatalf(f.Entry.Pos, "LLVM parameter metadata count %d does not match signature count %d for %s", got, want, f.Name)

@@ -893,6 +893,21 @@ func setGoObjFunctionInfo(fn llvm.Value, s *obj.LSym) {
 	}))
 }
 
+// setGoObjFunctionArgInfo preserves the frontend's traceback argument layout
+// as an explicit function-to-data relationship. The GoObj writer serializes
+// the target as FUNCDATA_ArgInfo after final symbol ordering is known.
+func setGoObjFunctionArgInfo(fn llvm.Value, s *obj.LSym) {
+	info := s.Func()
+	if info == nil || info.ArgInfo == nil {
+		return
+	}
+	target := llvmGoDataRef(info.ArgInfo)
+	preserveGoObjMetadataValues(target)
+	fn.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.func.arginfo"), GlobalCtxt.MDNode([]llvm.Metadata{
+		target.ConstantAsMetadata(),
+	}))
+}
+
 // LLVM can express the address relationship but not GoObj's 32-bit section
 // offsets. Record the object-format-specific relocation type explicitly;
 // weakness remains orthogonal in !goobj.weak_relocs.

@@ -371,6 +371,40 @@ func TestLLVMGoObjCompilerUsedOnlyKeepsExternalDataRoots(t *testing.T) {
 	}
 }
 
+func TestLLVMGoObjFunctionArgInfoMetadata(t *testing.T) {
+	oldModule := CurrentModule
+	oldLowerer := currentLLVMDataLowerer
+	oldCompilerUsed := goObjCompilerUsed
+	oldCompilerUsedNames := goObjCompilerUsedNames
+	module := GlobalCtxt.NewModule("goobj_function_arginfo")
+	CurrentModule = module
+	currentLLVMDataLowerer = nil
+	goObjCompilerUsed = nil
+	goObjCompilerUsedNames = make(map[string]bool)
+	t.Cleanup(func() {
+		goObjCompilerUsedNames = oldCompilerUsedNames
+		goObjCompilerUsed = oldCompilerUsed
+		currentLLVMDataLowerer = oldLowerer
+		CurrentModule = oldModule
+		module.Dispose()
+	})
+
+	argInfo := &obj.LSym{Name: "test.trace.arginfo", Type: objabi.SRODATA, Size: 3, P: []byte{0, 8, 0xff}}
+	text := &obj.LSym{Name: "test.trace", Type: objabi.STEXT}
+	text.NewFuncInfo().ArgInfo = argInfo
+	fn := llvm.AddFunction(module, text.Name, llvm.FunctionType(GlobalCtxt.VoidType(), nil, false))
+	setGoObjFunctionArgInfo(fn, text)
+	emitGoObjCompilerUsed()
+
+	ir := module.String()
+	if !strings.Contains(ir, "@test.trace()") || !strings.Contains(ir, "!goobj.func.arginfo") {
+		t.Fatalf("function is missing GoObj arginfo metadata:\n%s", ir)
+	}
+	if !strings.Contains(ir, "@test.trace.arginfo") || !strings.Contains(ir, "@llvm.compiler.used") {
+		t.Fatalf("arginfo target is not preserved through object emission:\n%s", ir)
+	}
+}
+
 func TestLLVMFileBackedDataLowering(t *testing.T) {
 	payload := append(bytes.Repeat([]byte("file-backed-data-"), 80), []byte("GOALLC_FILE_END")...)
 	path := t.TempDir() + "/payload"
