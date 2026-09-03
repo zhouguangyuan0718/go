@@ -189,7 +189,12 @@ func testLLVMStdlib(t *testing.T) {
 			t.Parallel()
 			limit <- struct{}{}
 			defer func() { <-limit }()
-			testTimeout := "2m"
+			// Long mode runs the standard library's slower integration tests,
+			// which can exceed the short-mode limit under shared runner load.
+			testTimeout := "5m"
+			if testing.Short() {
+				testTimeout = "2m"
+			}
 			// Cold full-LLVM builds can approach five minutes under shared
 			// runner contention. The test binary remains separately bounded.
 			processTimeout := 10 * time.Minute
