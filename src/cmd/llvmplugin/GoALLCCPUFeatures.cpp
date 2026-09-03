@@ -667,7 +667,12 @@ Error multiversionFunction(Function &F, const CPUConfig &Config,
   B.CreateCondBr(Initialized, Select, Uninitialized);
 
   B.SetInsertPoint(Uninitialized);
-  createTailReturn(B, *Resolver, BaselineImpl, CallInst::TCK_MustTail);
+  // Keep only this edge opaque to the normal inliner: the NOSPLIT resolver
+  // must stay frameless, while variants remain eligible for legal inlining
+  // into other feature-compatible callers, including Midway-generated code.
+  CallInst *BaselineCall =
+      createTailReturn(B, *Resolver, BaselineImpl, CallInst::TCK_MustTail);
+  BaselineCall->setIsNoInline();
 
   B.SetInsertPoint(Select);
   Value *Selected = BaselineImpl;
