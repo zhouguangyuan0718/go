@@ -54,6 +54,12 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: insertvalue %pair {{.*}}ptr %value.leaf.0.relocated
 ; IR: ret ptr %value.leaf.0.relocated
 
+; IR-LABEL: define goabiinternal ptr @nested_direct_pointer_leaf_alias(
+; IR: [[SOURCE_LEAF:%source\.leaf\.1\.0]] = extractvalue %container %source, 1, 0
+; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr [[SOURCE_LEAF]]
+; IR: [[SOURCE_RELOCATED:%source\.leaf\.1\.0\.relocated[^ ]*]] = call coldcc ptr @llvm.experimental.gc.relocate.p0
+; IR: %copy.rebuilt = insertvalue %pair poison, ptr [[SOURCE_RELOCATED]], 0
+
 ; IR-LABEL: define goabiinternal ptr @inserted_pointer_used_by_derived(
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %value.leaf.0, ptr %pointer)
 ; IR: %value.leaf.0.relocated = call coldcc ptr @llvm.experimental.gc.relocate.p0
@@ -90,6 +96,7 @@ target triple = "x86_64-unknown-linux-goobj"
 %reflect_value = type { ptr, ptr, i64 }
 %nested = type { i64, [2 x { ptr, i32 }] }
 %vector_pair = type { <2 x ptr>, i64 }
+%container = type { i64, %pair }
 
 declare goabiinternal void @safepoint()
 declare goabiinternal void @consume_pair(%pair)
@@ -99,6 +106,7 @@ declare goabiinternal void @consume_slice({ ptr, i64, i64 })
 declare goabiinternal void @leaf_consume_pair(%pair) #0
 declare goabiinternal void @leaf_consume_nested(%nested) #0
 declare goabiinternal void @leaf_consume_vector_pair(%vector_pair) #0
+declare goabiinternal void @leaf_consume_container(%container) #0
 
 define goabiinternal ptr @pair_across_call(%pair %value) gc "goallc" {
 entry:
@@ -215,6 +223,22 @@ entry:
   call goabiinternal void @consume_pair(%pair %value)
   call goabiinternal void @leaf_consume_pair(%pair %value)
   ret ptr %pointer
+}
+
+; Scalarizing %source replaces and erases %source_pointer after %copy has
+; recorded it as direct pointer provenance. The alias chain must be retargeted
+; to %source's new leaf instead of retaining a dangling Value pointer which a
+; later aggregate leaf can reuse.
+define goabiinternal ptr @nested_direct_pointer_leaf_alias(%container %source, %pair %other, i64 %number) gc "goallc" {
+entry:
+  %source_pointer = extractvalue %container %source, 1, 0
+  %copy_with_pointer = insertvalue %pair poison, ptr %source_pointer, 0
+  %copy = insertvalue %pair %copy_with_pointer, i64 %number, 1
+  call goabiinternal void @safepoint()
+  call goabiinternal void @leaf_consume_container(%container %source)
+  call goabiinternal void @leaf_consume_pair(%pair %other)
+  call goabiinternal void @leaf_consume_pair(%pair %copy)
+  ret ptr %source_pointer
 }
 
 ; A source added only as the relocation base for a derived address is not an
