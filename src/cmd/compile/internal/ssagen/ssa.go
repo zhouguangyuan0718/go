@@ -492,6 +492,14 @@ func buildssa(fn *ir.Func, worker int, isPgoHot bool) *ssa.Func {
 	}
 
 	s.f.OwnAux = ssa.OwnAuxCall(fn.LSym, params)
+	if base.Flag.EnableLLVM && (fn.Type().NumRecvs() != 0 || fn.Type().NumParams() != 0) {
+		// The native backend emits this from genssa, which the LLVM backend
+		// deliberately skips. Build the same frontend-owned description before
+		// LLVM IR emission so the GoObj writer can attach it to the function.
+		x := EmitArgInfo(fn, params)
+		x.Set(obj.AttrContentAddressable, true)
+		fn.LSym.Func().ArgInfo = x
+	}
 
 	// Populate SSAable arguments.
 	for _, n := range fn.Dcl {
