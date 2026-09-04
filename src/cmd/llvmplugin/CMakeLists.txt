@@ -584,6 +584,18 @@ if(BUILD_TESTING)
     )
   endforeach()
 
+  goallc_add_filecheck_test(
+    GoALLCStatepoints.DebugInlineBundleAnchor
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/debug-inline-bundle-anchor.mir"
+    CHECK
+    "${GOALLC_LLC_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -mtriple=aarch64-unknown-linux-goobj
+    -run-pass=goallc-inline-anchors
+    -o -
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/debug-inline-bundle-anchor.mir"
+  )
+
   add_test(
     NAME GoALLCStatepoints.ZeroLengthPointerArray
     COMMAND

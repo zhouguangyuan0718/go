@@ -99,8 +99,8 @@ public:
 
     DenseSet<InlineEdge> SurvivingEdges;
     for (MachineBasicBlock &MBB : MF)
-      for (MachineInstr &MI : MBB)
-        if (!MI.isMetaInstruction() && MI.getDebugLoc())
+      for (MachineInstr &MI : MBB.instrs())
+        if (!MI.isBundle() && !MI.isMetaInstruction() && MI.getDebugLoc())
           for (InlineEdge Edge : inlineEdges(MI.getDebugLoc().get()))
             SurvivingEdges.insert(Edge);
 
@@ -110,8 +110,9 @@ public:
     };
     SmallVector<CoalescedInlineChild, 4> CoalescedInlineChildren;
     for (MachineBasicBlock &MBB : MF) {
-      for (auto It = MBB.begin(), End = MBB.end(); It != End; ++It) {
-        if (!isGoInlineMark(*It) || !It->getDebugLoc() ||
+      for (auto It = MBB.instr_begin(), End = MBB.instr_end(); It != End;
+           ++It) {
+        if (It->isBundle() || !isGoInlineMark(*It) || !It->getDebugLoc() ||
             !It->getDebugLoc()->getInlinedAt())
           continue;
         const DISubprogram *Callee =
@@ -122,7 +123,7 @@ public:
             inlineEdges(It->getDebugLoc().get());
         InlineEdge Edge = MarkedEdges.back();
         auto Next = std::next(It);
-        while (Next != End && Next->isMetaInstruction())
+        while (Next != End && (Next->isBundle() || Next->isMetaInstruction()))
           ++Next;
         if (Next == End || !Next->getDebugLoc() ||
             containsInlineEdge(Next->getDebugLoc().get(), Edge))
@@ -158,7 +159,9 @@ public:
     }
     for (const CoalescedInlineChild &Child : CoalescedInlineChildren) {
       MachineBasicBlock &MBB = *Child.Before->getParent();
-      auto Before = Child.Before->getIterator();
+      MachineBasicBlock::iterator Before =
+          MachineBasicBlock::iterator::getAtBundleBegin(
+              Child.Before->getIterator());
       TII.insertNoop(MBB, Before);
       std::prev(Before)->setDebugLoc(Child.Location);
       Changed = true;
@@ -166,8 +169,9 @@ public:
 
     DenseMap<InlineEdge, MachineInstr *> PreferredChildren;
     for (MachineBasicBlock &MBB : MF) {
-      for (auto It = MBB.begin(), End = MBB.end(); It != End; ++It) {
-        if (!isGoInlineMark(*It) || !It->getDebugLoc() ||
+      for (auto It = MBB.instr_begin(), End = MBB.instr_end(); It != End;
+           ++It) {
+        if (It->isBundle() || !isGoInlineMark(*It) || !It->getDebugLoc() ||
             !It->getDebugLoc()->getInlinedAt())
           continue;
         const DISubprogram *Callee =
@@ -176,7 +180,7 @@ public:
           report_fatal_error("GoALLC inline mark has no callee subprogram");
         InlineEdge Edge{It->getDebugLoc()->getInlinedAt(), Callee};
         auto Next = std::next(It);
-        while (Next != End && Next->isMetaInstruction())
+        while (Next != End && (Next->isBundle() || Next->isMetaInstruction()))
           ++Next;
         // A preserved debug label is only a preferred boundary when final real
         // code still proves the same inline edge. Labels for fully optimized-
@@ -191,9 +195,10 @@ public:
     DenseSet<MachineInstr *> AnchorInstructions;
 
     for (MachineBasicBlock &MBB : MF) {
-      for (auto It = MBB.begin(), End = MBB.end(); It != End; ++It) {
+      for (auto It = MBB.instr_begin(), End = MBB.instr_end(); It != End;
+           ++It) {
         MachineInstr &MI = *It;
-        if (MI.isMetaInstruction() || !MI.getDebugLoc())
+        if (MI.isBundle() || MI.isMetaInstruction() || !MI.getDebugLoc())
           continue;
 
         SmallVector<InlineEdge, 4> Edges = inlineEdges(MI.getDebugLoc().get());
@@ -206,8 +211,8 @@ public:
         // range and keeps the ordinary preferred-boundary behavior.
         bool AtFunctionEntry = &MBB == &MF.front();
         if (AtFunctionEntry)
-          for (auto Prev = MBB.begin(); Prev != It; ++Prev)
-            if (!Prev->isMetaInstruction() &&
+          for (auto Prev = MBB.instr_begin(); Prev != It; ++Prev)
+            if (!Prev->isBundle() && !Prev->isMetaInstruction() &&
                 (Prev->getFlag(MachineInstr::FrameSetup) ||
                  (Prev->getDebugLoc() && Prev->getDebugLoc().getLine() != 0)) &&
                 TII.getInstSizeInBytes(*Prev) != 0) {
@@ -234,9 +239,9 @@ public:
           MachineInstr *Anchor = nullptr;
           bool InsertedAnchor = false;
           auto Prev = It;
-          while (Prev != MBB.begin()) {
+          while (Prev != MBB.instr_begin()) {
             --Prev;
-            if (Prev->isMetaInstruction())
+            if (Prev->isBundle() || Prev->isMetaInstruction())
               continue;
             if (!Prev->getFlag(MachineInstr::FrameSetup) &&
                 Prev->getDebugLoc() && Prev->getDebugLoc().getLine() != 0 &&
@@ -248,8 +253,10 @@ public:
             break;
           }
           if (!Anchor) {
-            TII.insertNoop(MBB, It);
-            Anchor = &*std::prev(It);
+            MachineBasicBlock::iterator InsertBefore =
+                MachineBasicBlock::iterator::getAtBundleBegin(It);
+            TII.insertNoop(MBB, InsertBefore);
+            Anchor = &*std::prev(InsertBefore);
             InsertedAnchor = true;
           }
           AnchorInstructions.insert(Anchor);
@@ -300,6 +307,10 @@ public:
 };
 
 char GoALLCInlineAnchorPass::ID = 0;
+static RegisterPass<GoALLCInlineAnchorPass>
+    RegisterGoALLCInlineAnchorPass("goallc-inline-anchors",
+                                   "GoALLC final inline unwind anchors", false,
+                                   false);
 
 } // namespace
 
