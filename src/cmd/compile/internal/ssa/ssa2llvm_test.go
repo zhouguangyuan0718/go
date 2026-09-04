@@ -392,16 +392,21 @@ func TestLLVMGoObjFunctionArgInfoMetadata(t *testing.T) {
 	argInfo := &obj.LSym{Name: "test.trace.arginfo", Type: objabi.SRODATA, Size: 3, P: []byte{0, 8, 0xff}}
 	text := &obj.LSym{Name: "test.trace", Type: objabi.STEXT}
 	text.NewFuncInfo().ArgInfo = argInfo
-	fn := llvm.AddFunction(module, text.Name, llvm.FunctionType(GlobalCtxt.VoidType(), nil, false))
-	setGoObjFunctionArgInfo(fn, text)
+	config := abi.NewABIConfig(1, 0, 0, uint8(obj.ABIInternal))
+	abiInfo := config.ABIAnalyzeTypes([]*types.Type{types.Types[types.TUINTPTR]}, nil)
+	fn := llvm.AddFunction(module, text.Name, llvm.FunctionType(GlobalCtxt.VoidType(), []llvm.Type{GlobalCtxt.Int64Type()}, false))
+	setGoObjFunctionArgInfo(fn, text, abiInfo)
 	emitGoObjCompilerUsed()
 
 	ir := module.String()
-	if !strings.Contains(ir, "@test.trace()") || !strings.Contains(ir, "!goobj.func.arginfo") {
+	if !strings.Contains(ir, "@test.trace(i64)") || !strings.Contains(ir, "!goobj.func.arginfo") {
 		t.Fatalf("function is missing GoObj arginfo metadata:\n%s", ir)
 	}
 	if !strings.Contains(ir, "@test.trace.arginfo") || !strings.Contains(ir, "@llvm.compiler.used") {
 		t.Fatalf("arginfo target is not preserved through object emission:\n%s", ir)
+	}
+	if !strings.Contains(ir, "!{ptr @test.trace.arginfo, i64 8, i64 0, i64 0, i64 8}") {
+		t.Fatalf("arginfo metadata is missing the frontend ABI layout:\n%s", ir)
 	}
 }
 
