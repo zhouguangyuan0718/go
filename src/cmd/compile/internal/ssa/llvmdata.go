@@ -7,6 +7,7 @@
 package ssa
 
 import (
+	"cmd/compile/internal/abi"
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/typecheck"
@@ -891,6 +892,46 @@ func setGoObjFunctionInfo(fn llvm.Value, s *obj.LSym) {
 		llvm.ConstInt(GlobalCtxt.Int8Type(), uint64(info.FuncID), false).ConstantAsMetadata(),
 		llvm.ConstInt(GlobalCtxt.Int8Type(), uint64(info.FuncFlag), false).ConstantAsMetadata(),
 	}))
+}
+
+// setGoObjFunctionArgInfo preserves the frontend's traceback argument layout
+// as an explicit function-to-data relationship. The accompanying mechanical
+// ABI layout lets target lowering validate that the final homes still match
+// the frontend description before the GoObj writer serializes it.
+func setGoObjFunctionArgInfo(fn llvm.Value, s *obj.LSym, abiInfo *abi.ABIParamResultInfo) {
+	info := s.Func()
+	if info == nil || info.ArgInfo == nil {
+		return
+	}
+	if abiInfo == nil {
+		base.Fatalf("missing ABI information for %s argument info", s.Name)
+	}
+	argWidth := abiInfo.ArgWidth()
+	spillOffset := abiInfo.SpillAreaOffset() - abiInfo.Config().LocalsOffset()
+	if argWidth < 0 || spillOffset < 0 || spillOffset > argWidth {
+		base.Fatalf("invalid ABI argument layout for %s: size=%d spill=%d", s.Name, argWidth, spillOffset)
+	}
+	target := llvmGoDataRef(info.ArgInfo)
+	preserveGoObjMetadataValues(target)
+	inputs := abiInfo.InParams()
+	md := make([]llvm.Metadata, 0, 3+2*len(inputs))
+	md = append(md,
+		target.ConstantAsMetadata(),
+		llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(argWidth), false).ConstantAsMetadata(),
+		llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(spillOffset), false).ConstantAsMetadata(),
+	)
+	for i := range inputs {
+		offset := inputs[i].FrameOffset(abiInfo)
+		size := inputs[i].Type.Size()
+		if offset < 0 || size < 0 || offset > argWidth || size > argWidth-offset {
+			base.Fatalf("invalid ABI input %d layout for %s: offset=%d size=%d", i, s.Name, offset, size)
+		}
+		md = append(md,
+			llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(offset), false).ConstantAsMetadata(),
+			llvm.ConstInt(GlobalCtxt.Int64Type(), uint64(size), false).ConstantAsMetadata(),
+		)
+	}
+	fn.SetGlobalMetadata(GlobalCtxt.MDKindID("goobj.func.arginfo"), GlobalCtxt.MDNode(md))
 }
 
 // LLVM can express the address relationship but not GoObj's 32-bit section
