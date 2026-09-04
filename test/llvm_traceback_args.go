@@ -11,6 +11,7 @@ import (
 )
 
 var trace [4096]byte
+var pointerArgValue int
 
 //go:noinline
 func poisonStack() [20]int {
@@ -22,7 +23,12 @@ func tracebackWithPointerArg(p *int) int {
 	if p == nil {
 		panic("nil traceback argument")
 	}
-	return runtime.Stack(trace[:], false)
+	n := runtime.Stack(trace[:], false)
+	// Keep p live across runtime.Stack. The final x86 and arm64 machine code does
+	// not initialize its canonical argument home before the traceback PC, so
+	// ArgLive must still report that home as unavailable without forcing a spill.
+	pointerArgValue = *p
+	return n
 }
 
 //go:nosplit
@@ -50,8 +56,8 @@ func contains(haystack, needle []byte) bool {
 
 // tracebackLineHasQuestions reports whether the frame containing name has
 // exactly want unavailable argument markers before the end of its line.
-// LLVM does not yet prove individual register-home stores, so its traceback
-// metadata must be conservative rather than treating stale stack data as live.
+// LLVM must describe initialized register homes from its final machine code
+// without exposing stale stack data or forcing dead inputs to spill.
 //
 //go:noinline
 func tracebackLineHasQuestions(data, name []byte, want int) bool {
@@ -78,6 +84,9 @@ func main() {
 	n := tracebackWithPointerArg(&x)
 	if !contains(trace[:n], []byte("main.tracebackWithPointerArg(0x")) {
 		panic("traceback lost pointer argument:\n" + string(trace[:n]))
+	}
+	if !tracebackLineHasQuestions(trace[:n], []byte("main.tracebackWithPointerArg("), 1) {
+		panic("traceback treated an uninitialized pointer argument home as live:\n" + string(trace[:n]))
 	}
 
 	poisonStack()

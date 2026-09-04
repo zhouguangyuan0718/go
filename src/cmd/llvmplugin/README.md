@@ -380,11 +380,17 @@ argument/result range. Pointer-containing allocas additionally fail closed for
 dynamic or multiple-element allocation, scalable or realigned layout,
 non-default-address-space pointers, pointer vectors, and any deopt record that
 does not resolve to one unique direct frame object at offset zero.
-`PCDATA_ArgLiveIndex` is not implemented. Address-observable allocas emit
-`FUNCDATA_StackObjects` and are also represented conservatively in
-`LocalsPointerMaps`; direct-only pointer leaves use locals-only records. A
-merged alloca address is an ordinary pointer root rather than object contents.
-ArgLive is not a replacement for the entry argument bitmap.
+`PCDATA_ArgLiveIndex` starts register argument homes in an unavailable bitmap.
+After machine code and block layout are final, LLVM derives bitmap transitions
+only from stores already present to the corresponding canonical ABI homes. It
+does not introduce argument spills for traceback formatting. A home is live at
+a block entry only when it was initialized along every predecessor path;
+otherwise the value remains unavailable instead of exposing stale stack
+contents. Address-observable allocas emit `FUNCDATA_StackObjects` and are also
+represented conservatively in `LocalsPointerMaps`; direct-only pointer leaves
+use locals-only records. A merged alloca address is an ordinary pointer root
+rather than object contents. ArgLive is not a replacement for the entry
+argument bitmap.
 
 TODO: LLVM opaque pointer types currently make the first itab/type word of a
 Go interface and pointers to `NotInHeap` types look like ordinary GC pointers.
