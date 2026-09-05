@@ -100,6 +100,7 @@ const goNotInHeapAddressMD = "goallc.notinheap"
 const goDeferResultMD = "goallc.defer_result"
 const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
+const goVarDefMD = "goallc.vardef"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolIndexMD = "goobj.symbol.index"
 const goObjStaticRODataTypeMD = "goobj.static_rodata_type"
@@ -485,6 +486,20 @@ func (lfc *LLVMFuncContext) llvmLifetimeStart(slot llvmStackSlot) {
 	)
 	fn := getOrInsertLLVMIntrinsic("llvm.lifetime.start.p0", sig)
 	lfc.b.CreateCall(sig, fn, []llvm.Value{slot.Value}, "")
+}
+
+func (lfc *LLVMFuncContext) llvmVarDef(slot llvmStackSlot) {
+	// OpVarDef is a Go liveness boundary, not a new LLVM object lifetime.
+	// llvm.lifetime.start would make the slot's existing contents undefined,
+	// which is wrong when SSA has removed a redundant zero after VarDef. Keep a
+	// metadata-tagged fake use through optimization for the statepoint pass to
+	// consume without changing the slot's memory semantics.
+	if slot.Value.IsAAllocaInst().IsNil() {
+		return
+	}
+	fn := getLLVMIntrinsicDeclaration("llvm.fake.use")
+	marker := lfc.b.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{slot.Value}, "")
+	marker.SetMetadata(GlobalCtxt.MDKindID(goVarDefMD), GlobalCtxt.MDNode(nil))
 }
 
 func (lfc *LLVMFuncContext) llvmKeepAlive(value llvm.Value) {
@@ -3681,7 +3696,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			key := llvmLocalKeyForName(name)
 			if slot, ok := lfc.Locals[key]; ok {
 				if slot.Type.HasPointers() && !lfc.DeferResults[key] && lfc.OpenDeferSlots[key] == 0 {
-					lfc.llvmLifetimeStart(slot)
+					lfc.llvmVarDef(slot)
 				}
 			}
 		}

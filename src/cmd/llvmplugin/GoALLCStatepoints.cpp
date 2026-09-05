@@ -56,6 +56,7 @@ constexpr StringLiteral GoDeferResultMD = "goallc.defer_result";
 constexpr StringLiteral GoOpenDeferBitsMD = "goallc.open_defer_bits";
 constexpr StringLiteral GoOpenDeferSlotsMD = "goallc.open_defer_slots";
 constexpr StringLiteral GoNotInHeapAddressMD = "goallc.notinheap";
+constexpr StringLiteral GoVarDefMD = "goallc.vardef";
 constexpr StringLiteral GoObjMarkerRelocMD = "goobj.marker_reloc";
 constexpr StringLiteral StackColoringNoMergeMD = "llvm.stackcoloring.no_merge";
 
@@ -141,6 +142,7 @@ struct PointerAllocaRecord {
   bool OpenDeferSlot;
   PointerFrameLayout Layout;
   SmallVector<IntrinsicInst *, 4> LifetimeMarkers;
+  SmallVector<IntrinsicInst *, 4> VarDefMarkers;
   SmallVector<Instruction *, 16> AddressUses;
   SmallVector<CallInst *, 4> GoRetDefs;
   SmallVector<CallInst *, 8> ActiveCalls;
@@ -2858,9 +2860,52 @@ Error collectPointerAllocaLifetimeMarkers(
   return Error::success();
 }
 
+Error collectPointerAllocaVarDefMarkers(
+    Function &F, SmallVectorImpl<PointerAllocaRecord> &PointerAllocas) {
+  DenseMap<const AllocaInst *, PointerAllocaRecord *> Records;
+  for (PointerAllocaRecord &Record : PointerAllocas)
+    Records[Record.Alloca] = &Record;
+
+  for (Instruction &I : instructions(F)) {
+    if (!I.getMetadata(GoVarDefMD))
+      continue;
+    auto *Marker = dyn_cast<IntrinsicInst>(&I);
+    if (!Marker || Marker->getIntrinsicID() != Intrinsic::fake_use ||
+        Marker->arg_size() != 1)
+      return createStringError(
+          std::errc::invalid_argument,
+          "GoALLC VarDef metadata requires llvm.fake.use with one operand");
+    Value *Pointer = Marker->getArgOperand(0);
+    auto *Alloca = dyn_cast<AllocaInst>(Pointer);
+    if (!Alloca) {
+      if (const AllocaInst *Underlying =
+              findAllocaForValue(Pointer, /*OffsetZero=*/true);
+          Underlying && Records.contains(Underlying))
+        return createStringError(
+            std::errc::not_supported,
+            "GoALLC VarDef markers must reference the whole pointer alloca "
+            "directly");
+      continue;
+    }
+    auto It = Records.find(Alloca);
+    if (It != Records.end())
+      It->second->VarDefMarkers.push_back(Marker);
+  }
+  return Error::success();
+}
+
+bool isPointerAllocaDefinitionMarker(const PointerAllocaRecord &Record,
+                                     const Instruction *I) {
+  return llvm::is_contained(Record.VarDefMarkers, I) ||
+         llvm::any_of(Record.LifetimeMarkers, [&](IntrinsicInst *Marker) {
+           return Marker == I &&
+                  Marker->getIntrinsicID() == Intrinsic::lifetime_start;
+         });
+}
+
 void collectPointerAllocaAddressUses(PointerAllocaRecord &Record,
                                      const DominatorTree &DT) {
-  bool HasLifetimeStart =
+  bool HasDefinitionMarker = !Record.VarDefMarkers.empty() ||
       llvm::any_of(Record.LifetimeMarkers, [](IntrinsicInst *Marker) {
         return Marker->getIntrinsicID() == Intrinsic::lifetime_start;
       });
@@ -2889,10 +2934,15 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record,
           else
             NonGoRetCallUses.insert(Call);
         }
-        if (Kind == FrameAddressUseKind::FirstClass && HasLifetimeStart &&
-            !llvm::any_of(Record.LifetimeMarkers, [&](IntrinsicInst *Marker) {
-              return Marker->getIntrinsicID() == Intrinsic::lifetime_start &&
-                     DT.dominates(Marker, U);
+        if (Kind == FrameAddressUseKind::FirstClass && HasDefinitionMarker &&
+            !llvm::any_of(Record.LifetimeMarkers,
+                          [&](IntrinsicInst *Marker) {
+                            return Marker->getIntrinsicID() ==
+                                       Intrinsic::lifetime_start &&
+                                   DT.dominates(Marker, U);
+                          }) &&
+            !llvm::any_of(Record.VarDefMarkers, [&](IntrinsicInst *Marker) {
+              return DT.dominates(Marker, U);
             })) {
           // LLVM may hoist a pure address operation outside the source VarDef
           // interval. The same operation generates content liveness, so retain
@@ -2911,7 +2961,8 @@ void collectPointerAllocaAddressUses(PointerAllocaRecord &Record,
 
 void transferPointerAllocaLiveness(const PointerAllocaRecord &Record,
                                    const Instruction &I, bool &Live) {
-  if (llvm::is_contained(Record.LifetimeMarkers, &I) ||
+  if (isPointerAllocaDefinitionMarker(Record, &I) ||
+      llvm::is_contained(Record.LifetimeMarkers, &I) ||
       llvm::is_contained(Record.GoRetDefs, &I))
     Live = false;
   else if (llvm::is_contained(Record.AddressUses, &I))
@@ -2926,10 +2977,11 @@ bool pointerAllocaLiveInBlock(const PointerAllocaRecord &Record,
   return Live;
 }
 
-// Go VarDef is a complete initialization boundary. Treat its lifetime.start
-// as a backward kill and terminal address operations as uses. This gives each
-// start a path-sensitive interval whose end is the final real use, without
-// inserting lifetime.end or changing the producer's initialization sequence.
+// Go VarDef is a complete initialization boundary. Treat its semantics-free
+// marker as a backward kill and terminal address operations as uses. True LLVM
+// lifetime starts remain definition boundaries too. This gives each start a
+// path-sensitive interval whose end is the final real use, without inserting
+// lifetime.end or changing the producer's initialization sequence.
 Error computePointerAllocaActivity(
     Function &F, SmallVectorImpl<PointerAllocaRecord> &PointerAllocas,
     const SmallPtrSetImpl<const CallInst *> &SafepointCalls,
@@ -3137,6 +3189,8 @@ void preparePointerAllocaStorageForGC(
     if (Record.WholeLifetime) {
       for (IntrinsicInst *Marker : Record.LifetimeMarkers)
         Marker->eraseFromParent();
+      for (IntrinsicInst *Marker : Record.VarDefMarkers)
+        Marker->eraseFromParent();
 
       // Content activity above used the original VarDef intervals. Only now
       // widen and initialize the physical storage so every earlier bitmap that
@@ -3155,10 +3209,11 @@ void preparePointerAllocaStorageForGC(
     if (Record.DeferResult || Record.OpenDeferSlot)
       continue;
 
-    SmallVector<IntrinsicInst *, 4> LifetimeStarts;
+    SmallVector<Instruction *, 8> DefinitionStarts;
     for (IntrinsicInst *Marker : Record.LifetimeMarkers)
       if (Marker->getIntrinsicID() == Intrinsic::lifetime_start)
-        LifetimeStarts.push_back(Marker);
+        DefinitionStarts.push_back(Marker);
+    llvm::append_range(DefinitionStarts, Record.VarDefMarkers);
 
     auto InitializeAt = [&](Instruction *InsertBefore) {
       IRBuilder<> Builder(InsertBefore);
@@ -3167,16 +3222,18 @@ void preparePointerAllocaStorageForGC(
                                  Builder.getInt8(0),
                                  Builder.getInt64(Record.Layout.ByteSize));
     };
-    if (LifetimeStarts.empty()) {
+    if (DefinitionStarts.empty()) {
       Instruction *Begin = Record.Alloca->getNextNode();
       if (!hasInitializedPointerSlotsBeforeSafepoint(Begin, Record, DL))
         InitializeAt(Begin);
-      continue;
+    } else {
+      for (Instruction *Start : DefinitionStarts)
+        if (Instruction *Begin = Start->getNextNode();
+            !hasInitializedPointerSlotsBeforeSafepoint(Begin, Record, DL))
+          InitializeAt(Begin);
     }
-    for (IntrinsicInst *Start : LifetimeStarts)
-      if (Instruction *Begin = Start->getNextNode();
-          !hasInitializedPointerSlotsBeforeSafepoint(Begin, Record, DL))
-        InitializeAt(Begin);
+    for (IntrinsicInst *Marker : Record.VarDefMarkers)
+      Marker->eraseFromParent();
   }
 }
 
@@ -3226,6 +3283,8 @@ Error collectPointerAllocas(
   }
 
   if (Error Err = collectPointerAllocaLifetimeMarkers(F, PointerAllocas))
+    return Err;
+  if (Error Err = collectPointerAllocaVarDefMarkers(F, PointerAllocas))
     return Err;
 
   return Error::success();
@@ -3944,6 +4003,24 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
   PromoteMemToReg(PromotableAllocas, DT);
 }
 
+Error eraseRemainingVarDefMarkers(Function &F) {
+  SmallVector<IntrinsicInst *, 8> Markers;
+  for (Instruction &I : instructions(F)) {
+    if (!I.getMetadata(GoVarDefMD))
+      continue;
+    auto *Marker = dyn_cast<IntrinsicInst>(&I);
+    if (!Marker || Marker->getIntrinsicID() != Intrinsic::fake_use ||
+        Marker->arg_size() != 1)
+      return createStringError(
+          std::errc::invalid_argument,
+          "GoALLC VarDef metadata requires llvm.fake.use with one operand");
+    Markers.push_back(Marker);
+  }
+  for (IntrinsicInst *Marker : Markers)
+    Marker->eraseFromParent();
+  return Error::success();
+}
+
 Error rewriteFunction(Function &F) {
   if (F.hasFnAttribute(GCLeafAttr)) {
     for (Instruction &I : instructions(F)) {
@@ -3956,7 +4033,7 @@ Error rewriteFunction(Function &F) {
             std::errc::invalid_argument,
             "GoALLC gc-leaf-function contains a non-leaf call");
     }
-    return Error::success();
+    return eraseRemainingVarDefMarkers(F);
   }
 
   DominatorTree DT(F);
@@ -4180,7 +4257,7 @@ Error rewriteFunction(Function &F) {
   // tree for the new continuation blocks and localized fixed-frame uses.
   DT.recalculate(F);
   repairRelocationSSA(F, DT, Records);
-  return Error::success();
+  return eraseRemainingVarDefMarkers(F);
 }
 
 Error materializeFunctionMarkerRelocs(Module &M) {
