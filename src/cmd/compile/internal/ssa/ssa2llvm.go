@@ -26,6 +26,8 @@ type LLVMFuncContext struct {
 	BBs                 map[ID]llvm.BasicBlock
 	Vs                  map[ID]llvm.Value
 	Locals              map[llvmLocalKey]llvmStackSlot
+	LocalLifetimeValues map[ID]bool
+	LocalLifetimeBlocks map[ID][]llvmLocalKey
 	AddressedResults    map[ID][]llvmAddressedResult
 	ResultSlots         map[ID]llvm.Value
 	CallResultSlots     map[llvmCallResultKey]llvmStackSlot
@@ -100,7 +102,6 @@ const goNotInHeapAddressMD = "goallc.notinheap"
 const goDeferResultMD = "goallc.defer_result"
 const goOpenDeferBitsMD = "goallc.open_defer_bits"
 const goOpenDeferSlotsMD = "goallc.open_defer_slots"
-const goVarDefMD = "goallc.vardef"
 const goObjMarkerRelocMD = "goobj.marker_reloc"
 const goObjSymbolIndexMD = "goobj.symbol.index"
 const goObjStaticRODataTypeMD = "goobj.static_rodata_type"
@@ -486,20 +487,6 @@ func (lfc *LLVMFuncContext) llvmLifetimeStart(slot llvmStackSlot) {
 	)
 	fn := getOrInsertLLVMIntrinsic("llvm.lifetime.start.p0", sig)
 	lfc.b.CreateCall(sig, fn, []llvm.Value{slot.Value}, "")
-}
-
-func (lfc *LLVMFuncContext) llvmVarDef(slot llvmStackSlot) {
-	// OpVarDef is a Go liveness boundary, not a new LLVM object lifetime.
-	// llvm.lifetime.start would make the slot's existing contents undefined,
-	// which is wrong when SSA has removed a redundant zero after VarDef. Keep a
-	// metadata-tagged fake use through optimization for the statepoint pass to
-	// consume without changing the slot's memory semantics.
-	if slot.Value.IsAAllocaInst().IsNil() {
-		return
-	}
-	fn := getLLVMIntrinsicDeclaration("llvm.fake.use")
-	marker := lfc.b.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{slot.Value}, "")
-	marker.SetMetadata(GlobalCtxt.MDKindID(goVarDefMD), GlobalCtxt.MDNode(nil))
 }
 
 func (lfc *LLVMFuncContext) llvmKeepAlive(value llvm.Value) {
@@ -3004,6 +2991,7 @@ func (lfc *LLVMFuncContext) llvmByValCallArgument(v, argValue *Value, index int,
 	}
 	address := entryBuilder.CreateAlloca(param.ValueType, fmt.Sprintf("%s.arg%d.byval", v, index))
 	address.SetAlignment(param.Alignment)
+	lfc.llvmLifetimeStart(llvmStackSlot{Value: address, Type: logical})
 	store := lfc.b.CreateStore(value, address)
 	store.SetAlignment(param.Alignment)
 	return address
@@ -3024,7 +3012,7 @@ func (lfc *LLVMFuncContext) llvmMemoryResultCallArguments(v *Value, sig llvmFunc
 		// visible to the caller stack map before the callee has produced them.
 		// A musttail call reuses the caller's goret home, whose lifetime is
 		// already active. Ordinary calls own a distinct result slot.
-		if slot.Type.HasPointers() && !lfc.llvmCanEmitMustTail(v, aux) {
+		if !lfc.llvmCanEmitMustTail(v, aux) {
 			lfc.llvmLifetimeStart(slot)
 		}
 		args = append(args, slot.Value)
@@ -3545,9 +3533,7 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 func (lfc *LLVMFuncContext) materializeAddressedResults(v *Value, call llvm.Value, aux *AuxCall) {
 	sig := llvmSignature(aux)
 	for _, result := range lfc.AddressedResults[v.ID] {
-		if result.Slot.Type.HasPointers() {
-			lfc.llvmLifetimeStart(result.Slot)
-		}
+		lfc.llvmLifetimeStart(result.Slot)
 		resultSig := sig.Results[result.Index]
 		if resultSig.InMemory || resultSig.ReturnIndex < 0 {
 			result.Owner.Fatalf("addressed register result was assigned to memory")
@@ -3691,15 +3677,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			lVal = llvm.Undef(getLLVMType(v.Type))
 		}
 	case OpVarDef:
+		// Go liveness bookkeeping is not an LLVM memory effect. A later
+		// definition may reuse bytes initialized before this annotation.
 		lVal = arg0()
-		if name, ok := v.Aux.(*ir.Name); ok {
-			key := llvmLocalKeyForName(name)
-			if slot, ok := lfc.Locals[key]; ok {
-				if slot.Type.HasPointers() && !lfc.DeferResults[key] && lfc.OpenDeferSlots[key] == 0 {
-					lfc.llvmVarDef(slot)
-				}
-			}
-		}
 	case OpVarLive:
 		lVal = arg0()
 		if name, ok := v.Aux.(*ir.Name); ok {
@@ -3718,6 +3698,12 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		slot, ok := lfc.Locals[key]
 		if !ok {
 			v.Fatalf("local stack slot was not preallocated in the entry block")
+		}
+		if lfc.LocalLifetimeValues[v.ID] {
+			// Honor the address's memory dependency even during recursive
+			// emission. Allocation stays in entry; lifetime starts here.
+			lfc.GenLV(v.Args[1])
+			lfc.llvmLifetimeStart(slot)
 		}
 		lVal = slot.Value
 	case OpGetClosurePtr:
@@ -4512,6 +4498,9 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 func (lfc *LLVMFuncContext) CompileBlock(BB *Block, values []*Value) {
 	lfc.b.SetInsertPointAtEnd(lfc.BBs[BB.ID])
 	lfc.b.ClearCurrentDebugLocation()
+	for _, key := range lfc.LocalLifetimeBlocks[BB.ID] {
+		lfc.llvmLifetimeStart(lfc.Locals[key])
+	}
 	for _, v := range values {
 		if v.Op == OpSP {
 			continue
@@ -5269,7 +5258,7 @@ func LLVMCompile(f *Func) {
 				if name.Type().Size() != 0 {
 					parameterHomes = append(parameterHomes, name)
 				}
-				if name.Type().HasPointers() && !cgoUnsafeArgs {
+				if !cgoUnsafeArgs {
 					parameterLifetimeSlots = append(parameterLifetimeSlots, FCtxt.Locals[key])
 				}
 			}
@@ -5438,9 +5427,14 @@ func LLVMCompile(f *Func) {
 	storeNumber := f.Cache.allocInt32Slice(f.NumValues())
 	defer f.Cache.freeInt32Slice(storeNumber)
 	postorder := f.Postorder()
+	ordered := make(map[ID][]*Value, len(postorder))
+	for _, BB := range postorder {
+		ordered[BB.ID] = storeOrder(BB.Values, sset, storeNumber)
+	}
+	FCtxt.planLocalLifetimes(ordered)
 	for i := len(postorder) - 1; i >= 0; i-- {
 		BB := postorder[i]
-		FCtxt.CompileBlock(BB, storeOrder(BB.Values, sset, storeNumber))
+		FCtxt.CompileBlock(BB, ordered[BB.ID])
 	}
 	FCtxt.emitDeferResultHomeStores()
 	if f.OpenDeferBits != nil {

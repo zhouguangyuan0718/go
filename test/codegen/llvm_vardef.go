@@ -24,12 +24,13 @@ type llvmVarDefMap map[string]llvmVarDefResult
 // zero undefined and let O2 return stale register contents for status.
 //
 // LLVM-LABEL: define weak goabiinternal void @"codegen.(*llvmVarDefMap).llvmVarDefZero"(
-// LLVM: call void (...) @llvm.fake.use(ptr %{{.*}}){{.*}}!goallc.vardef !{{[0-9]+}}
+// LLVM: call void @llvm.lifetime.start.p0(ptr
 // LLVM-NOT: call void @llvm.lifetime.start
+// LLVM-NOT: @llvm.fake.use
 // LLVM: ret void
 // LLVM-OPT-LABEL: define weak goabiinternal void @"codegen.(*llvmVarDefMap).llvmVarDefZero"(
 // LLVM-OPT-NOT: undef
-// LLVM-OPT: call void (...) @llvm.fake.use(ptr {{.*}}){{.*}}!goallc.vardef
+// LLVM-OPT-NOT: @llvm.fake.use
 // LLVM-OPT: ret void
 func (values llvmVarDefMap) llvmVarDefZero(name string) llvmVarDefResult {
 	if values == nil {

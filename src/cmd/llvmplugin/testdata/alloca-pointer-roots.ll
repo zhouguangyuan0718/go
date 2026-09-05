@@ -90,7 +90,9 @@ target triple = "x86_64-unknown-linux-goobj"
 ; O2: "deopt"({{.*}}i64 1095520067
 ; O2-LABEL: define goabiinternal void @vardef_zero(
 ; O2-NOT: undef
-; O2: phi i64 [ 0,
+; O2: %[[OFFSET:.*]] = select i1 %nilmap, i64 0, i64 1
+; O2: %[[POINTER:.*]] = getelementptr i8, ptr null, i64 %[[OFFSET]]
+; O2: store ptr %[[POINTER]], ptr %out
 ; O2-NOT: !goallc.vardef
 ; O2: ret void
 
@@ -151,7 +153,6 @@ declare goabiinternal void @observe_stack_address(ptr)
 declare goabiinternal i64 @readonly_pointer_slot(ptr readonly) memory(read)
 declare goabiinternal i64 @readnone_callee() memory(none)
 declare void @llvm.lifetime.start.p0(i64 immarg, ptr captures(none))
-declare void @llvm.fake.use(...)
 declare void @llvm.memset.inline.p0.i64(ptr, i8, i64, i1 immarg)
 
 define goabiinternal ptr @pointer_slot(ptr %pointer) gc "goallc" {
@@ -214,7 +215,7 @@ entry:
   ; must zero the whole object before the first call so the complete bitmap is
   ; safe both before initialization and while only the first field is set.
   %slot = alloca %two_pointers, align 8
-  call void (...) @llvm.fake.use(ptr %slot), !goallc.vardef !0
+  call void @llvm.lifetime.start.p0(i64 16, ptr %slot)
   %first = call goabiinternal ptr @make_pointer()
   %first.field = getelementptr inbounds %two_pointers, ptr %slot, i32 0, i32 0
   store ptr %first, ptr %first.field, align 8
@@ -409,14 +410,14 @@ define goabiinternal void @vardef_zero(
     ptr goret(%vardef_result) align 8 "goretindex"="0" %out) gc "goallc" {
 entry:
   ; Model a large zero result whose return-block Zero was removed after
-  ; VarDef. The marker must remain useful to GoALLC without invalidating the
-  ; entry initialization as llvm.lifetime.start would.
+  ; VarDef. Only the initial LocalAddr starts the object's lifetime; the
+  ; later Go bookkeeping annotation emits no LLVM instruction.
   %slot = alloca %vardef_result, align 8
+  call void @llvm.lifetime.start.p0(i64 104, ptr %slot)
   call void @llvm.memset.inline.p0.i64(ptr %slot, i8 0, i64 104, i1 false)
   br i1 %nilmap, label %nil, label %some
 
 nil:
-  call void (...) @llvm.fake.use(ptr %slot), !goallc.vardef !0
   %zero = load %vardef_result, ptr %slot, align 8
   store %vardef_result %zero, ptr %out, align 8
   ret void
