@@ -136,19 +136,21 @@ constant address derivation, and local PHI/select uses remain compiler
 controlled. The frontend Addrtaken metadata is provenance only and never keeps
 an alloca alive or overrides this final structural classification.
 
-The Go frontend emits `llvm.lifetime.start` at each pointer-containing
-`OpVarDef`. Repeated starts are intentional: `VarDef` denotes complete
-reinitialization, including in branches and loops. Parameter homes start before
-their synthetic incoming-value store, and addressed result homes start after
-the producing call and before their result store. `OpVarLive` remains an
-`llvm.fake.use` of the home. The producer's existing Zero, Store, or Move owns
-source-lifetime initialization; the frontend marker helper adds no pointer
-clears, and neither side emits `llvm.lifetime.end`.
+The Go frontend emits `llvm.fake.use` tagged with `goallc.vardef` at each
+pointer-containing `OpVarDef`. This marker preserves Go liveness bookkeeping
+without invalidating the object's contents: Go SSA can eliminate a redundant
+Zero after VarDef and reuse fields initialized by an earlier definition.
+Parameter homes and addressed result homes retain real `llvm.lifetime.start`
+at their physical initialization sites. `OpVarLive` uses a `go.keepalive`
+operand bundle on `llvm.donothing`. The producer's existing Zero, Store, or Move
+owns source initialization; the frontend marker helper adds no pointer clears,
+and neither side emits `llvm.lifetime.end`.
 
 For every surviving fixed alloca, statepoint rewriting enumerates pointer
 offsets and performs a backward, path-sensitive live-out dataflow over its
-optimized address-use graph. A lifetime start is a kill and a real load, store,
-call use, comparison, `llvm.fake.use`, or other terminal address use is a gen.
+optimized address-use graph. A VarDef marker or true lifetime start is a kill;
+a real load, store, call use, comparison, untagged `llvm.fake.use`, or other
+terminal address use is a gen.
 The callsite is sampled before applying that call's use transfer, so an address
 used only as a current call argument is live-in but not caller `gc-live`.
 Direct GEP/cast chains retain the alloca base. Same-allocation
@@ -158,7 +160,8 @@ remain independent scalar roots and do not make every possible incoming
 alloca live after the merge. This makes the final real use the implicit
 lifetime end
 without modifying IR. Unclassifiable objects fail closed. The original
-lifetime starts remain in IR for the normal code-generation pipeline.
+lifetime starts remain in IR for the normal code-generation pipeline, while
+VarDef markers are consumed before instruction selection.
 Address-observable objects are different: Go's runtime adjusts every pointer
 word in every `StackObjects` record during stack growth, whether the object is
 source-live or not. The plugin preserves their function-wide frame identity
@@ -166,7 +169,7 @@ with `llvm.stackcoloring.no_merge`, while the existing lifetime interval still
 controls when their contents are roots. Any interval whose optimized producer
 does not initialize all pointer slots before a safepoint receives an inline
 zero initialization immediately after its start. LLVM may hoist a pure
-first-class address use before its source `lifetime.start`; content liveness can
+first-class address use before its definition marker; content liveness can
 then name that storage at an earlier safepoint. For this case, the original
 starts first remain liveness kills, then the physical alloca is widened to one
 entry lifetime and zeroed there. Address recipes still use the ordinary
