@@ -157,9 +157,17 @@ and neither side emits `llvm.lifetime.end`.
 
 For every surviving fixed alloca, statepoint rewriting enumerates pointer
 offsets and performs a backward, path-sensitive live-out dataflow over its
-optimized address-use graph. A lifetime marker is a kill;
-a real load, store, call use, comparison, `llvm.fake.use`, or other
-terminal address use is a gen.
+optimized use graph, tracking individual pointer slots internally. A lifetime
+marker kills all old contents. Loads generate liveness for the pointer slots
+they may read; definite stores and constant-size memory writes kill only the
+slots they overwrite. Memory transfers also generate liveness for their source,
+including overlapping and self copies. Unknown-offset writes cannot kill any
+slot, and writes that split a pointer word fail closed. Calls and other
+first-class address uses conservatively generate content liveness. CFG joins
+take the union of successor liveness, including loop backedges. This prevents
+a future overwrite from retaining an unrelated old pointer across an earlier
+GC without restarting the LLVM storage lifetime. The GoObj protocol remains
+whole-object: any live pointer slot activates the complete typed object bitmap.
 The callsite is sampled before applying that call's use transfer, so an address
 used only as a current call argument is live-in but not caller `gc-live`.
 Direct GEP/cast chains retain the alloca base. Same-allocation

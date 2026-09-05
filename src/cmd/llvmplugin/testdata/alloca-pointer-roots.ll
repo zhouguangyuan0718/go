@@ -17,7 +17,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-LABEL: define goabiinternal ptr @alloca_partial_initialization()
 ; IR-NOT: !goallc.vardef
 ; IR: call void @llvm.memset.inline
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot
+; IR: @llvm.experimental.gc.statepoint{{.*}}@make_pointer{{.*}}[ "gc-live"(ptr %slot) ]
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot
 
 ; IR-LABEL: define goabiinternal ptr @alloca_loop(
@@ -63,7 +63,8 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-NOT: store ptr {{.*}}, ptr %slot
 
 ; IR-LABEL: define goabiinternal void @alloca_marker_free_at_safepoint(
-; IR: i64 1095519299, i64 16), "gc-live"(ptr %pointer{{[,)]}}
+; IR-NOT: "deopt"
+; IR: "gc-live"(ptr %pointer, ptr %slot)
 ; IR: %pointer.relocated
 
 ; IR-LABEL: define goabiinternal ptr @alloca_high_bitmap_word(
@@ -81,7 +82,8 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-NOT: !goallc.vardef
 ; IR: ret void
 
-; MIR-COUNT-31: STATEPOINT{{.*}}1195461697{{.*}}1095520067{{.*}}%{{(fixed-)?}}stack.{{[0-9]+}}
+; Two write-only intervals need address rematerialization but no content map.
+; MIR-COUNT-29: STATEPOINT{{.*}}1195461697{{.*}}1095520067{{.*}}%{{(fixed-)?}}stack.{{[0-9]+}}
 ; MIR-ALL-COUNT-34: STATEPOINT
 
 ; O2-LABEL: define goabiinternal ptr @nested_whole_aggregate(
@@ -212,8 +214,8 @@ define goabiinternal ptr @alloca_partial_initialization()
     gc "goallc" {
 entry:
   ; Each field is initialized from a different safepointing call. The plugin
-  ; must zero the whole object before the first call so the complete bitmap is
-  ; safe both before initialization and while only the first field is set.
+  ; must zero the whole object so the complete bitmap is safe at the second
+  ; call while only the first field is set. The first call has no live contents.
   %slot = alloca %two_pointers, align 8
   call void @llvm.lifetime.start.p0(i64 16, ptr %slot)
   %first = call goabiinternal ptr @make_pointer()
