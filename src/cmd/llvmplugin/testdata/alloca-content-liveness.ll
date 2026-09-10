@@ -23,6 +23,14 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 16, i64 8, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @byval_self_copy(
 ; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 1,
+; IR-LABEL: define goabiinternal ptr @mixed_alloca_phi(
+; IR: @checkpoint{{.*}}ptr %left, i64 0, i64 8, i64 8, i64 8, i64 0,{{.*}}ptr %right, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR-LABEL: define goabiinternal ptr @mixed_alloca_select(
+; IR: @checkpoint{{.*}}ptr %left, i64 0, i64 8, i64 8, i64 8, i64 0,{{.*}}ptr %right, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR-LABEL: define goabiinternal ptr @mixed_byval_select(
+; IR: @checkpoint{{.*}}ptr %local, i64 0, i64 8, i64 8, i64 8, i64 0,{{.*}}ptr %arg, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR-LABEL: define goabiinternal ptr @mixed_alloca_loop_phi(
+; IR-COUNT-2: @checkpoint{{.*}}ptr %left, i64 0, i64 8, i64 8, i64 8, i64 1,{{.*}}ptr %right, i64 0, i64 8, i64 8, i64 8, i64 1,
 
 %pair = type { ptr, ptr }
 declare goabiinternal void @observe(ptr)
@@ -160,5 +168,72 @@ entry:
   call goabiinternal void @checkpoint()
   call void @llvm.memmove.p0.p0.i64(ptr %slot, ptr %slot, i64 8, i1 false)
   %result = load ptr, ptr %slot
+  ret ptr %result
+}
+
+; A loop-free PHI/select is itself the precise dynamic root for the selected
+; stack object. Keep the candidate objects inactive so the unselected contents
+; do not retain heap objects.
+define goabiinternal ptr @mixed_alloca_phi(ptr %a, ptr %b, i1 %cond) gc "goallc" {
+entry:
+  %left = alloca ptr, align 8
+  %right = alloca ptr, align 8
+  store ptr %a, ptr %left
+  store ptr %b, ptr %right
+  br i1 %cond, label %take_left, label %take_right
+take_left:
+  br label %merge
+take_right:
+  br label %merge
+merge:
+  %selected = phi ptr [ %left, %take_left ], [ %right, %take_right ]
+  call goabiinternal void @checkpoint()
+  %result = load ptr, ptr %selected
+  ret ptr %result
+}
+
+define goabiinternal ptr @mixed_alloca_select(ptr %a, ptr %b, i1 %cond) gc "goallc" {
+entry:
+  %left = alloca ptr, align 8
+  %right = alloca ptr, align 8
+  store ptr %a, ptr %left
+  store ptr %b, ptr %right
+  %selected = select i1 %cond, ptr %left, ptr %right
+  call goabiinternal void @checkpoint()
+  %result = load ptr, ptr %selected
+  ret ptr %result
+}
+
+define goabiinternal ptr @mixed_byval_select(ptr byval(ptr) align 8 %arg,
+                                             ptr %value, i1 %cond) gc "goallc" {
+entry:
+  %local = alloca ptr, align 8
+  store ptr %value, ptr %local
+  %selected = select i1 %cond, ptr %arg, ptr %local
+  call goabiinternal void @checkpoint()
+  %result = load ptr, ptr %selected
+  ret ptr %result
+}
+
+; A loop-carried merge can select another object on a later iteration. That
+; object's contents are not reachable through the current merged pointer, so
+; attribute the downstream read to every candidate frame base.
+define goabiinternal ptr @mixed_alloca_loop_phi(ptr %a, ptr %b) gc "goallc" {
+entry:
+  %left = alloca ptr, align 8
+  %right = alloca ptr, align 8
+  store ptr %a, ptr %left
+  store ptr %b, ptr %right
+  br label %loop
+loop:
+  %first = phi i1 [ true, %entry ], [ false, %next ]
+  %selected = phi ptr [ %left, %entry ], [ %right, %next ]
+  call goabiinternal void @checkpoint()
+  %result = load ptr, ptr %selected
+  br i1 %first, label %next, label %exit
+next:
+  call goabiinternal void @checkpoint()
+  br label %loop
+exit:
   ret ptr %result
 }
