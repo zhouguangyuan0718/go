@@ -1,36 +1,37 @@
 target triple = "x86_64-unknown-linux-goobj"
 
-; The content-active field after size/alignment/pointer-size is independent of
-; gc-live address rematerialization and the function-wide StackObject layout.
-; No VarDef annotations or repeated lifetime starts are needed for overwrites.
+; The low bit of encoded byte size carries content liveness independently of
+; gc-live address rematerialization. Inactive records remain available for the
+; function-wide StackObject layout. No VarDef annotations or repeated lifetime
+; starts are needed for overwrites.
 ; IR-LABEL: define goabiinternal ptr @overwrite(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %slot, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @overwrite_fields(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 16, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %slot, i64 16, i64 3,
 ; IR-LABEL: define goabiinternal ptr @partial_object(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 16, i64 8, i64 8, i64 1,
+; IR: @checkpoint{{.*}}ptr %slot, i64 17, i64 3,
 ; IR-LABEL: define goabiinternal ptr @overlapping_move(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 24, i64 8, i64 8, i64 1,
+; IR: @checkpoint{{.*}}ptr %slot, i64 25, i64 7,
 ; IR-LABEL: define goabiinternal ptr @self_copy(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 1,
+; IR: @checkpoint{{.*}}ptr %slot, i64 9, i64 1,
 ; IR-LABEL: define goabiinternal ptr @both_paths_overwrite(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %slot, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @one_path_reads(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 1,
+; IR: @checkpoint{{.*}}ptr %slot, i64 9, i64 1,
 ; IR-LABEL: define goabiinternal void @loop_overwrite(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %slot, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @unknown_write_offset(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 16, i64 8, i64 8, i64 1,
+; IR: @checkpoint{{.*}}ptr %slot, i64 17, i64 3,
 ; IR-LABEL: define goabiinternal ptr @byval_self_copy(
-; IR: @checkpoint{{.*}}ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 1,
+; IR: @checkpoint{{.*}}ptr %slot, i64 9, i64 1,
 ; IR-LABEL: define goabiinternal ptr @mixed_alloca_phi(
-; IR: @checkpoint{{.*}}ptr %left, i64 0, i64 8, i64 8, i64 8, i64 0,{{.*}}ptr %right, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %left, i64 8, i64 1,{{.*}}ptr %right, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @mixed_alloca_select(
-; IR: @checkpoint{{.*}}ptr %left, i64 0, i64 8, i64 8, i64 8, i64 0,{{.*}}ptr %right, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %left, i64 8, i64 1,{{.*}}ptr %right, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @mixed_byval_select(
-; IR: @checkpoint{{.*}}ptr %local, i64 0, i64 8, i64 8, i64 8, i64 0,{{.*}}ptr %arg, i64 0, i64 8, i64 8, i64 8, i64 0,
+; IR: @checkpoint{{.*}}ptr %local, i64 8, i64 1,{{.*}}ptr %arg, i64 8, i64 1,
 ; IR-LABEL: define goabiinternal ptr @mixed_alloca_loop_phi(
-; IR-COUNT-2: @checkpoint{{.*}}ptr %left, i64 0, i64 8, i64 8, i64 8, i64 1,{{.*}}ptr %right, i64 0, i64 8, i64 8, i64 8, i64 1,
+; IR-COUNT-2: @checkpoint{{.*}}ptr %left, i64 9, i64 1,{{.*}}ptr %right, i64 9, i64 1,
 
 %pair = type { ptr, ptr }
 declare goabiinternal void @observe(ptr)

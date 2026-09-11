@@ -1394,8 +1394,7 @@ if(BUILD_TESTING)
   endforeach()
 
   foreach(GOALLC_MALFORMED_PTRMAP_CASE IN ITEMS
-      bad-kind truncated bad-length duplicate overlap padding non-direct
-      contents-live)
+      bad-size truncated bad-length duplicate overlap padding non-direct)
     set(GOALLC_MALFORMED_PTRMAP_INPUT
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-ptrmap-malformed-${GOALLC_MALFORMED_PTRMAP_CASE}.ll")
     goallc_add_filecheck_test(
@@ -1486,7 +1485,7 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     GoALLCStatepoints.PathLocalPointerAllocaLifetime PROPERTIES
-    PASS_REGULAR_EXPRESSION "1095520067")
+    PASS_REGULAR_EXPRESSION "1195461697")
 
   add_test(
     NAME GoALLCStatepoints.VolatilePointerAllocaSupported

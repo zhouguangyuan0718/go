@@ -3690,39 +3690,20 @@ void appendAllocaPtrMapDeoptOperands(
     SmallVectorImpl<Value *> &Deopt) {
   if (Allocas.empty() && FixedArgs.empty())
     return;
-  // ProtocolLength covers BEGIN through END, but not the trailing duplicate
-  // length.  The envelope itself therefore contributes BEGIN, length,
-  // record-count, and END.
-  uint64_t ProtocolLength = 4;
+  uint64_t ProtocolLength = 2; // BEGIN and END.
   for (const PointerAllocaRecord *Alloca : Allocas)
-    ProtocolLength += 11 + Alloca->Layout.BitmapWords.size();
+    ProtocolLength += 2 + Alloca->Layout.BitmapWords.size();
   for (const PointerFixedArgRecord *FixedArg : FixedArgs)
-    ProtocolLength += 11 + FixedArg->Layout.BitmapWords.size();
+    ProtocolLength += 2 + FixedArg->Layout.BitmapWords.size();
 
   auto AppendConstant = [&](uint64_t Value) {
     Deopt.push_back(ConstantInt::get(Builder.getInt64Ty(), Value));
   };
   AppendConstant(GoObj::AllocaPtrMapBeginMagic);
-  AppendConstant(ProtocolLength);
-  AppendConstant(Allocas.size() + FixedArgs.size());
   auto AppendRecord = [&](Value *Base, const PointerFrameLayout &Layout) {
-    AppendConstant(GoObj::AllocaPtrMapRecordTag);
-    AppendConstant(11 + Layout.BitmapWords.size());
     Deopt.push_back(Base);
-    AppendConstant(0); // First contract version describes the whole object.
-    AppendConstant(Layout.ByteSize);
-    AppendConstant(Layout.Alignment);
-    AppendConstant(
-        Builder.GetInsertBlock()->getModule()->getDataLayout().getPointerSize(
-            0));
-    // gc-live also carries direct frame bases needed only to rematerialize an
-    // address after stack growth. Keep object-content liveness independent so
-    // GoObj never mistakes that address-only operand for a LocalsPointerMaps
-    // root.
-    AppendConstant(LiveContents.contains(Base));
-    AppendConstant(Layout.BitCount);
-    AppendConstant(GoObj::AllocaPtrMapBitmapWordBits);
-    AppendConstant(Layout.BitmapWords.size());
+    // Pointer alignment leaves the low size bit free for content liveness.
+    AppendConstant(Layout.ByteSize | uint64_t(LiveContents.contains(Base)));
     for (uint64_t Word : Layout.BitmapWords)
       AppendConstant(Word);
   };

@@ -190,7 +190,7 @@ entry:
 ; IR: %observed.result = alloca %slice, align 8, !llvm.stackcoloring.no_merge
 ; IR: call goabi0 token {{.*}} @llvm.experimental.gc.statepoint
 ; IR-SAME: ptr goret(%slice) align 8 "goretindex"="0" %observed.result
-; IR-SAME: "deopt"({{.*}}ptr %observed.result, i64 0, i64 24, i64 8, i64 8, i64 0,
+; IR-SAME: "deopt"({{.*}}ptr %observed.result, i64 24, i64 1,
 ; IR-SAME: "gc-live"(ptr %observed.result)
 
 ; MIR-LABEL: name: observed_call_slice_abi0
@@ -200,7 +200,7 @@ entry:
 ; MIR: STATEPOINT {{.*}}@safepoint
 ; IR: call goabiinternal token {{.*}} @llvm.experimental.gc.statepoint
 ; IR-SAME: ptr elementtype(void ()) @safepoint
-; IR-SAME: "deopt"({{.*}}ptr %observed.result, i64 0, i64 24, i64 8, i64 8, i64 1,
+; IR-SAME: "deopt"({{.*}}ptr %observed.result, i64 25, i64 1,
 ; IR-SAME: "gc-live"(ptr %observed.result)
 
 declare goabiinternal void @observe(ptr)

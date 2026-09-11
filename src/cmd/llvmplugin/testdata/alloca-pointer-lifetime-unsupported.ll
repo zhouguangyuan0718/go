@@ -6,7 +6,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: call void @llvm.lifetime.start
 ; IR: store ptr null
 ; IR-NOT: call void @llvm.memset.inline
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %slot)
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697{{.*}}){{.*}}"gc-live"(ptr %slot)
 ; IR-NOT: %slot.relocated
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: ret void
@@ -14,19 +14,19 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-LABEL: define goabiinternal void @stack_object_alloca_with_lifetime()
 ; IR: %slot = alloca ptr, align 8, !llvm.stackcoloring.no_merge
 ; IR-NOT: "gc-live"(ptr %slot)
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697
 ; IR: call void @llvm.lifetime.start
 ; IR: store ptr null
 ; IR-NOT: call void @llvm.memset.inline
 ; IR-NOT: "gc-live"(ptr %slot)
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697
 ; IR-NOT: "gc-live"(ptr %slot)
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697
 
 ; IR-LABEL: define goabiinternal void @loop_reinitialized_pointer_alloca(
 ; IR: call void @llvm.lifetime.start
 ; IR-NOT: call void @llvm.memset.inline
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %slot)
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697{{.*}}){{.*}}"gc-live"(ptr %slot)
 ; IR: @llvm.experimental.gc.statepoint
 ; IR: ret void
 
@@ -40,7 +40,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: call void @llvm.lifetime.start
 ; IR-NOT: call void @llvm.memset.inline
 ; IR-COUNT-2: store ptr
-; IR: i64 3, i64 64, i64 1, i64 5
+; IR: ptr %slot, i64 25, i64 5
 
 ; IR-LABEL: define goabiinternal void @partially_stored_pointer_alloca(
 ; IR: call void @llvm.lifetime.start
@@ -52,7 +52,7 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR-LABEL: define goabiinternal void @phi_edge_pointer_alloca(
 ; IR: %slot = alloca ptr, align 8, !llvm.stackcoloring.no_merge
 ; IR: %selected = phi ptr [ %slot, %initialize ], [ %other, %external ]
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067{{.*}}){{.*}}"gc-live"(ptr %selected)
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697{{.*}}){{.*}}"gc-live"(ptr %selected)
 
 ; IR-LABEL: define goabiinternal void @hoisted_aggregate_pointer_alloca()
 ; IR: %slot = alloca [2 x ptr], align 8, !llvm.stackcoloring.no_merge
@@ -64,8 +64,8 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: store ptr null
 ; IR: %second.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: %slice.cap.rebuilt = insertvalue { ptr, i64, i64 } poison, ptr %slot, 0
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
-; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1095520067
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697
+; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}i64 1195461697
 ; IR-NOT: %slice.cap.leaf.0.relocated
 ; IR-NOT: call void @llvm.lifetime.end
 
