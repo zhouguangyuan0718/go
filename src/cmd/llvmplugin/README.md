@@ -195,12 +195,14 @@ This precise-root case, not dead StackObject adjustment, requires valid
 contents. For this case, the original
 starts first remain liveness kills, then the physical alloca is widened to one
 entry lifetime and zeroed there. Address recipes still use the ordinary
-per-block `Base + Offset` rematerialization. The record carries one generic
-tag, the alloca address, whole-object size and alignment, pointer size, valid
-bitmap bit count, and 64-bit bitmap words. The
-envelope and every record carry explicit lengths, and a trailing duplicate
-envelope length makes the suffix recoverable after ordinary deopt operands.
-There is deliberately no contract version in the first grammar.
+per-block `Base + Offset` rematerialization. Each compact record carries the
+alloca address, the pointer-aligned whole-object size with its low bit used as
+the contents-live flag, and 64-bit bitmap words. The target StackMap supplies
+the pointer size; object size therefore determines both the valid bitmap bit
+count and the number of bitmap words. `BEGIN`, `END`, and one trailing envelope
+length make the suffix recoverable after ordinary deopt operands. Records need
+no tags, field counts, or individual lengths. There is deliberately no
+contract version in the first grammar.
 
 LowerStatepoint lowers both the deopt alloca address and explicit `gc-live`
 alloca through their normal direct FrameIndex paths and preserves the adjacent
@@ -211,16 +213,18 @@ alloca address. Uses after the statepoint rebuild from the original alloca, so
 SelectionDAG selects the same FrameIndex without a root spill or reload.
 LLVM's GoObj StackMaps bridge retains the deopt prefix and resolves
 both inline constants and `ConstantIndex` values. The GoObj writer strictly
-parses the suffix and maps every layout with a matching direct `gc-live` alloca
-plus bitmap bit to that callsite's `LocalsPointerMaps`. An unmatched layout is
-a function-level StackObject candidate; the writer requires that same layout
-at every ordinary statepoint before emitting native-layout
+parses the suffix and maps every record whose encoded contents-live bit is set,
+matching direct `gc-live` alloca, and bitmap bit to that callsite's
+`LocalsPointerMaps`. An inactive record is a function-level StackObject
+candidate; the writer requires that same layout at every ordinary statepoint
+before emitting native-layout
 `FUNCDATA_StackObjects` plus content-addressed GC bitmaps. A record may
 therefore contribute locals bits at active callsites and still establish a
 function-level StackObject at an inactive callsite. The writer fails closed on
-malformed lengths, non-direct bases, incomplete function-level layouts,
-nonzero padding, duplicates, overlaps, or locations outside the GC locals
-range. The deopt grammar does not escape the object writer.
+malformed envelopes, sizes, or bitmaps; non-direct bases; incomplete or
+changing function-level layouts; nonzero padding; duplicates; overlaps; or
+locations outside the GC frame ranges. The deopt grammar does not escape the
+object writer.
 
 Because a StackObject record describes one function-wide frame object, the
 plugin marks that alloca with `llvm.stackcoloring.no_merge`. Stack coloring

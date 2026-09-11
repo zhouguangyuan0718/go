@@ -7,7 +7,7 @@ target triple = "aarch64-apple-darwin-goobj"
 ; IR-NOT: @llvm.experimental.gc.relocate
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"(ptr %result)
 ; IR: store %result_storage zeroinitializer, ptr %result, align 8
-; IR: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
+; IR: "deopt"({{.*}}ptr %result{{.*}}i64 25{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
 ; IR-NOT: @llvm.experimental.gc.relocate
 
 ; Goret contents have a forward lifetime: they are inactive before definite
@@ -15,16 +15,16 @@ target triple = "aarch64-apple-darwin-goobj"
 ; IR-LABEL: define goabiinternal {{.*}} @fixed_frame_goret_initialization_interval(
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"gc-live"({{.*}}ptr %result)
 ; IR: store %result_storage zeroinitializer, ptr %result, align 8
-; IR: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"({{.*}}ptr %result)
+; IR: "deopt"({{.*}}ptr %result{{.*}}i64 25{{.*}}i64 5{{.*}}"gc-live"({{.*}}ptr %result)
 ; IR: store ptr %replacement{{.*}}, ptr %result, align 8
-; IR: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
+; IR: "deopt"({{.*}}ptr %result{{.*}}i64 25{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
 ; IR-NOT: %result.relocated = call coldcc ptr @llvm.experimental.gc.relocate
 
 ; A named result observed by defer is exceptional: recovery can resume outside
 ; LLVM's explicit CFG, so its contents remain active for the whole function,
 ; including safepoints before the ordinary goret initialization point.
 ; IR-LABEL: define goabiinternal {{.*}} @fixed_frame_defer_goret_whole_function(
-; IR-COUNT-2: "deopt"({{.*}}ptr %result{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
+; IR-COUNT-2: "deopt"({{.*}}ptr %result{{.*}}i64 25{{.*}}i64 5{{.*}}"gc-live"(ptr %result)
 ; IR-NOT: %result.relocated = call coldcc ptr @llvm.experimental.gc.relocate
 
 ; Byval and goret derived addresses use the same Base+Offset representation as
@@ -45,7 +45,7 @@ target triple = "aarch64-apple-darwin-goobj"
 ; IR: store ptr %replacement{{.*}}, ptr %address.remat
 
 ; IR-LABEL: define goabiinternal void @fixed_frame_byval_contents(
-; IR: "deopt"({{.*}}ptr %input{{.*}}i64 1{{.*}}i64 3{{.*}}i64 5{{.*}}"gc-live"(ptr %input)
+; IR: "deopt"({{.*}}ptr %input{{.*}}i64 25{{.*}}i64 5{{.*}}"gc-live"(ptr %input)
 ; IR: load ptr, ptr %input, align 8
 ; IR-NOT: "deopt"({{.*}}ptr %input
 
@@ -53,13 +53,13 @@ target triple = "aarch64-apple-darwin-goobj"
 ; every path. Both surrounding statepoints therefore retain the byval
 ; contents. The optimized encoding/json/v2 reproducer has this shape.
 ; IR-LABEL: define goabiinternal void @fixed_frame_byval_phi_offsets(
-; IR-COUNT-2: "deopt"({{.*}}ptr %input{{.*}}i64 1{{.*}}i64 4{{.*}}i64 15{{.*}}"gc-live"({{.*}}ptr %input)
+; IR-COUNT-2: "deopt"({{.*}}ptr %input{{.*}}i64 33{{.*}}i64 15{{.*}}"gc-live"({{.*}}ptr %input)
 ; IR-NOT: ; (%input, %input)
 
 ; An offset which cannot be enumerated is also conservative: the store has no
 ; must-def pointer slots, rather than rejecting the function.
 ; IR-LABEL: define goabiinternal void @fixed_frame_byval_unknown_offset(
-; IR-COUNT-2: "deopt"({{.*}}ptr %input{{.*}}i64 1{{.*}}i64 4{{.*}}i64 15{{.*}}"gc-live"({{.*}}ptr %input)
+; IR-COUNT-2: "deopt"({{.*}}ptr %input{{.*}}i64 33{{.*}}i64 15{{.*}}"gc-live"({{.*}}ptr %input)
 ; IR-NOT: ; (%input, %input)
 
 ; MIR-LABEL: name: fixed_frame_goret_base

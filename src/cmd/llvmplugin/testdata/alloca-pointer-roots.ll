@@ -1,17 +1,17 @@
 target triple = "x86_64-unknown-linux-goobj"
 
 ; IR-LABEL: define goabiinternal ptr @pointer_slot(
-; IR: "deopt"(i64 7, i64 1195461697, i64 16, i64 1, i64 1095520067, i64 12, ptr %slot, i64 0, i64 8, i64 8, i64 8, i64 1, i64 1, i64 64, i64 1, i64 1, i64 1095519299, i64 16)
+; IR: "deopt"(i64 7, i64 1195461697, ptr %slot, i64 9, i64 1, i64 1095519299, i64 5)
 ; IR-SAME: "gc-live"(ptr %slot)
 
 ; IR-LABEL: define goabiinternal ptr @nested_whole_aggregate(
-; IR: "deopt"(i64 1195461697, i64 16, i64 1, i64 1095520067, i64 12, ptr %slot, i64 0, i64 48, i64 8, i64 8, i64 1, i64 6, i64 64, i64 1, i64 41, i64 1095519299, i64 16)
+; IR: "deopt"(i64 1195461697, ptr %slot, i64 49, i64 41, i64 1095519299, i64 5)
 
 ; IR-LABEL: define goabiinternal ptr @alloca_call_skip(
-; IR: "deopt"({{.*}}i64 1095520067{{.*}}ptr %slot{{.*}}i64 1095519299
+; IR: "deopt"({{.*}}i64 1195461697{{.*}}ptr %slot{{.*}}i64 1095519299
 
 ; IR-LABEL: define goabiinternal ptr @alloca_multiple_calls(
-; IR-COUNT-2: "deopt"({{.*}}i64 1095520067{{.*}}ptr %slot{{.*}}i64 1095519299
+; IR-COUNT-2: "deopt"({{.*}}i64 1195461697{{.*}}ptr %slot{{.*}}i64 1095519299
 ; IR-NOT: store ptr null
 
 ; IR-LABEL: define goabiinternal ptr @alloca_partial_initialization()
@@ -21,10 +21,10 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: @llvm.experimental.gc.statepoint{{.*}}"deopt"({{.*}}ptr %slot
 
 ; IR-LABEL: define goabiinternal ptr @alloca_loop(
-; IR: "deopt"({{.*}}i64 1095520067{{.*}}ptr %slot{{.*}}i64 1095519299
+; IR: "deopt"({{.*}}i64 1195461697{{.*}}ptr %slot{{.*}}i64 1095519299
 
 ; IR-LABEL: define goabiinternal ptr @alloca_gep_address_across_call(
-; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 16{{.*}}i64 2{{.*}}i64 2{{.*}}i64 1095519299
+; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 17{{.*}}i64 2{{.*}}i64 1095519299
 ; IR: %field.remat = getelementptr i8, ptr %slot, i64 8
 ; IR: %result = load ptr, ptr %field.remat{{[0-9]*}}
 ; IR-NOT: %field.relocated.merge
@@ -68,10 +68,10 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: %pointer.relocated
 
 ; IR-LABEL: define goabiinternal ptr @alloca_high_bitmap_word(
-; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 512{{.*}}i64 64{{.*}}i64 64{{.*}}i64 1{{.*}}i64 -9223372036854775808
+; IR: "deopt"({{.*}}ptr %slot{{.*}}i64 513{{.*}}i64 -9223372036854775808
 
 ; IR-LABEL: define goabiinternal ptr @alloca_multiple_records(
-; IR: "deopt"({{.*}}i64 1, i64 1095520067{{.*}}ptr %left
+; IR: "deopt"({{.*}}i64 1195461697, ptr %left
 
 ; IR-LABEL: define goabiinternal ptr @alloca_select_same_base(
 ; IR: "deopt"({{.*}}ptr %slot{{.*}}"gc-live"(ptr %slot
@@ -83,13 +83,13 @@ target triple = "x86_64-unknown-linux-goobj"
 ; IR: ret void
 
 ; Two write-only intervals need address rematerialization but no content map.
-; MIR-COUNT-29: STATEPOINT{{.*}}1195461697{{.*}}1095520067{{.*}}%{{(fixed-)?}}stack.{{[0-9]+}}
+; MIR-COUNT-29: STATEPOINT{{.*}}1195461697{{.*}}%{{(fixed-)?}}stack.{{[0-9]+}}
 ; MIR-ALL-COUNT-34: STATEPOINT
 
 ; O2-LABEL: define goabiinternal ptr @nested_whole_aggregate(
 ; O2-NOT: alloca %nested
 ; O2-LABEL: define goabiinternal ptr @alloca_call_skip(
-; O2: "deopt"({{.*}}i64 1095520067
+; O2: "deopt"({{.*}}i64 1195461697
 ; O2-LABEL: define goabiinternal void @vardef_zero(
 ; O2-NOT: undef
 ; O2: %[[OFFSET:.*]] = select i1 %nilmap, i64 0, i64 1

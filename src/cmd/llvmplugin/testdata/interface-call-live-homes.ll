@@ -240,10 +240,11 @@ exit:
 
 ; A value may be live through profitable loops on disjoint paths. Each path
 ; needs its own initialized home: an alloca which is merely present in the
-; function-wide frame description has contents-live=0 before its path's
-; preheader store. Its address may still be a gc-live operand for fixed-frame
-; rematerialization, but its uninitialized contents do not contribute GC
-; roots. Do not choose just one sibling based on its static call count.
+; function-wide frame description has its encoded liveness bit clear before
+; that path's preheader store. Its address may still be a gc-live operand for
+; fixed-frame rematerialization, but its uninitialized contents do not
+; contribute GC roots. Do not choose just one sibling based on its static call
+; count.
 ;
 ; IR-LABEL: define goabiinternal i64 @disjoint_passive_pointer_interface_call_loops(
 ; IR-DAG: %[[PRESERVED_HOME:preserved\.statepoint\.home]] = alloca ptr
@@ -526,13 +527,13 @@ exit:
 ; IR: br label %inner
 ; IR-LABEL: inner:
 ; IR: @llvm.experimental.gc.statepoint
-; IR-SAME: "deopt"({{.*}}i64 1095520067, i64 12, ptr %preserved.statepoint.home, i64 0, i64 8, i64 8, i64 8, i64 1, i64 1, i64 64, i64 1, i64 1
+; IR-SAME: "deopt"({{.*}}ptr %preserved.statepoint.home, i64 9, i64 1
 ; IR-SAME: "gc-live"({{.*}}ptr %preserved.statepoint.home
 ; IR: @llvm.experimental.gc.statepoint
-; IR-SAME: "deopt"({{.*}}i64 1095520067, i64 12, ptr %preserved.statepoint.home, i64 0, i64 8, i64 8, i64 8, i64 1, i64 1, i64 64, i64 1, i64 1
+; IR-SAME: "deopt"({{.*}}ptr %preserved.statepoint.home, i64 9, i64 1
 ; IR-SAME: "gc-live"({{.*}}ptr %preserved.statepoint.home
 ; IR: @llvm.experimental.gc.statepoint
-; IR-SAME: "deopt"({{.*}}i64 1095520067, i64 12, ptr %preserved.statepoint.home, i64 0, i64 8, i64 8, i64 8, i64 1, i64 1, i64 64, i64 1, i64 1
+; IR-SAME: "deopt"({{.*}}ptr %preserved.statepoint.home, i64 9, i64 1
 ; IR-SAME: "gc-live"({{.*}}ptr %preserved.statepoint.home
 ; IR-NOT: %preserved.relocated
 ; IR: %preserved.statepoint.reload = load volatile ptr, ptr %preserved.statepoint.home
