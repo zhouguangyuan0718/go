@@ -1440,11 +1440,32 @@ if(BUILD_TESTING)
     ERROR
   )
 
-  goallc_add_failure_filecheck_test(
-    GoALLCStatepoints.PointerVectorAllocaFails
-    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-vector-unsupported.ll"
-    ERROR
+  goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.PointerVectorAllocaSupported
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-vector.ll"
+    IR
   )
+  add_test(
+    NAME GoALLCStatepoints.PointerVectorAllocaGoObj
+    COMMAND "${GOALLC_LLC_EXECUTABLE}"
+      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+      -verify-machineinstrs -filetype=obj
+      -o "${CMAKE_CURRENT_BINARY_DIR}/alloca-pointer-vector.goobj"
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-vector.ll"
+  )
+  if(GOALLC_OBJVIEW_EXECUTABLE)
+    goallc_add_filecheck_test(
+      GoALLCStatepoints.PointerVectorAllocaObjView
+      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/alloca-pointer-vector.ll"
+      OBJVIEW
+      "${GOALLC_OBJVIEW_EXECUTABLE}" -json
+      "${CMAKE_CURRENT_BINARY_DIR}/alloca-pointer-vector.goobj"
+    )
+    set_tests_properties(
+      GoALLCStatepoints.PointerVectorAllocaObjView PROPERTIES
+      DEPENDS GoALLCStatepoints.PointerVectorAllocaGoObj
+    )
+  endif()
 
   goallc_add_ir_filecheck_test(
     GoALLCStatepoints.PointerAllocaLifetimeSupported

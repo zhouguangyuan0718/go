@@ -124,6 +124,7 @@ struct PointerFrameLeaf {
   SmallVector<unsigned, 4> Indices;
   uint64_t Offset;
   PointerType *Type;
+  bool IsVectorElement;
 };
 
 struct PointerFrameLayout {
@@ -2573,10 +2574,39 @@ Error enumeratePointerFrameLeaves(Type *Ty, const DataLayout &DL,
     }
     return Error::success();
   }
-  if (Ty->isVectorTy() && containsPointer(Ty))
-    return createStringError(
-        std::errc::not_supported,
-        "GoALLC statepoints do not support pointer vectors in allocas");
+  if (auto *VT = dyn_cast<VectorType>(Ty)) {
+    if (!containsPointer(VT))
+      return Error::success();
+    auto *FVT = dyn_cast<FixedVectorType>(VT);
+    auto *ElementTy = dyn_cast<PointerType>(VT->getElementType());
+    if (!FVT || !ElementTy)
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC statepoints require fixed pointer vectors in allocas");
+    TypeSize ElementSize = DL.getTypeStoreSize(ElementTy);
+    if (ElementTy->getAddressSpace() != 0 || ElementSize.isScalable() ||
+        ElementSize.getFixedValue() != DL.getPointerSize(0))
+      return createStringError(
+          std::errc::not_supported,
+          "GoALLC statepoints require default-address-space pointer words in "
+          "allocas");
+    for (unsigned Index = 0; Index != FVT->getNumElements(); ++Index) {
+      auto RelativeOffset = checkedMulUnsigned(static_cast<uint64_t>(Index),
+                                               ElementSize.getFixedValue());
+      auto ElementOffset = RelativeOffset
+                               ? checkedAddUnsigned(Offset, *RelativeOffset)
+                               : std::optional<uint64_t>();
+      if (!ElementOffset)
+        return createStringError(
+            std::errc::value_too_large,
+            "GoALLC statepoint alloca pointer offset overflow");
+      Path.push_back(Index);
+      Leaves.push_back({SmallVector<unsigned, 4>(ArrayRef<unsigned>(Path)),
+                        *ElementOffset, ElementTy, true});
+      Path.pop_back();
+    }
+    return Error::success();
+  }
   if (auto *PointerTy = dyn_cast<PointerType>(Ty)) {
     TypeSize PointerSize = DL.getTypeStoreSize(PointerTy);
     if (PointerTy->getAddressSpace() != 0 || PointerSize.isScalable() ||
@@ -2586,7 +2616,7 @@ Error enumeratePointerFrameLeaves(Type *Ty, const DataLayout &DL,
           "GoALLC statepoints require default-address-space pointer words in "
           "allocas");
     Leaves.push_back({SmallVector<unsigned, 4>(ArrayRef<unsigned>(Path)),
-                      Offset, PointerTy});
+                      Offset, PointerTy, false});
   }
   return Error::success();
 }
@@ -2613,9 +2643,14 @@ pointerFrameLayout(Type *StorageType, Align Alignment, const DataLayout &DL,
 
   uint64_t ByteSize = AllocationSize.getFixedValue();
   uint64_t PointerSize = DL.getPointerSize(0);
+  // The alloca pointer map describes word slots. An explicitly under-aligned
+  // vector is valid as long as each pointer word remains naturally aligned.
+  // Fixed arguments retain their ABI layout requirement.
+  Align RequiredAlignment =
+      IsAlloca ? DL.getPointerABIAlignment(0) : DL.getABITypeAlign(StorageType);
   bool InvalidLayout = !PointerSize || !ByteSize ||
                        ByteSize % PointerSize != 0 ||
-                       Alignment < DL.getABITypeAlign(StorageType);
+                       Alignment < RequiredAlignment;
   auto LayoutError = [&]() {
     return createStringError(
         std::errc::not_supported,
@@ -3212,6 +3247,33 @@ void updateInitializedPointerSlots(SmallBitVector &Initialized,
   }
 }
 
+Value *findStoredPointerLeaf(Value *StoredValue, const PointerFrameLeaf &Leaf) {
+  if (!Leaf.IsVectorElement)
+    return FindInsertedValue(StoredValue, Leaf.Indices);
+
+  assert(!Leaf.Indices.empty() && "vector leaf must have an element index");
+  ArrayRef<unsigned> AggregateIndices(Leaf.Indices);
+  unsigned ElementIndex = AggregateIndices.back();
+  AggregateIndices = AggregateIndices.drop_back();
+  Value *VectorValue = AggregateIndices.empty()
+                           ? StoredValue
+                           : FindInsertedValue(StoredValue, AggregateIndices);
+  if (!VectorValue)
+    return nullptr;
+
+  while (auto *Insert = dyn_cast<InsertElementInst>(VectorValue)) {
+    auto *Index = dyn_cast<ConstantInt>(Insert->getOperand(2));
+    if (!Index)
+      return nullptr;
+    if (Index->getZExtValue() == ElementIndex)
+      return Insert->getOperand(1);
+    VectorValue = Insert->getOperand(0);
+  }
+  if (auto *C = dyn_cast<Constant>(VectorValue))
+    return C->getAggregateElement(ElementIndex);
+  return nullptr;
+}
+
 bool hasInitializedPointerSlotsBeforeSafepoint(
     Instruction *Begin, const PointerAllocaRecord &Record,
     const DataLayout &DL) {
@@ -3242,7 +3304,7 @@ bool hasInitializedPointerSlotsBeforeSafepoint(
           consumeError(std::move(Err));
         } else {
           for (const PointerFrameLeaf &Leaf : StoredLeaves) {
-            Value *LeafValue = FindInsertedValue(StoredValue, Leaf.Indices);
+            Value *LeafValue = findStoredPointerLeaf(StoredValue, Leaf);
             // A non-constant aggregate SSA value is defined by the Go value
             // model even when FindInsertedValue cannot recover an individual
             // leaf. Explicit undef/poison construction remains uninitialized.
