@@ -2110,50 +2110,6 @@ func TestLLVMBaselineTargetFeatures(t *testing.T) {
 	}
 }
 
-func TestLLVMRequiredCPUProfiles(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		arch          string
-		goamd64       int
-		baselineLevel int
-		profile       string
-		want          string
-	}{
-		{"arm64-round", "arm64", 1, 2, goCPUProfileX86SSE41, ""},
-		{"v1-round", "amd64", 1, 2, goCPUProfileX86SSE41, goCPUProfileX86SSE41},
-		{"v2-round", "amd64", 2, 2, goCPUProfileX86SSE41, ""},
-		{"v1-fma", "amd64", 1, 3, goCPUProfileX86FMA, goCPUProfileX86FMA},
-		{"v2-fma", "amd64", 2, 3, goCPUProfileX86FMA, goCPUProfileX86FMA},
-		{"v3-fma", "amd64", 3, 3, goCPUProfileX86FMA, ""},
-		{"v4-fma", "amd64", 4, 3, goCPUProfileX86FMA, ""},
-		{"v1-popcnt", "amd64", 1, 2, goCPUProfileX86POPCNT, goCPUProfileX86POPCNT},
-		{"v2-popcnt", "amd64", 2, 2, goCPUProfileX86POPCNT, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := llvmRequiredAMD64CPUProfile(test.arch, test.goamd64, test.baselineLevel, test.profile); got != test.want {
-				t.Fatalf("llvmRequiredAMD64CPUProfile(%q, %d, %d, %q) = %q, want %q", test.arch, test.goamd64, test.baselineLevel, test.profile, got, test.want)
-			}
-		})
-	}
-
-	for _, test := range []struct {
-		name               string
-		arch               string
-		baselineHasFeature bool
-		want               string
-	}{
-		{"amd64", "amd64", false, ""},
-		{"arm64-v8.0", "arm64", false, goCPUProfileARM64LSE},
-		{"arm64-lse", "arm64", true, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := llvmRequiredARM64CPUProfile(test.arch, test.baselineHasFeature, goCPUProfileARM64LSE); got != test.want {
-				t.Fatalf("llvmRequiredARM64CPUProfile(%q, %t, %q) = %q, want %q", test.arch, test.baselineHasFeature, goCPUProfileARM64LSE, got, test.want)
-			}
-		})
-	}
-}
-
 func TestLLVMRuntimeGorecoverUsesLinkSymbolName(t *testing.T) {
 	recoverFn := &Func{
 		Name:   "gorecover",

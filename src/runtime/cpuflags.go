@@ -55,20 +55,3 @@ var (
 
 	riscv64HasZbb bool
 )
-
-const (
-	goallcCPUFeatureSSE3 uint64 = 1 << iota
-	goallcCPUFeatureSSSE3
-	goallcCPUFeatureSSE41
-	goallcCPUFeatureSSE42
-	goallcCPUFeatureAVX
-	goallcCPUFeatureFMA
-	goallcCPUFeaturesInitialized
-	goallcCPUFeaturePOPCNT
-	goallcCPUFeatureARM64LSE
-	goallcCPUFeatureAVX2
-	goallcCPUFeatureAVX512
-	goallcCPUFeatureAVX512BITALG
-	goallcCPUFeatureAVX512VPOPCNTDQ
-	goallcCPUFeatureAVX512VBMI
-)

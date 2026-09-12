@@ -34,30 +34,6 @@ func goALLCPointerString[T ~int | ~string](p *T) string {
 	return fmt.Sprint(*p)
 }
 
-func goALLCCPUProfile(arch, feature string) string {
-	if arch != "amd64" {
-		return ""
-	}
-	switch {
-	case feature == "AVX512BITALG":
-		return "x86.avx512bitalg"
-	case feature == "AVX512VBMI":
-		return "x86.avx512vbmi"
-	case feature == "AVX512VPOPCNTDQ":
-		return "x86.avx512vpopcntdq"
-	case strings.HasPrefix(feature, "AVX512"):
-		return "x86.avx512"
-	case feature == "AVX2" || feature == "AVXVNNI":
-		return "x86.avx2"
-	case feature == "FMA":
-		return "x86.fma"
-	case feature == "AVX" || feature == "AVXAES" || feature == "VAES":
-		return "x86.avx"
-	default:
-		return ""
-	}
-}
-
 var goALLCVectorTypeRE = regexp.MustCompile(`^(Int|Uint|Float)(8|16|32|64)x([0-9]+)$`)
 var goALLCScalarTypeRE = regexp.MustCompile(`^(int|uint|float)(8|16|32|64)$`)
 

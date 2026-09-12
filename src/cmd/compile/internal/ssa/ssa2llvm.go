@@ -38,10 +38,7 @@ type LLVMFuncContext struct {
 	OpenDeferBits       llvmLocalKey
 	HasOpenDeferBits    bool
 	OpenDeferSlots      map[llvmLocalKey]int
-	CPUFeatureProfiles  map[string]bool
-	CPUFeatureGuards    map[string][]llvm.Value
-	CPUFeatureFloor     string
-	WideCallCPUFeatures map[ID]llvmWideVectorCallRequirement
+	CPUFeatures         *llvmCPUFeaturePlan
 	F                   *Func
 	LF                  llvm.Value
 	DISubprogram        llvm.Metadata
@@ -115,19 +112,6 @@ const goCPUGuardMD = "goallc.cpu.guard"
 const goCPURequiresMD = "goallc.cpu.requires"
 const goCPUMultiversionAttr = "goallc.cpu.multiversion"
 const goCPUFeatureFloorAttr = "goallc.cpu.feature-floor"
-
-const (
-	goCPUProfileX86AVX             = "x86.avx"
-	goCPUProfileX86AVX2            = "x86.avx2"
-	goCPUProfileX86AVX512          = "x86.avx512"
-	goCPUProfileX86AVX512BITALG    = "x86.avx512bitalg"
-	goCPUProfileX86AVX512VPOPCNTDQ = "x86.avx512vpopcntdq"
-	goCPUProfileX86AVX512VBMI      = "x86.avx512vbmi"
-	goCPUProfileX86FMA             = "x86.fma"
-	goCPUProfileX86SSE41           = "x86.sse41"
-	goCPUProfileX86POPCNT          = "x86.popcnt"
-	goCPUProfileARM64LSE           = "arm64.lse"
-)
 
 // Keep fixed-size memmoves within the store expansion limits of the supported
 // LLVM targets. Larger moves must use runtime.memmove rather than a libc symbol,
@@ -618,513 +602,14 @@ func (lfc *LLVMFuncContext) llvmTernaryIntrinsic(v *Value, name string) llvm.Val
 
 func (lfc *LLVMFuncContext) llvmRoundIntrinsic(v *Value, genericName string) llvm.Value {
 	result := lfc.llvmUnaryIntrinsic(v, genericName)
-	if profile := llvmRequiredAMD64CPUProfile(lfc.F.Config.arch, buildcfg.GOAMD64, 2, goCPUProfileX86SSE41); profile != "" {
-		lfc.requireCPUFeature(result, profile)
-	}
+	lfc.requireCPUFeature(v, result)
 	return result
 }
 
 func (lfc *LLVMFuncContext) llvmFMA(v *Value) llvm.Value {
 	result := lfc.llvmTernaryIntrinsic(v, "llvm.fma.f64")
-	if profile := llvmRequiredAMD64CPUProfile(lfc.F.Config.arch, buildcfg.GOAMD64, 3, goCPUProfileX86FMA); profile != "" {
-		lfc.requireCPUFeature(result, profile)
-	}
+	lfc.requireCPUFeature(v, result)
 	return result
-}
-
-func llvmRequiredAMD64CPUProfile(arch string, goamd64, baselineLevel int, profile string) string {
-	if arch != "amd64" || goamd64 >= baselineLevel {
-		return ""
-	}
-	return profile
-}
-
-func llvmRequiredARM64CPUProfile(arch string, baselineHasFeature bool, profile string) string {
-	if arch != "arm64" || baselineHasFeature {
-		return ""
-	}
-	return profile
-}
-
-func llvmFunctionName(f *Func) string {
-	name := f.Name
-	if f.OwnAux != nil && f.OwnAux.Fn != nil {
-		name = f.OwnAux.Fn.Name
-	}
-	return name
-}
-
-func llvmMidwaySIMDFeatureFloor(f *Func) (string, bool) {
-	switch name := llvmFunctionName(f); {
-	case strings.Contains(name, "@simd512"):
-		return goCPUProfileX86AVX512, true
-	case strings.Contains(name, "@simd256"):
-		return goCPUProfileX86AVX2, true
-	case strings.Contains(name, "@simd128"):
-		return goCPUProfileX86AVX, true
-	case strings.Contains(name, "@simd0"):
-		return "", true
-	}
-	return "", false
-}
-
-// llvmSIMDFeatureFloor returns the function-wide target features established
-// by Go's SSA CPU-feature analysis in the entry block or by a Midway variant's
-// selected width. The generic Vec256 ABI itself needs AVX, while @simd256 is
-// reached only after the portable dispatcher has observed HasAVX2; keep those
-// two contracts distinct. This is a precondition, not a new runtime dispatch
-// request: the shared early CPU-feature pass consumes the attribute and adds
-// the target feature.
-func llvmSIMDFeatureFloor(f *Func) string {
-	if f.Config.arch != "amd64" {
-		return ""
-	}
-	if floor, midway := llvmMidwaySIMDFeatureFloor(f); midway {
-		return floor
-	}
-	features := CPUNone
-	if f.Entry != nil {
-		features = f.Entry.CPUfeatures
-	}
-	switch {
-	case features.hasFeature(CPUavx512):
-		return goCPUProfileX86AVX512
-	case features.hasFeature(CPUavx2):
-		return goCPUProfileX86AVX2
-	case features.hasFeature(CPUavx):
-		return goCPUProfileX86AVX
-	}
-	return ""
-}
-
-func llvmCPUProfileCoveredByFloor(required, floor string) bool {
-	if required == "" || required == floor {
-		return true
-	}
-	switch floor {
-	case goCPUProfileX86AVX2:
-		return required == goCPUProfileX86AVX
-	case goCPUProfileX86AVX512:
-		return required == goCPUProfileX86AVX || required == goCPUProfileX86AVX2
-	}
-	return false
-}
-
-// llvmWideVectorTypeWidth returns the widest fixed SIMD vector nested directly
-// in a Go ABI value. Pointers deliberately stop the walk: their referents do
-// not cross the call boundary in vector registers.
-func llvmWideVectorTypeWidth(t *types.Type) int64 {
-	if t == nil {
-		return 0
-	}
-	if t.IsSIMD() {
-		return t.Size()
-	}
-	switch {
-	case t.IsArray():
-		return llvmWideVectorTypeWidth(t.Elem())
-	case t.IsStruct():
-		var width int64
-		for _, field := range t.Fields() {
-			if candidate := llvmWideVectorTypeWidth(field.Type); candidate > width {
-				width = candidate
-			}
-		}
-		return width
-	}
-	return 0
-}
-
-// llvmWideVectorCallWidth reports wide vectors that the Go ABI assigns to
-// registers for this call. Stack-only byval arguments and result homes are not
-// LLVM register-ABI carriers and therefore need no caller target feature.
-func llvmWideVectorCallWidth(aux *AuxCall) int64 {
-	var width int64
-	for i := int64(0); i < aux.NArgs(); i++ {
-		if len(aux.RegsOfArg(i)) == 0 {
-			continue
-		}
-		if candidate := llvmWideVectorTypeWidth(aux.TypeOfArg(i)); candidate > width {
-			width = candidate
-		}
-	}
-	for i := int64(0); i < aux.NResults(); i++ {
-		if len(aux.RegsOfResult(i)) == 0 {
-			continue
-		}
-		if candidate := llvmWideVectorTypeWidth(aux.TypeOfResult(i)); candidate > width {
-			width = candidate
-		}
-	}
-	return width
-}
-
-func llvmWideVectorCPUProfile(width int64) string {
-	switch {
-	case width > 32:
-		return goCPUProfileX86AVX512
-	case width > 16:
-		return goCPUProfileX86AVX
-	}
-	return ""
-}
-
-func llvmCPUProfileSupplies(profile, required string) bool {
-	if llvmCPUProfileCoveredByFloor(required, profile) {
-		return true
-	}
-	switch profile {
-	case goCPUProfileX86AVX512BITALG, goCPUProfileX86AVX512VPOPCNTDQ, goCPUProfileX86AVX512VBMI:
-		return required == goCPUProfileX86AVX || required == goCPUProfileX86AVX2 || required == goCPUProfileX86AVX512
-	}
-	return false
-}
-
-// llvmX86CPUFeatureGuard recognizes which successor of an ordinary
-// internal/cpu.X86 feature test has the feature enabled. This mirrors the
-// source shape accepted by the native cpufeatures pass without changing that
-// pass or making fixed-width archsimd participate in Midway rewriting.
-func llvmX86CPUFeatureGuard(b *Block) (profile string, enabled int) {
-	if b.Kind != BlockIf || b.Controls[0] == nil || b.Controls[1] != nil || len(b.Succs) != 2 {
-		return "", -1
-	}
-	condition := b.Controls[0]
-	taken := 0
-	if condition.Op == OpNot {
-		if len(condition.Args) != 1 {
-			return "", -1
-		}
-		taken = 1
-		condition = condition.Args[0]
-	}
-	profile = llvmX86CPUFeatureProfile(llvmX86CPUFeatureField(condition))
-	if profile == "" {
-		return "", -1
-	}
-	return profile, taken
-}
-
-// llvmCPUFeatureGuardProfiles finds effective predicates that protect every
-// path to v. Keep the nearest single dominating guard when possible, avoiding
-// extra clones for redundant outer conditions. A successor block alone is not
-// enough: another incoming edge could bypass the enabled guard edge.
-func llvmCPUFeatureGuardProfiles(f *Func, v *Value, required string) []string {
-	sdom := f.Sdom()
-	for b := sdom.Parent(v.Block); b != nil; b = sdom.Parent(b) {
-		profile, taken := llvmX86CPUFeatureGuard(b)
-		if taken < 0 || !llvmCPUProfileSupplies(profile, required) {
-			continue
-		}
-		enabled := b.Succs[taken].Block()
-		if enabled == f.Entry || !sdom.IsAncestorEq(enabled, v.Block) {
-			continue
-		}
-		dominates := true
-		for _, pred := range enabled.Preds {
-			if pred.Block() == b && pred.Index() == taken {
-				continue
-			}
-			// Backedges do not provide a new entry to the guarded region.
-			if !sdom.IsAncestorEq(enabled, pred.Block()) {
-				dominates = false
-				break
-			}
-		}
-		if dominates {
-			return []string{profile}
-		}
-	}
-
-	// Cut each backwards path at an enabled edge supplying the requirement.
-	// Reaching entry means some path is unguarded. Visited blocks also bound
-	// traversal through loops, whose first entry must still cross the cut.
-	seen := make(map[*Block]bool)
-	profiles := make(map[string]bool)
-	work := []*Block{v.Block}
-	for len(work) != 0 {
-		b := work[len(work)-1]
-		work = work[:len(work)-1]
-		if b == f.Entry {
-			return nil
-		}
-		if seen[b] {
-			continue
-		}
-		seen[b] = true
-		for _, pred := range b.Preds {
-			profile, taken := llvmX86CPUFeatureGuard(pred.Block())
-			if taken == pred.Index() && llvmCPUProfileSupplies(profile, required) {
-				profiles[profile] = true
-				continue
-			}
-			work = append(work, pred.Block())
-		}
-	}
-	var guards []string
-	for profile := range profiles {
-		guards = append(guards, profile)
-	}
-	slices.Sort(guards)
-	return guards
-}
-
-func llvmCallAux(v *Value) *AuxCall {
-	switch v.Op {
-	case OpStaticCall, OpStaticLECall, OpTailLECall,
-		OpClosureCall, OpClosureLECall,
-		OpInterCall, OpInterLECall, OpTailLECallInter:
-		return auxToCall(v.Aux)
-	}
-	return nil
-}
-
-type llvmWideVectorCallRequirement struct {
-	call     *Value
-	required string
-	guards   []string
-}
-
-// llvmPlanWideVectorCalls applies the same boundary principle as Midway: a
-// function whose own ABI already establishes a vector-width floor keeps that
-// floor, while a clean-signature caller becomes the dispatch boundary. Calls
-// beneath a matching explicit CPU guard request early LLVM FMV; an unguarded
-// fixed-width call instead raises the function floor, matching native Go's
-// contract that executing fixed-width archsimd requires suitable hardware.
-//
-// Plan the whole function before emitting any instruction so a later
-// unguarded call cannot make earlier decisions depend on block order.
-func llvmPlanWideVectorCalls(f *Func) (floor string, profiles map[ID]llvmWideVectorCallRequirement) {
-	floor = llvmSIMDFeatureFloor(f)
-	if f.Config.arch != "amd64" {
-		return floor, nil
-	}
-
-	var requirements []llvmWideVectorCallRequirement
-	for _, b := range f.Blocks {
-		for _, v := range b.Values {
-			aux := llvmCallAux(v)
-			if aux == nil {
-				continue
-			}
-			required := llvmWideVectorCPUProfile(llvmWideVectorCallWidth(aux))
-			if required == "" || llvmCPUProfileCoveredByBaseline(f.Config.arch, required) || llvmCPUProfileCoveredByFloor(required, floor) {
-				continue
-			}
-			guards := llvmCPUFeatureGuardProfiles(f, v, required)
-			requirements = append(requirements, llvmWideVectorCallRequirement{
-				call:     v,
-				required: required,
-				guards:   guards,
-			})
-		}
-	}
-
-	for _, requirement := range requirements {
-		if len(requirement.guards) == 0 && !llvmCPUProfileCoveredByFloor(requirement.required, floor) {
-			floor = requirement.required
-		}
-	}
-	for _, requirement := range requirements {
-		if len(requirement.guards) == 0 || llvmCPUProfileCoveredByFloor(requirement.required, floor) {
-			continue
-		}
-		if profiles == nil {
-			profiles = make(map[ID]llvmWideVectorCallRequirement)
-		}
-		profiles[requirement.call.ID] = requirement
-	}
-	return floor, profiles
-}
-
-func llvmCPUProfileCoveredByBaseline(arch, profile string) bool {
-	switch arch {
-	case "amd64":
-		level := 0
-		switch profile {
-		case goCPUProfileX86SSE41, goCPUProfileX86POPCNT:
-			level = 2
-		case goCPUProfileX86AVX, goCPUProfileX86AVX2, goCPUProfileX86FMA:
-			level = 3
-		case goCPUProfileX86AVX512:
-			level = 4
-		}
-		return level != 0 && buildcfg.GOAMD64 >= level
-	case "arm64":
-		return profile == goCPUProfileARM64LSE && buildcfg.GOARM64.LSE
-	}
-	return profile == ""
-}
-
-func (lfc *LLVMFuncContext) requireCPUFeature(instruction llvm.Value, profile string) {
-	lfc.requireCPUFeatureWithGuards(instruction, profile, profile)
-}
-
-// Keep the instruction requirement distinct from the effective runtime guard.
-// A stronger guard can supply the required instructions without making the
-// lower feature's independently controllable Go boolean true.
-func (lfc *LLVMFuncContext) requireCPUFeatureWithGuards(instruction llvm.Value, profile string, guards ...string) {
-	instruction.SetMetadata(GlobalCtxt.MDKindID(goCPURequiresMD), GlobalCtxt.MDNode([]llvm.Metadata{
-		GlobalCtxt.MDString(profile),
-	}))
-	// Materialize the canonical GoObj declaration while the frontend still has
-	// the imported LSym identity. The early C++ pass turns it into a real load
-	// before normal LLVM optimization can discard the unused declaration.
-	llvmGoDataRef(ir.Syms.GoALLCCPUFeatures)
-	if lfc.CPUFeatureProfiles == nil {
-		lfc.CPUFeatureProfiles = make(map[string]bool)
-	}
-	for _, guard := range guards {
-		lfc.CPUFeatureProfiles[guard] = true
-	}
-	profiles := make([]string, 0, 10)
-	for _, candidate := range []string{
-		goCPUProfileX86FMA,
-		goCPUProfileX86SSE41,
-		goCPUProfileX86POPCNT,
-		goCPUProfileX86AVX,
-		goCPUProfileX86AVX2,
-		goCPUProfileX86AVX512,
-		goCPUProfileX86AVX512BITALG,
-		goCPUProfileX86AVX512VPOPCNTDQ,
-		goCPUProfileARM64LSE,
-		goCPUProfileX86AVX512VBMI,
-	} {
-		if lfc.CPUFeatureProfiles[candidate] {
-			profiles = append(profiles, candidate)
-		}
-	}
-	lfc.LF.AddTargetDependentFunctionAttr(goCPUMultiversionAttr, strings.Join(profiles, ","))
-}
-
-func llvmX86CPUFeatureProfile(field string) string {
-	switch field {
-	case "HasAVX":
-		return goCPUProfileX86AVX
-	case "HasAVX2":
-		return goCPUProfileX86AVX2
-	case "HasAVX512":
-		return goCPUProfileX86AVX512
-	case "HasAVX512BITALG":
-		return goCPUProfileX86AVX512BITALG
-	case "HasAVX512VPOPCNTDQ":
-		return goCPUProfileX86AVX512VPOPCNTDQ
-	case "HasAVX512VBMI":
-		return goCPUProfileX86AVX512VBMI
-	case "HasFMA":
-		return goCPUProfileX86FMA
-	case "HasSSE41":
-		return goCPUProfileX86SSE41
-	case "HasPOPCNT":
-		return goCPUProfileX86POPCNT
-	}
-	return ""
-}
-
-// llvmX86CPUFeatureField recognizes the ordinary internal/cpu.X86 field load
-// used by archsimd feature checks. Keep this LLVM-only matching separate from
-// the native SSA CPU-feature analysis.
-func llvmX86CPUFeatureField(v *Value) string {
-	if v.Op != OpLoad || len(v.Args) == 0 {
-		return ""
-	}
-	offPtr := v.Args[0]
-	if offPtr.Op != OpOffPtr || len(offPtr.Args) == 0 {
-		return ""
-	}
-	addr := offPtr.Args[0]
-	if addr.Op != OpAddr || len(addr.Args) == 0 || addr.Args[0].Op != OpSB {
-		return ""
-	}
-	sym, ok := addr.Aux.(*obj.LSym)
-	if !ok || sym.Name != "internal/cpu.X86" {
-		return ""
-	}
-	t := addr.Type
-	if !t.IsPtr() {
-		v.Fatalf("The symbol %s is not a pointer, found %v instead", sym.Name, t)
-	}
-	t = t.Elem()
-	if !t.IsStruct() {
-		v.Fatalf("The referent of symbol %s is not a struct, found %v instead", sym.Name, t)
-	}
-	for _, field := range t.Fields() {
-		if offPtr.AuxInt == field.Offset && field.Sym != nil {
-			return field.Sym.Name
-		}
-	}
-	return ""
-}
-
-func (lfc *LLVMFuncContext) recordCPUFeatureGuard(v *Value, load llvm.Value) {
-	if lfc.F.Config.arch != "amd64" {
-		return
-	}
-	field := llvmX86CPUFeatureField(v)
-	if profile := llvmX86CPUFeatureProfile(field); profile != "" {
-		if lfc.CPUFeatureGuards == nil {
-			lfc.CPUFeatureGuards = make(map[string][]llvm.Value)
-		}
-		lfc.CPUFeatureGuards[profile] = append(lfc.CPUFeatureGuards[profile], load)
-	}
-}
-
-func (lfc *LLVMFuncContext) markCPUFeatureGuards() {
-	kind := GlobalCtxt.MDKindID(goCPUGuardMD)
-	for profile := range lfc.CPUFeatureProfiles {
-		metadata := GlobalCtxt.MDNode([]llvm.Metadata{GlobalCtxt.MDString(profile)})
-		for _, load := range lfc.CPUFeatureGuards[profile] {
-			load.SetMetadata(kind, metadata)
-		}
-	}
-}
-
-func (lfc *LLVMFuncContext) requireGeneratedSIMDCPUFeature(v *Value, instruction llvm.Value, info goALLCSIMDOpInfo) {
-	arch := lfc.F.Config.arch
-	profile := info.archInfo(arch).cpuProfile
-	if profile == "" || llvmCPUProfileCoveredByBaseline(arch, profile) {
-		return
-	}
-	floor := lfc.CPUFeatureFloor
-	if floor == "" {
-		// Unit tests and a few compiler helpers build an LLVMFuncContext
-		// directly instead of going through LLVMCompile.
-		floor = llvmSIMDFeatureFloor(lfc.F)
-	}
-	if llvmCPUProfileCoveredByFloor(profile, floor) {
-		return
-	}
-	// A Midway width floor and an optional instruction feature are separate
-	// contracts. Let the shared FMV pass specialize a matching explicit guard
-	// inside the selected width. Its baseline-clone requirement verifier rejects
-	// an unguarded instruction, so exceeding the floor cannot silently make the
-	// Midway variant unsafe.
-	guards := llvmCPUFeatureGuardProfiles(lfc.F, v, profile)
-	if len(guards) == 0 {
-		// Preserve fail-closed validation for an unguarded operation.
-		guards = []string{profile}
-	}
-	lfc.requireCPUFeatureWithGuards(instruction, profile, guards...)
-}
-
-func (lfc *LLVMFuncContext) requireWideVectorCallCPUFeature(v *Value, call llvm.Value) {
-	if requirement, ok := lfc.WideCallCPUFeatures[v.ID]; ok {
-		lfc.requireCPUFeatureWithGuards(call, requirement.required, requirement.guards...)
-	}
-}
-
-func (lfc *LLVMFuncContext) requireARM64LSE(v *Value, instruction llvm.Value) {
-	if llvmRequiredARM64CPUProfile(lfc.F.Config.arch, buildcfg.GOARM64.LSE, goCPUProfileARM64LSE) == "" {
-		return
-	}
-	switch v.Op {
-	case OpAtomicStore8Variant, OpAtomicStore32Variant, OpAtomicStore64Variant,
-		OpAtomicAdd32Variant, OpAtomicAdd64Variant,
-		OpAtomicExchange8Variant, OpAtomicExchange32Variant, OpAtomicExchange64Variant,
-		OpAtomicAnd64valueVariant, OpAtomicAnd32valueVariant, OpAtomicAnd8valueVariant,
-		OpAtomicOr64valueVariant, OpAtomicOr32valueVariant, OpAtomicOr8valueVariant,
-		OpAtomicCompareAndSwap32Variant, OpAtomicCompareAndSwap64Variant:
-		lfc.requireCPUFeature(instruction, goCPUProfileARM64LSE)
-	}
 }
 
 // llvmContractionMul recognizes a product that the native target rules may
@@ -1539,9 +1024,7 @@ func (lfc *LLVMFuncContext) populationCount(v *Value) llvm.Value {
 	sig := llvm.FunctionType(x.Type(), []llvm.Type{x.Type()}, false)
 	fn := getOrInsertLLVMIntrinsic("llvm.ctpop.i"+fmt.Sprint(bits), sig)
 	count := lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String()+".count")
-	if profile := llvmRequiredAMD64CPUProfile(lfc.F.Config.arch, buildcfg.GOAMD64, 2, goCPUProfileX86POPCNT); profile != "" {
-		lfc.requireCPUFeature(count, profile)
-	}
+	lfc.requireCPUFeature(v, count)
 	want := getLLVMType(v.Type)
 	if want.TypeKind() != llvm.IntegerTypeKind {
 		v.Fatalf("%s has a non-integer LLVM result", v.Op)
@@ -2473,7 +1956,7 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 	laneBits := int(info.laneBits)
 	isFloat := info.lane == goALLCSIMDLaneFloat
 	finish := func(result llvm.Value) (llvm.Value, bool) {
-		lfc.requireGeneratedSIMDCPUFeature(v, result, info)
+		lfc.requireCPUFeature(v, result)
 		return result, true
 	}
 
@@ -3784,7 +3267,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	call := lfc.b.CreateCall(sig.Type, fn, args, name)
 	call.SetInstructionCallConv(cc)
 	configureLLVMCall(call, sig)
-	lfc.requireWideVectorCallCPUFeature(v, call)
+	lfc.requireCPUFeature(v, call)
 	lfc.materializeAddressedResults(v, call, aux)
 	if llvmGCLeaf {
 		markLLVMGCLeafCall(call)
@@ -3851,7 +3334,7 @@ func (lfc *LLVMFuncContext) indirectCall(v *Value, argStart int, closureContext 
 	call := lfc.b.CreateCall(sig.Type, code, args, name)
 	call.SetInstructionCallConv(cc)
 	configureLLVMCall(call, sig)
-	lfc.requireWideVectorCallCPUFeature(v, call)
+	lfc.requireCPUFeature(v, call)
 	lfc.materializeAddressedResults(v, call, aux)
 	if closureContext {
 		call.AddCallSiteAttribute(sig.ClosureContextIndex+1, llvmNestAttribute())
@@ -4079,22 +3562,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 		flag := lfc.b.CreateLoad(GlobalCtxt.Int8Type(), llvmGoDataRef(sym), v.String()+".flag")
 		flag.SetAlignment(1)
-		if lfc.F.Config.arch == "amd64" {
-			profile := ""
-			switch sym.Name {
-			case "runtime.x86HasFMA":
-				profile = goCPUProfileX86FMA
-			case "runtime.x86HasSSE41":
-				profile = goCPUProfileX86SSE41
-			case "runtime.x86HasPOPCNT":
-				profile = goCPUProfileX86POPCNT
-			}
-			if profile != "" {
-				flag.SetMetadata(GlobalCtxt.MDKindID(goCPUGuardMD), GlobalCtxt.MDNode([]llvm.Metadata{
-					GlobalCtxt.MDString(profile),
-				}))
-			}
-		}
+		lfc.markCPUFeatureGuard(v, flag)
 		cond := lfc.b.CreateICmp(llvm.IntNE, flag, llvm.ConstInt(flag.Type(), 0, false), v.String()+".i1")
 		lVal = lfc.goBool(cond, v.String())
 	case OpArg:
@@ -4634,20 +4102,10 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		addr = lfc.llvmAddressPointer(v, addr, v.Args[0].Type, v.String()+".addr")
 		lVal = lfc.b.CreateLoad(typ, addr, v.String())
 		if v.Op == OpLoad {
-			lfc.recordCPUFeatureGuard(v, lVal)
+			lfc.markCPUFeatureGuard(v, lVal)
 		}
 		if v.Type.IsSIMD() {
 			lVal.SetAlignment(int(v.Type.Alignment()))
-		}
-		if lfc.F.Config.arch == "arm64" && v.Op == OpLoad && len(v.Args) != 0 {
-			address := v.Args[0]
-			if address.Op == OpAddr {
-				if sym, ok := address.Aux.(*obj.LSym); ok && sym.Name == "runtime.arm64HasATOMICS" {
-					lVal.SetMetadata(GlobalCtxt.MDKindID(goCPUGuardMD), GlobalCtxt.MDNode([]llvm.Metadata{
-						GlobalCtxt.MDString(goCPUProfileARM64LSE),
-					}))
-				}
-			}
 		}
 		// The runtime may resume at the first deferreturn call recorded for the
 		// function, which can be an ordinary exit rather than the fake recovery
@@ -4690,7 +4148,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 		lVal.SetOrdering(ordering)
 		lVal.SetAlignment(int(v.Args[1].Type.Alignment()))
-		lfc.requireARM64LSE(v, lVal)
+		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant:
 		address := lfc.llvmAddressPointer(v, arg0(), v.Args[0].Type, v.String()+".address")
 		old := lfc.b.CreateAtomicRMW(
@@ -4698,7 +4156,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			llvm.AtomicOrderingSequentiallyConsistent,
 			false,
 		)
-		lfc.requireARM64LSE(v, old)
+		lfc.requireCPUFeature(v, old)
 		lVal = lfc.b.CreateAdd(old, arg1(), v.String())
 	case OpAtomicExchange8, OpAtomicExchange8Variant,
 		OpAtomicExchange32, OpAtomicExchange32Variant,
@@ -4710,7 +4168,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-		lfc.requireARM64LSE(v, lVal)
+		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicAnd8, OpAtomicAnd32,
 		OpAtomicAnd64value, OpAtomicAnd64valueVariant,
 		OpAtomicAnd32value, OpAtomicAnd32valueVariant,
@@ -4722,7 +4180,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-		lfc.requireARM64LSE(v, lVal)
+		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicOr8, OpAtomicOr32,
 		OpAtomicOr64value, OpAtomicOr64valueVariant,
 		OpAtomicOr32value, OpAtomicOr32valueVariant,
@@ -4734,7 +4192,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-		lfc.requireARM64LSE(v, lVal)
+		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant,
 		OpAtomicCompareAndSwap64, OpAtomicCompareAndSwap64Variant,
 		OpAtomicCompareAndSwapRel32:
@@ -4771,7 +4229,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			failureOrdering,
 			false,
 		)
-		lfc.requireARM64LSE(v, pair)
+		lfc.requireCPUFeature(v, pair)
 		success := lfc.b.CreateExtractValue(pair, 1, v.String()+".success")
 		lVal = lfc.b.CreateZExt(success, getLLVMType(v.Type.FieldType(0)), v.String())
 	case OpPubBarrier:
@@ -5164,30 +4622,26 @@ func LLVMCompile(f *Func) {
 		sig = sig.withClosureContext()
 	}
 	cc := llvmCallConv(f.OwnAux.ABI().Which())
-	cpuFeatureFloor, wideCallCPUFeatures := llvmPlanWideVectorCalls(f)
 	FCtxt := &LLVMFuncContext{
-		BBs:                 map[ID]llvm.BasicBlock{},
-		Vs:                  map[ID]llvm.Value{},
-		Locals:              map[llvmLocalKey]llvmStackSlot{},
-		AddressedResults:    map[ID][]llvmAddressedResult{},
-		ResultSlots:         map[ID]llvm.Value{},
-		CallResultSlots:     map[llvmCallResultKey]llvmStackSlot{},
-		ItabMethods:         map[ID]bool{},
-		ClosureCodeLoads:    map[ID]bool{},
-		DeferResults:        map[llvmLocalKey]bool{},
-		DeferResultKeys:     map[ID]llvmLocalKey{},
-		OpenDeferSlots:      map[llvmLocalKey]int{},
-		CPUFeatureProfiles:  map[string]bool{},
-		CPUFeatureGuards:    map[string][]llvm.Value{},
-		CPUFeatureFloor:     cpuFeatureFloor,
-		WideCallCPUFeatures: wideCallCPUFeatures,
-		F:                   f,
-		b:                   GlobalCtxt.NewBuilder(),
-		ReturnType:          sig.ReturnType,
-		ResultCount:         sig.ResultCount,
-		ReturnCount:         sig.ReturnCount,
-		Params:              sig.Params,
-		Results:             sig.Results,
+		BBs:              map[ID]llvm.BasicBlock{},
+		Vs:               map[ID]llvm.Value{},
+		Locals:           map[llvmLocalKey]llvmStackSlot{},
+		AddressedResults: map[ID][]llvmAddressedResult{},
+		ResultSlots:      map[ID]llvm.Value{},
+		CallResultSlots:  map[llvmCallResultKey]llvmStackSlot{},
+		ItabMethods:      map[ID]bool{},
+		ClosureCodeLoads: map[ID]bool{},
+		DeferResults:     map[llvmLocalKey]bool{},
+		DeferResultKeys:  map[ID]llvmLocalKey{},
+		OpenDeferSlots:   map[llvmLocalKey]int{},
+		CPUFeatures:      llvmPlanCPUFeatures(f),
+		F:                f,
+		b:                GlobalCtxt.NewBuilder(),
+		ReturnType:       sig.ReturnType,
+		ResultCount:      sig.ResultCount,
+		ReturnCount:      sig.ReturnCount,
+		Params:           sig.Params,
+		Results:          sig.Results,
 	}
 	defer FCtxt.b.Dispose()
 
@@ -5212,7 +4666,7 @@ func LLVMCompile(f *Func) {
 		// select the single-instruction LSE forms.
 		FCtxt.LF.AddTargetDependentFunctionAttr(llvmTargetFeaturesAttr, features)
 	}
-	if floor := FCtxt.CPUFeatureFloor; floor != "" {
+	if floor := FCtxt.CPUFeatures.floor.profile; floor != "" {
 		FCtxt.LF.AddTargetDependentFunctionAttr(goCPUFeatureFloorAttr, floor)
 	}
 	// Go has already made its source-level inlining decision before LLVM
@@ -5786,7 +5240,7 @@ func LLVMCompile(f *Func) {
 	}
 	FCtxt.FinishPhi()
 	FCtxt.expandNilCheckIntrinsics()
-	FCtxt.markCPUFeatureGuards()
+	FCtxt.finishCPUFeatures()
 	FCtxt.MappingName()
 
 	err := llvm.VerifyFunction(FCtxt.LF, llvm.PrintMessageAction)

@@ -77,82 +77,24 @@ struct FeatureFloor {
   SmallVector<const Profile *, 4> Profiles;
 };
 
-// Predicate is an effective Go runtime boolean, independently disableable by
-// GODEBUG. Capabilities describes the instructions that a true predicate (or
-// an ABI feature floor) permits. Never use capabilities to fold source tests
-// or to select a variant: AVX512 may remain true with HasAVX2 disabled.
-constexpr uint64_t AVX2Capabilities = FeatureAVX | FeatureAVX2;
-constexpr uint64_t AVX512Capabilities = AVX2Capabilities | FeatureAVX512;
+// These are generated from the same predicate/capability registry as the Go
+// compiler and runtime snapshot. Target capabilities never imply Go booleans.
+#define GOALLC_CPU_BASELINE(Name, Capabilities) \
+  constexpr uint64_t Name##Baseline = Capabilities;
+#include "GoALLCCPUFeatures.def"
+#undef GOALLC_CPU_BASELINE
 
-constexpr uint64_t V2Baseline =
-    FeatureSSE3 | FeatureSSSE3 | FeatureSSE41 | FeatureSSE42 | FeaturePOPCNT;
-constexpr uint64_t V3Baseline =
-    V2Baseline | FeatureAVX | FeatureAVX2 | FeatureFMA;
-constexpr uint64_t V4Baseline = V3Baseline | FeatureAVX512;
-
-constexpr Profile SSE41Profile = {"x86.sse41", "sse41",      "+sse4.1",
-                                  "amd64",     FeatureSSE41, FeatureSSE41};
-constexpr Profile AVXProfile = {"x86.avx", "avx",      "+avx",
-                                "amd64",   FeatureAVX, FeatureAVX};
-constexpr Profile AVX2Profile = {"x86.avx2", "avx2",      "+avx,+avx2",
-                                 "amd64",    FeatureAVX2, AVX2Capabilities};
-constexpr Profile AVX512Profile = {
-    "x86.avx512",
-    "avx512",
-    "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl",
-    "amd64",
-    FeatureAVX512,
-    AVX512Capabilities};
-constexpr Profile AVX512VBMIProfile = {
-    "x86.avx512vbmi",
-    "avx512vbmi",
-    "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512vbmi",
-    "amd64",
-    FeatureAVX512VBMI,
-    AVX512Capabilities | FeatureAVX512VBMI};
-constexpr Profile AVX512BITALGProfile = {
-    "x86.avx512bitalg",
-    "avx512bitalg",
-    "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512bitalg",
-    "amd64",
-    FeatureAVX512BITALG,
-    AVX512Capabilities | FeatureAVX512BITALG};
-constexpr Profile AVX512VPOPCNTDQProfile = {
-    "x86.avx512vpopcntdq",
-    "avx512vpopcntdq",
-    "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+"
-    "avx512vpopcntdq",
-    "amd64",
-    FeatureAVX512VPOPCNTDQ,
-    AVX512Capabilities | FeatureAVX512VPOPCNTDQ};
-constexpr Profile FMAProfile = {"x86.fma", "fma",      "+fma",
-                                "amd64",   FeatureFMA, FeatureFMA};
-constexpr Profile POPCNTProfile = {"x86.popcnt", "popcnt",      "+popcnt",
-                                   "amd64",      FeaturePOPCNT, FeaturePOPCNT};
-constexpr Profile ARM64LSEProfile = {
-    "arm64.lse", "lse", "+lse", "arm64", FeatureARM64LSE, FeatureARM64LSE};
+constexpr Profile Profiles[] = {
+#define GOALLC_CPU_PROFILE(Name, Suffix, Target, Arch, Predicate, Capabilities) \
+  {Name, Suffix, Target, Arch, Predicate, Capabilities},
+#include "GoALLCCPUFeatures.def"
+#undef GOALLC_CPU_PROFILE
+};
 
 const Profile *findProfile(StringRef Name) {
-  if (Name == AVXProfile.Name)
-    return &AVXProfile;
-  if (Name == AVX2Profile.Name)
-    return &AVX2Profile;
-  if (Name == AVX512Profile.Name)
-    return &AVX512Profile;
-  if (Name == AVX512VBMIProfile.Name)
-    return &AVX512VBMIProfile;
-  if (Name == AVX512BITALGProfile.Name)
-    return &AVX512BITALGProfile;
-  if (Name == AVX512VPOPCNTDQProfile.Name)
-    return &AVX512VPOPCNTDQProfile;
-  if (Name == FMAProfile.Name)
-    return &FMAProfile;
-  if (Name == SSE41Profile.Name)
-    return &SSE41Profile;
-  if (Name == POPCNTProfile.Name)
-    return &POPCNTProfile;
-  if (Name == ARM64LSEProfile.Name)
-    return &ARM64LSEProfile;
+  for (const Profile &P : Profiles)
+    if (P.Name == Name)
+      return &P;
   return nullptr;
 }
 
@@ -592,12 +534,9 @@ Error multiversionFunction(Function &F, const CPUConfig &Config,
     return Err;
 
   SmallVector<const Profile *, 4> OrderedProfiles;
-  for (const Profile *P :
-       {&SSE41Profile, &AVXProfile, &AVX2Profile, &AVX512Profile,
-        &AVX512BITALGProfile, &AVX512VPOPCNTDQProfile, &FMAProfile,
-        &POPCNTProfile, &ARM64LSEProfile, &AVX512VBMIProfile}) {
-    if (llvm::find(*Requested, P) != Requested->end())
-      OrderedProfiles.push_back(P);
+  for (const Profile &P : Profiles) {
+    if (llvm::find(*Requested, &P) != Requested->end())
+      OrderedProfiles.push_back(&P);
   }
 
   SmallVector<Variant, 3> Variants;
