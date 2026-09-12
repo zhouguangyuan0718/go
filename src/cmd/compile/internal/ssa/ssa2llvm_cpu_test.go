@@ -184,7 +184,7 @@ func TestLLVMCPUFeaturePlanMidway(t *testing.T) {
 	}
 }
 
-func TestLLVMCPUFeaturePlanCompilerOps(t *testing.T) {
+func TestLLVMCPUFeaturePlanCompilerGuards(t *testing.T) {
 	llvmCPUPlanBaselineForTest(t)
 	for _, test := range []struct {
 		arch, symbol, profile string
@@ -208,8 +208,14 @@ func TestLLVMCPUFeaturePlanCompilerOps(t *testing.T) {
 				guard = b.NewValue2(src.NoXPos, OpLoad, types.Types[types.TBOOL], addr, f.values["mem"])
 			}
 			p := llvmPlanCPUFeatures(f.f)
-			if p.requirements[value.ID] != test.profile || p.guards[guard.ID] != test.profile || strings.Join(p.profiles, ",") != test.profile {
-				t.Fatalf("compiler-op plan: %+v", p)
+			if len(p.requirements) != 0 || p.guards[guard.ID] != test.profile || strings.Join(p.profiles, ",") != test.profile {
+				t.Fatalf("compiler-guard plan: %+v", p)
+			}
+			// Specialization follows Go's feature check, not the opcode in
+			// its body. Folding/replacing the operation cannot change it.
+			value.Op = OpConst64
+			if got := llvmPlanCPUFeatures(f.f); !reflect.DeepEqual(p, got) {
+				t.Fatalf("opcode changed feature plan: before=%+v after=%+v", p, got)
 			}
 			// Baseline coverage removes the requirement and dispatch request,
 			// but retains the existing compiler-generated guard marker policy.
@@ -220,6 +226,28 @@ func TestLLVMCPUFeaturePlanCompilerOps(t *testing.T) {
 				t.Fatalf("baseline compiler-op plan: %+v", p)
 			}
 		})
+	}
+}
+
+func TestLLVMCPUFeaturePlanOrdinaryOpsDoNotRequestISA(t *testing.T) {
+	llvmCPUPlanBaselineForTest(t)
+	for _, arch := range []string{"amd64", "arm64"} {
+		c := testConfigArch(t, arch)
+		f := c.Fun("entry", Bloc("entry", Valu("mem", OpInitMem, types.TypeMem, 0, nil), Exit("mem")))
+		for _, op := range []Op{OpFMA, OpFloor, OpCeil, OpTrunc, OpRoundToEven,
+			OpPopCount8, OpPopCount16, OpPopCount32, OpPopCount64,
+			OpAtomicStore8Variant, OpAtomicStore32Variant, OpAtomicStore64Variant,
+			OpAtomicAdd32Variant, OpAtomicAdd64Variant,
+			OpAtomicExchange8Variant, OpAtomicExchange32Variant, OpAtomicExchange64Variant,
+			OpAtomicAnd64valueVariant, OpAtomicAnd32valueVariant, OpAtomicAnd8valueVariant,
+			OpAtomicOr64valueVariant, OpAtomicOr32valueVariant, OpAtomicOr8valueVariant,
+			OpAtomicCompareAndSwap32Variant, OpAtomicCompareAndSwap64Variant} {
+			f.f.Entry.NewValue0(src.NoXPos, op, types.Types[types.TUINT64])
+		}
+		p := llvmPlanCPUFeatures(f.f)
+		if len(p.requirements) != 0 || len(p.profiles) != 0 || len(p.guards) != 0 {
+			t.Fatalf("%s: ordinary operations requested ISA independently of Go guards: %+v", arch, p)
+		}
 	}
 }
 

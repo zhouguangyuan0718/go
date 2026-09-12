@@ -600,18 +600,6 @@ func (lfc *LLVMFuncContext) llvmTernaryIntrinsic(v *Value, name string) llvm.Val
 	return lfc.b.CreateCall(sig, fn, []llvm.Value{x, y, z}, v.String())
 }
 
-func (lfc *LLVMFuncContext) llvmRoundIntrinsic(v *Value, genericName string) llvm.Value {
-	result := lfc.llvmUnaryIntrinsic(v, genericName)
-	lfc.requireCPUFeature(v, result)
-	return result
-}
-
-func (lfc *LLVMFuncContext) llvmFMA(v *Value) llvm.Value {
-	result := lfc.llvmTernaryIntrinsic(v, "llvm.fma.f64")
-	lfc.requireCPUFeature(v, result)
-	return result
-}
-
 // llvmContractionMul recognizes a product that the native target rules may
 // contract with its parent. ARM64 first reduces these immediate negation forms
 // to FMUL/FNMUL; AMD64 passes allowNeg=false because its contraction rule only
@@ -1024,7 +1012,6 @@ func (lfc *LLVMFuncContext) populationCount(v *Value) llvm.Value {
 	sig := llvm.FunctionType(x.Type(), []llvm.Type{x.Type()}, false)
 	fn := getOrInsertLLVMIntrinsic("llvm.ctpop.i"+fmt.Sprint(bits), sig)
 	count := lfc.b.CreateCall(sig, fn, []llvm.Value{x}, v.String()+".count")
-	lfc.requireCPUFeature(v, count)
 	want := getLLVMType(v.Type)
 	if want.TypeKind() != llvm.IntegerTypeKind {
 		v.Fatalf("%s has a non-integer LLVM result", v.Op)
@@ -3691,15 +3678,15 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpAbs:
 		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.fabs.f64")
 	case OpFloor:
-		lVal = lfc.llvmRoundIntrinsic(v, "llvm.floor.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.floor.f64")
 	case OpCeil:
-		lVal = lfc.llvmRoundIntrinsic(v, "llvm.ceil.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.ceil.f64")
 	case OpTrunc:
-		lVal = lfc.llvmRoundIntrinsic(v, "llvm.trunc.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.trunc.f64")
 	case OpRound:
 		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.round.f64")
 	case OpRoundToEven:
-		lVal = lfc.llvmRoundIntrinsic(v, "llvm.roundeven.f64")
+		lVal = lfc.llvmUnaryIntrinsic(v, "llvm.roundeven.f64")
 	case OpMin64F:
 		lVal = lfc.llvmBinaryIntrinsic(v, "llvm.minimum.f64")
 	case OpMin32F:
@@ -3709,7 +3696,7 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 	case OpMax32F:
 		lVal = lfc.llvmBinaryIntrinsic(v, "llvm.maximum.f32")
 	case OpFMA:
-		lVal = lfc.llvmFMA(v)
+		lVal = lfc.llvmTernaryIntrinsic(v, "llvm.fma.f64")
 	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB:
 		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, arg0(), arg1(), v.String()+".i1"), v.String())
 	case OpEqPtr:
@@ -4148,7 +4135,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 		}
 		lVal.SetOrdering(ordering)
 		lVal.SetAlignment(int(v.Args[1].Type.Alignment()))
-		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicAdd32, OpAtomicAdd32Variant, OpAtomicAdd64, OpAtomicAdd64Variant:
 		address := lfc.llvmAddressPointer(v, arg0(), v.Args[0].Type, v.String()+".address")
 		old := lfc.b.CreateAtomicRMW(
@@ -4156,7 +4142,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			llvm.AtomicOrderingSequentiallyConsistent,
 			false,
 		)
-		lfc.requireCPUFeature(v, old)
 		lVal = lfc.b.CreateAdd(old, arg1(), v.String())
 	case OpAtomicExchange8, OpAtomicExchange8Variant,
 		OpAtomicExchange32, OpAtomicExchange32Variant,
@@ -4168,7 +4153,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicAnd8, OpAtomicAnd32,
 		OpAtomicAnd64value, OpAtomicAnd64valueVariant,
 		OpAtomicAnd32value, OpAtomicAnd32valueVariant,
@@ -4180,7 +4164,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicOr8, OpAtomicOr32,
 		OpAtomicOr64value, OpAtomicOr64valueVariant,
 		OpAtomicOr32value, OpAtomicOr32valueVariant,
@@ -4192,7 +4175,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			false,
 		)
 		lVal.SetName(v.String())
-		lfc.requireCPUFeature(v, lVal)
 	case OpAtomicCompareAndSwap32, OpAtomicCompareAndSwap32Variant,
 		OpAtomicCompareAndSwap64, OpAtomicCompareAndSwap64Variant,
 		OpAtomicCompareAndSwapRel32:
@@ -4229,7 +4211,6 @@ func (lfc *LLVMFuncContext) GenLV(v *Value) llvm.Value {
 			failureOrdering,
 			false,
 		)
-		lfc.requireCPUFeature(v, pair)
 		success := lfc.b.CreateExtractValue(pair, 1, v.String()+".success")
 		lVal = lfc.b.CreateZExt(success, getLLVMType(v.Type.FieldType(0)), v.String())
 	case OpPubBarrier:

@@ -297,7 +297,6 @@ type llvmCPURequirementKind uint8
 
 const (
 	llvmCPUGenerated llvmCPURequirementKind = iota
-	llvmCPUCompilerOp
 	llvmCPUWideCall
 )
 
@@ -316,39 +315,9 @@ type llvmCPUFeaturePlan struct {
 	profiles     []string
 }
 
-// These are requirements of this backend's chosen scalar/atomic lowerings,
-// not properties of the semantic SSA operations or the shared CPU registry.
-func llvmCompilerOpCPUProfile(op Op, arch string) string {
-	switch arch {
-	case "amd64":
-		switch op {
-		case OpFloor, OpCeil, OpTrunc, OpRoundToEven:
-			return goCPUProfileX86SSE41
-		case OpFMA:
-			return goCPUProfileX86FMA
-		case OpPopCount8, OpPopCount16, OpPopCount32, OpPopCount64:
-			return goCPUProfileX86POPCNT
-		}
-	case "arm64":
-		switch op {
-		case OpAtomicStore8Variant, OpAtomicStore32Variant, OpAtomicStore64Variant,
-			OpAtomicAdd32Variant, OpAtomicAdd64Variant,
-			OpAtomicExchange8Variant, OpAtomicExchange32Variant, OpAtomicExchange64Variant,
-			OpAtomicAnd64valueVariant, OpAtomicAnd32valueVariant, OpAtomicAnd8valueVariant,
-			OpAtomicOr64valueVariant, OpAtomicOr32valueVariant, OpAtomicOr8valueVariant,
-			OpAtomicCompareAndSwap32Variant, OpAtomicCompareAndSwap64Variant:
-			return goCPUProfileARM64LSE
-		}
-	}
-	return ""
-}
-
 func llvmCPURequirement(v *Value, arch string) (string, llvmCPURequirementKind) {
 	if info, ok := goALLCSIMDInfo(v.Op); ok {
 		return info.archInfo(arch).cpuProfile, llvmCPUGenerated
-	}
-	if name := llvmCompilerOpCPUProfile(v.Op, arch); name != "" {
-		return name, llvmCPUCompilerOp
 	}
 	if arch == "amd64" {
 		if aux := llvmCallAux(v); aux != nil {
@@ -359,7 +328,7 @@ func llvmCPURequirement(v *Value, arch string) (string, llvmCPURequirementKind) 
 }
 
 // llvmPlanCPUFeatures is the one planning boundary for generated SIMD,
-// compiler scalar/atomic intrinsics and wide register-ABI calls. Emission
+// Go feature checks and wide register-ABI calls. Emission
 // consumes the completed plan; it does not discover or mutate feature policy.
 func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 	plan := &llvmCPUFeaturePlan{
@@ -393,8 +362,16 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 		guards  []string
 	}
 	var pending []requirement
+	selected := make(map[string]bool)
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
+			// Go already supplies hardware/fallback feature checks for
+			// scalar and atomic intrinsics. Collect all of them before
+			// marking source loads, independently of block storage order.
+			if name, selective := llvmCPUFeatureGuardValue(v, f.Config.arch); name != "" && !selective &&
+				!llvmCPUProfileCoveredByBaseline(f.Config.arch, name) {
+				selected[name] = true
+			}
 			profile, kind := llvmCPURequirement(v, f.Config.arch)
 			if profile == "" || llvmCPUProfileCoveredByBaseline(f.Config.arch, profile) {
 				continue
@@ -417,9 +394,8 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 			plan.floor = llvmCPUFeatureFloor{profile: r.profile, source: "wide-call", call: r.value.ID}
 		}
 	}
-	selected := make(map[string]bool)
 	for _, r := range pending {
-		if r.kind != llvmCPUCompilerOp && llvmCPUProfileCoveredByFloor(r.profile, plan.floor.profile) {
+		if llvmCPUProfileCoveredByFloor(r.profile, plan.floor.profile) {
 			continue
 		}
 		guards := r.guards
@@ -427,8 +403,7 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 			guards = findGuards(r.value, r.profile)
 		}
 		if len(guards) == 0 {
-			// Compiler-generated guards use the operation's own predicate.
-			// An unguarded SIMD operation also requests it so the baseline
+			// An unguarded SIMD operation requests its Go feature so the baseline
 			// verifier continues to reject the surviving requirement.
 			guards = []string{r.profile}
 		}
@@ -437,17 +412,17 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 			selected[guard] = true
 		}
 	}
-	for _, name := range llvmCPURequestOrder {
-		if selected[name] {
-			plan.profiles = append(plan.profiles, name)
-		}
-	}
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			name, selective := llvmCPUFeatureGuardValue(v, f.Config.arch)
 			if name != "" && (!selective || selected[name]) {
 				plan.guards[v.ID] = name
 			}
+		}
+	}
+	for _, name := range llvmCPURequestOrder {
+		if selected[name] {
+			plan.profiles = append(plan.profiles, name)
 		}
 	}
 	return plan

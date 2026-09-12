@@ -32,11 +32,14 @@ true predicates. Target bundles and the two existing frontend/plugin profile
 orders are preserved. Explicit SIMD aliases preserve reviewed lowering policy;
 unknown extensions must be audited instead of inheriting a prefix match.
 
-There are no SSA opcode names in this registry. SIMD requirements come from
-existing operation descriptors; scalar/atomic requirements belong to the
-LLVM backend's local lowering query; wide-call requirements come from the ABI.
-The per-function planner combines those requirements with entry assumptions
-and protecting guards before LLVM emission. The LLVM plugin remains the only
+There are no SSA opcode names in this registry or a second scalar/atomic
+opcode-to-feature table in the LLVM backend. SIMD requirements come from
+upstream operation descriptors; scalar/atomic specialization follows Go's
+existing hardware/fallback feature checks; wide-call requirements come from
+the ABI. Ordinary LLVM intrinsics and atomics carry no ISA requirement
+metadata: LLVM legalizes them for the selected target. The per-function
+planner combines Go feature checks and SIMD/ABI requirements with entry
+assumptions before LLVM emission. The LLVM plugin remains the only
 owner of CPU specialization and dispatch. Midway width dispatch, unguarded
 wide-call floors, fail-closed unguarded SIMD policy and FMV subset enumeration
 are unchanged.

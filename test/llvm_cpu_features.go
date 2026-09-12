@@ -54,6 +54,20 @@ func llvmCPUCheck() {
 		mathName != "main.llvmCPUMath" || atomicName != "main.llvmCPUAtomic" {
 		panic("bad CPU-feature multiversion result")
 	}
+	// Exercise fused rounding and exceptional values in both Go's hardware
+	// and fallback paths, including children with individual features disabled.
+	for _, test := range []struct{ x, y, z, want uint64 }{
+		{0x3ff0000002000000, 0x3feffffffc000000, 0xbff0000000000000, 0xbc90000000000000},
+		{0x7fefffffffffffff, 0x4000000000000000, 0xffefffffffffffff, 0x7fefffffffffffff},
+		{0x0000000000000001, 0x3ff0000000000000, 0x8000000000000000, 0x0000000000000001},
+		{0x8000000000000000, 0x4000000000000000, 0x8000000000000000, 0x8000000000000000},
+		{0x7ff0000000000000, 0x4000000000000000, 0x3ff0000000000000, 0x7ff0000000000000},
+	} {
+		_, got, _ := llvmCPUMath(math.Float64frombits(test.x), math.Float64frombits(test.y), math.Float64frombits(test.z))
+		if math.Float64bits(got) != test.want {
+			panic("CPU-feature path changed fused rounding or exceptional value")
+		}
+	}
 }
 
 func llvmCPUChildEnv(godebug string) []string {
