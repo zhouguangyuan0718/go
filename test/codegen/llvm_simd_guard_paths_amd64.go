@@ -14,9 +14,11 @@ import "simd/archsimd"
 // The scalar signature establishes no unconditional vector feature floor.
 // LLVM-AMD64-LABEL: define goabiinternal void @codegen.llvmGuardPaths(
 // LLVM-AMD64-SAME: #[[PATHS:[0-9]+]]
-// LLVM-AMD64: add <32 x i8> {{.*}}!goallc.cpu.requires ![[LOW:[0-9]+]]
+// LLVM-AMD64: add <32 x i8> {{.*}}!dbg ![[ADD_LOC:[0-9]+]]
+// LLVM-AMD64-NEXT: call void @llvm.sideeffect(){{.*}}!dbg ![[ADD_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[LOW:[0-9]+]]
 // LLVM-AMD64: attributes #[[PATHS]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx2,x86.avx512"
-// LLVM-AMD64: ![[LOW]] = !{!"x86.avx2"}
+// LLVM-AMD64-DAG: ![[LOW]] = !{!"x86.avx2"}
+// LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 // LLVM-NM-AMD64: codegen.llvmGuardPaths.goallc.fmv.slot
 // LLVM-NM-AMD64-COUNT-5: codegen.llvmGuardPaths<1>
 // LLVM-NM-AMD64-NOT: codegen.llvmGuardPaths<1>

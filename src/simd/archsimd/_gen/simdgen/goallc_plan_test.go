@@ -24,6 +24,15 @@ func TestGoALLCSIMDPlanLookup(t *testing.T) {
 		// Implemented conversions are no longer classified as pending.
 		{"ConvertToInt32Float32x4", goALLCSIMDPlanInvalid, false},
 		{"PermuteUint8x16", goALLCSIMDPlanInvalid, false},
+		{"ShiftAllLeftInt8x16", goALLCSIMDPlanInvalid, false},
+		{"ShiftAllRightUint64x8", goALLCSIMDPlanInvalid, false},
+		{"ShiftLeftInt16x8", goALLCSIMDPlanInvalid, false},
+		{"ShiftRightUint32x16", goALLCSIMDPlanInvalid, false},
+		{"ShiftInt8x16", goALLCSIMDPlanShift, true},
+		{"ShiftSaturatedInt16x8", goALLCSIMDPlanShift, true},
+		{"ShiftAllLeftConcatMod16Int16x8", goALLCSIMDPlanShift, true},
+		{"ShiftRightConcatMod64Uint64x8", goALLCSIMDPlanShift, true},
+		{"RotateLeftInt32x4", goALLCSIMDPlanShift, true},
 		{"blendInt8x16", goALLCSIMDPlanLegacy, true},
 		{"blendInt8x32", goALLCSIMDPlanCompose, true},
 		{"UnknownInt8x16", goALLCSIMDPlanInvalid, false},
@@ -51,6 +60,10 @@ func TestGoALLCSIMDPlanCoversGeneratedOps(t *testing.T) {
 	defer f.Close()
 
 	counts := map[string]int{}
+	ordinaryShifts := map[string]int{}
+	wantOrdinaryShifts := map[string]int{
+		"ShiftAllLeft": 20, "ShiftAllRight": 20, "ShiftLeft": 18, "ShiftRight": 18,
+	}
 	seenFamilies := map[string]bool{}
 	seenLegacy := map[string]bool{}
 	var missing []string
@@ -74,6 +87,10 @@ func TestGoALLCSIMDPlanCoversGeneratedOps(t *testing.T) {
 		name := line[nameStart : nameStart+nameEnd]
 		if strings.Contains(line[:archStart], `simd: "`) {
 			counts["implemented"]++
+			family := goALLCSIMDTypeSuffixRE.ReplaceAllString(name, "")
+			if _, ok := wantOrdinaryShifts[family]; ok {
+				ordinaryShifts[family]++
+			}
 			continue
 		}
 		plan, ok := goALLCSIMDPlanForGenericOp(name)
@@ -105,6 +122,14 @@ func TestGoALLCSIMDPlanCoversGeneratedOps(t *testing.T) {
 		if !seenLegacy[name] {
 			t.Errorf("GoALLC SIMD legacy exception %q is no longer present", name)
 		}
+	}
+	for family, want := range wantOrdinaryShifts {
+		if got := ordinaryShifts[family]; got != want {
+			t.Errorf("implemented %s operations = %d, want %d", family, got, want)
+		}
+	}
+	if got := counts[goALLCSIMDPlanShift.String()]; got != 112 {
+		t.Errorf("pending shift operations = %d, want 112", got)
 	}
 
 	for _, status := range []string{"implemented", "standard", "compose", "convert", "shuffle", "mask", "shift", "target-intrinsic", "legacy"} {

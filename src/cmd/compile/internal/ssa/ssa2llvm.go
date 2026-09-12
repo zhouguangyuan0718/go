@@ -113,6 +113,7 @@ const llvmTargetFeaturesAttr = "target-features"
 const goCPUConfigMD = "goallc.cpu.config"
 const goCPUGuardMD = "goallc.cpu.guard"
 const goCPURequiresMD = "goallc.cpu.requires"
+const goCPURequireAnchorMD = "goallc.cpu.require-anchor"
 const goCPUMultiversionAttr = "goallc.cpu.multiversion"
 const goCPUFeatureFloorAttr = "goallc.cpu.feature-floor"
 
@@ -1078,7 +1079,7 @@ func (lfc *LLVMFuncContext) markCPUFeatureGuards() {
 	}
 }
 
-func (lfc *LLVMFuncContext) requireGeneratedSIMDCPUFeature(v *Value, instruction llvm.Value, info goALLCSIMDOpInfo) {
+func (lfc *LLVMFuncContext) requireGeneratedSIMDCPUFeature(v *Value, info goALLCSIMDOpInfo) {
 	arch := lfc.F.Config.arch
 	profile := info.archInfo(arch).cpuProfile
 	if profile == "" || llvmCPUProfileCoveredByBaseline(arch, profile) {
@@ -1103,7 +1104,17 @@ func (lfc *LLVMFuncContext) requireGeneratedSIMDCPUFeature(v *Value, instruction
 		// Preserve fail-closed validation for an unguarded operation.
 		guards = []string{profile}
 	}
-	lfc.requireCPUFeatureWithGuards(instruction, profile, guards...)
+	// A generated operation may fold to a constant, an argument, or an
+	// instruction defined outside this source guard. Its result therefore
+	// cannot safely carry the operation's requirement. Keep the requirement
+	// at this source position with LLVM's existing sideeffect intrinsic.
+	// Unlike a pure identity, this survives the early FMV pass's local
+	// simplification. That pass removes the anchor after verifying the
+	// surviving clone, before normal optimization and code generation.
+	fn := getLLVMIntrinsicDeclaration("llvm.sideeffect")
+	anchor := lfc.b.CreateCall(fn.GlobalValueType(), fn, nil, "")
+	anchor.SetMetadata(GlobalCtxt.MDKindID(goCPURequireAnchorMD), GlobalCtxt.MDNode(nil))
+	lfc.requireCPUFeatureWithGuards(anchor, profile, guards...)
 }
 
 func (lfc *LLVMFuncContext) requireWideVectorCallCPUFeature(v *Value, call llvm.Value) {
@@ -2473,11 +2484,13 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 	laneBits := int(info.laneBits)
 	isFloat := info.lane == goALLCSIMDLaneFloat
 	finish := func(result llvm.Value) (llvm.Value, bool) {
-		lfc.requireGeneratedSIMDCPUFeature(v, result, info)
+		lfc.requireGeneratedSIMDCPUFeature(v, info)
 		return result, true
 	}
 
 	switch info.lowering {
+	case goALLCSIMDLowerShiftAllLeft, goALLCSIMDLowerShiftAllRight, goALLCSIMDLowerShiftLeft, goALLCSIMDLowerShiftRight:
+		return finish(lfc.simdShift(v, info, laneType, lanes))
 	case goALLCSIMDLowerPermute, goALLCSIMDLowerConcatPermute, goALLCSIMDLowerLookupOrZero, goALLCSIMDLowerPermuteOrZero, goALLCSIMDLowerPermuteOrZero128:
 		return finish(lfc.simdDynamicShuffle(v, info, laneType, lanes))
 	case goALLCSIMDLowerPermute32_128, goALLCSIMDLowerPermuteLow16_128, goALLCSIMDLowerPermuteHigh16_128, goALLCSIMDLowerConcatSelect128, goALLCSIMDLowerConcatPermute128, goALLCSIMDLowerConcatShiftBytes128:

@@ -71,8 +71,10 @@ func llvmSIMDStandardLeadingZeros(x archsimd.Uint32x4) archsimd.Uint32x4 {
 }
 
 // LLVM-AMD64-DAG: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard ![[BITALG:[0-9]+]]
-// LLVM-AMD64-DAG: call <16 x i8> @llvm.ctpop.v16i8{{.*}}!goallc.cpu.requires ![[BITALG]]
+// LLVM-AMD64-DAG: call <16 x i8> @llvm.ctpop.v16i8{{.*}}!dbg ![[COUNT_LOC:[0-9]+]]
+// LLVM-AMD64-DAG: call void @llvm.sideeffect(){{.*}}!dbg ![[COUNT_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[BITALG]]
 // LLVM-AMD64-DAG: ![[BITALG]] = !{!"x86.avx512bitalg"}
+// LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 // LLVM-ARM64-DAG: call <16 x i8> @llvm.ctpop.v16i8
 //
 //go:noinline

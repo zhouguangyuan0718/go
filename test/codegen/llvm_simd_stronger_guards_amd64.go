@@ -15,10 +15,12 @@ import "simd/archsimd"
 // LLVM-AMD64-LABEL: define goabiinternal <32 x i8> @codegen.llvmStrongerGuard(
 // LLVM-AMD64-SAME: #[[STRONG:[0-9]+]]
 // LLVM-AMD64: load i8, ptr {{.*}}!goallc.cpu.guard ![[HIGH:[0-9]+]]
-// LLVM-AMD64: add <32 x i8> {{.*}}!goallc.cpu.requires ![[LOW:[0-9]+]]
+// LLVM-AMD64: add <32 x i8> {{.*}}!dbg ![[ADD_LOC:[0-9]+]]
+// LLVM-AMD64-NEXT: call void @llvm.sideeffect(){{.*}}!dbg ![[ADD_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[LOW:[0-9]+]]
 // LLVM-AMD64: attributes #[[STRONG]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"{{.*}}"goallc.cpu.multiversion"="x86.avx512"
 // LLVM-AMD64-DAG: ![[HIGH]] = !{!"x86.avx512"}
 // LLVM-AMD64-DAG: ![[LOW]] = !{!"x86.avx2"}
+// LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 // LLVM-NM-AMD64: codegen.llvmStrongerGuard.goallc.fmv.slot
 // LLVM-NM-AMD64-COUNT-3: codegen.llvmStrongerGuard<1>
 // LLVM-NM-AMD64-NOT: codegen.llvmStrongerGuard<1>
