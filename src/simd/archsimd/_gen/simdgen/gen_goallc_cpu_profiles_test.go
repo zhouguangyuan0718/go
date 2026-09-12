@@ -4,7 +4,10 @@
 
 package main
 
-import "testing"
+import (
+	"simd/archsimd/_gen/internal/goallccpu"
+	"testing"
+)
 
 func TestGoALLCCPUProfileAliases(t *testing.T) {
 	// Every feature the native XED decoder can return must have an explicit
@@ -12,7 +15,7 @@ func TestGoALLCCPUProfileAliases(t *testing.T) {
 	// ordinary AVX512 profile merely because their name has that prefix.
 	for _, feature := range cpuFeatureMap {
 		if feature != "ignore" {
-			goALLCCPUProfile("amd64", feature)
+			goallccpu.ProfileForSIMD("amd64", feature)
 		}
 	}
 	for _, test := range []struct{ feature, want string }{
@@ -20,11 +23,11 @@ func TestGoALLCCPUProfileAliases(t *testing.T) {
 		{"AVX512VBMI", "x86.avx512vbmi"}, {"AVX512BITALG", "x86.avx512bitalg"},
 		{"AVX512VPOPCNTDQ", "x86.avx512vpopcntdq"}, {"FMA", "x86.fma"}, {"SHA", ""}, {"", ""},
 	} {
-		if got := goALLCCPUProfile("amd64", test.feature); got != test.want {
+		if got := goallccpu.ProfileForSIMD("amd64", test.feature); got != test.want {
 			t.Errorf("%s = %q, want %q", test.feature, got, test.want)
 		}
 	}
-	if got := goALLCCPUProfile("arm64", "AVX512VBMI"); got != "" {
+	if got := goallccpu.ProfileForSIMD("arm64", "AVX512VBMI"); got != "" {
 		t.Errorf("cross-architecture profile %q", got)
 	}
 	defer func() {
@@ -32,5 +35,5 @@ func TestGoALLCCPUProfileAliases(t *testing.T) {
 			t.Error("unknown AVX512 extension was accepted")
 		}
 	}()
-	goALLCCPUProfile("amd64", "AVX512FUTURE")
+	goallccpu.ProfileForSIMD("amd64", "AVX512FUTURE")
 }

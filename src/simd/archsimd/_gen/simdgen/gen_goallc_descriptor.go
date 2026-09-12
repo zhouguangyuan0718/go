@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"simd/archsimd/_gen/internal/goallccpu"
 	"simd/archsimd/_gen/sgutil"
 	"strconv"
 	"strings"
@@ -352,7 +353,7 @@ func goALLCSIMDDescriptor(op, genericOp Operation, genericIn inShape, genericOut
 		LaneBits: elemBits,
 		Arch: map[string]sgutil.SIMDArchData{
 			arch: {
-				CPUProfile:   goALLCCPUProfile(arch, op.CPUFeature),
+				CPUProfile:   goallccpu.ProfileForSIMD(arch, op.CPUFeature),
 				OperandOrder: operandOrder,
 			},
 		},

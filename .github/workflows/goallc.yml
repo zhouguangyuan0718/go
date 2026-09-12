@@ -249,7 +249,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./bin/go test cmd/dist cmd/internal/llvmbackend cmd/go/internal/work cmd/llvmplugin/cpufeatures
+          ./bin/go test cmd/dist cmd/internal/llvmbackend cmd/go/internal/work
+          ./bin/go -C src/simd/archsimd/_gen test ./internal/goallccpu ./simdgen/... ./sgutil/...
+          ./bin/go -C src/simd/archsimd/_gen run . -check-cpu
           GOEXPERIMENT=simd ./bin/go test -tags=llvm23,dynamicllvm cmd/compile/internal/ssa \
             -run 'TestLLVM(CPU|SIMDFeatureFloor|X86CPU)'
 

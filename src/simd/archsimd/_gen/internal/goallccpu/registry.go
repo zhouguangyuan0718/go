@@ -2,11 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// The cpufeatures command generates the GoALLC CPU feature registry shared by
-// the compiler, LLVM plugin, runtime snapshot and SIMD descriptor generator.
-//
-//go:generate go run .
-package main
+// Package goallccpu shares GoALLC CPU profile data across SIMD generation and
+// the compiler, plugin and runtime table emitters.
+package goallccpu
 
 // A feature's bit is an observable runtime predicate. Provides describes only
 // instruction capabilities, NEVER additional true runtime predicates. Keep bit
@@ -25,7 +23,6 @@ type profile struct {
 	Name         string
 	Feature      string
 	RuntimeGuard string
-	SSAOps       []string
 	SIMDAliases  []string
 }
 
@@ -51,21 +48,15 @@ var features = []feature{
 // this refactor. Native instruction aliases below preserve the old generator
 // mapping; implementing a new lowering still requires its own ISA audit.
 var profiles = []profile{
-	{Name: "x86.sse41", Feature: "SSE41", RuntimeGuard: "runtime.x86HasSSE41", SSAOps: []string{"Floor", "Ceil", "Trunc", "RoundToEven"}},
+	{Name: "x86.sse41", Feature: "SSE41", RuntimeGuard: "runtime.x86HasSSE41"},
 	{Name: "x86.avx", Feature: "AVX", SIMDAliases: []string{"AVX", "AVXAES", "VAES"}},
 	{Name: "x86.avx2", Feature: "AVX2", SIMDAliases: []string{"AVX2", "AVXVNNI"}},
 	{Name: "x86.avx512", Feature: "AVX512", SIMDAliases: []string{"AVX512", "AVX512F", "AVX512CD", "AVX512BW", "AVX512DQ", "AVX512VL", "AVX512GFNI", "AVX512VBMI2", "AVX512VNNI", "AVX512VAES", "AVX512VPCLMULQDQ"}},
 	{Name: "x86.avx512bitalg", Feature: "AVX512BITALG", SIMDAliases: []string{"AVX512BITALG"}},
 	{Name: "x86.avx512vpopcntdq", Feature: "AVX512VPOPCNTDQ", SIMDAliases: []string{"AVX512VPOPCNTDQ"}},
-	{Name: "x86.fma", Feature: "FMA", RuntimeGuard: "runtime.x86HasFMA", SSAOps: []string{"FMA"}, SIMDAliases: []string{"FMA"}},
-	{Name: "x86.popcnt", Feature: "POPCNT", RuntimeGuard: "runtime.x86HasPOPCNT", SSAOps: []string{"PopCount8", "PopCount16", "PopCount32", "PopCount64"}},
-	{Name: "arm64.lse", Feature: "ARM64LSE", RuntimeGuard: "runtime.arm64HasATOMICS", SSAOps: []string{
-		"AtomicStore8Variant", "AtomicStore32Variant", "AtomicStore64Variant",
-		"AtomicAdd32Variant", "AtomicAdd64Variant", "AtomicExchange8Variant", "AtomicExchange32Variant", "AtomicExchange64Variant",
-		"AtomicAnd64valueVariant", "AtomicAnd32valueVariant", "AtomicAnd8valueVariant",
-		"AtomicOr64valueVariant", "AtomicOr32valueVariant", "AtomicOr8valueVariant",
-		"AtomicCompareAndSwap32Variant", "AtomicCompareAndSwap64Variant",
-	}},
+	{Name: "x86.fma", Feature: "FMA", RuntimeGuard: "runtime.x86HasFMA", SIMDAliases: []string{"FMA"}},
+	{Name: "x86.popcnt", Feature: "POPCNT", RuntimeGuard: "runtime.x86HasPOPCNT"},
+	{Name: "arm64.lse", Feature: "ARM64LSE", RuntimeGuard: "runtime.arm64HasATOMICS"},
 	{Name: "x86.avx512vbmi", Feature: "AVX512VBMI", SIMDAliases: []string{"AVX512VBMI"}},
 }
 

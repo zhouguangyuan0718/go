@@ -316,14 +316,39 @@ type llvmCPUFeaturePlan struct {
 	profiles     []string
 }
 
+// These are requirements of this backend's chosen scalar/atomic lowerings,
+// not properties of the semantic SSA operations or the shared CPU registry.
+func llvmCompilerOpCPUProfile(op Op, arch string) string {
+	switch arch {
+	case "amd64":
+		switch op {
+		case OpFloor, OpCeil, OpTrunc, OpRoundToEven:
+			return goCPUProfileX86SSE41
+		case OpFMA:
+			return goCPUProfileX86FMA
+		case OpPopCount8, OpPopCount16, OpPopCount32, OpPopCount64:
+			return goCPUProfileX86POPCNT
+		}
+	case "arm64":
+		switch op {
+		case OpAtomicStore8Variant, OpAtomicStore32Variant, OpAtomicStore64Variant,
+			OpAtomicAdd32Variant, OpAtomicAdd64Variant,
+			OpAtomicExchange8Variant, OpAtomicExchange32Variant, OpAtomicExchange64Variant,
+			OpAtomicAnd64valueVariant, OpAtomicAnd32valueVariant, OpAtomicAnd8valueVariant,
+			OpAtomicOr64valueVariant, OpAtomicOr32valueVariant, OpAtomicOr8valueVariant,
+			OpAtomicCompareAndSwap32Variant, OpAtomicCompareAndSwap64Variant:
+			return goCPUProfileARM64LSE
+		}
+	}
+	return ""
+}
+
 func llvmCPURequirement(v *Value, arch string) (string, llvmCPURequirementKind) {
 	if info, ok := goALLCSIMDInfo(v.Op); ok {
 		return info.archInfo(arch).cpuProfile, llvmCPUGenerated
 	}
-	if name := llvmCPUOpProfiles[v.Op]; name != "" {
-		if p := llvmCPUProfileByName(name); p.arch == arch {
-			return name, llvmCPUCompilerOp
-		}
+	if name := llvmCompilerOpCPUProfile(v.Op, arch); name != "" {
+		return name, llvmCPUCompilerOp
 	}
 	if arch == "amd64" {
 		if aux := llvmCallAux(v); aux != nil {
