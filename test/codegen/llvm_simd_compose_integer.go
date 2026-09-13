@@ -18,7 +18,7 @@ import (
 // LLVM-AMD64-DAG: lshr <16 x i8>
 // LLVM-AMD64-DAG: or <16 x i8>
 // LLVM-AMD64-DAG: sub <16 x i8>
-// LLVM-AMD64-DAG: "goallc.cpu.feature-floor"="x86.avx"
+// LLVM-AMD64-DAG: "target-features"="+avx"
 // LLVM-ASM-AMD64-LABEL: TEXT codegen.llvmSIMDComposeAverageUnsigned(SB)
 // LLVM-ASM-AMD64: VPAVGB
 // LLVM-ARM64-DAG: xor <16 x i8>

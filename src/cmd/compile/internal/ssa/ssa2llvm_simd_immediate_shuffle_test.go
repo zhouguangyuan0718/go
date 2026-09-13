@@ -165,6 +165,7 @@ func TestLLVMGeneratedSIMDImmediateShuffles(t *testing.T) {
 						fn := llvm.AddFunction(module, fmt.Sprintf("shuffle%d", control), llvm.FunctionType(resultType, nil, false))
 						builder.SetInsertPointAtEnd(llvm.AddBasicBlock(fn, "entry"))
 						ctx := &LLVMFuncContext{F: &Func{Config: &Config{arch: arch}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}}, Vs: make(map[ID]llvm.Value), b: builder}
+						ctx.CPUFeatures = llvmPlanCPUFeatures(ctx.F)
 						args := make([]*Value, test.arity)
 						for side := range args {
 							args[side] = &Value{ID: ID(side + 1), Op: OpArg, Type: vector}

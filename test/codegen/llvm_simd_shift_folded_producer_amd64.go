@@ -37,7 +37,7 @@ import "simd/archsimd"
 // LLVM-AMD64-DAG: !goallc.cpu.requires ![[AVX512]]
 // LLVM-AMD64-DAG: !goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]
 // LLVM-AMD64: {{^[}]}}
-// LLVM-AMD64: attributes #[[PRODUCER]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"{{.*}}"goallc.cpu.multiversion"="x86.avx512"
+// LLVM-AMD64: attributes #[[PRODUCER]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx512"{{.*}}"target-features"="+avx"
 // LLVM-AMD64-DAG: ![[AVX512]] = !{!"x86.avx512"}
 // LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 

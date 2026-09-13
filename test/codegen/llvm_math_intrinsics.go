@@ -9,7 +9,7 @@ package codegen
 import "math"
 
 // LLVM-ARM64-DAG: call double @llvm.fma.f64(double %x, double %y, double %z)
-// LLVM-AMD64-DAG: call double @llvm.fma.f64(double %x, double %y, double %z){{.*}}!goallc.cpu.requires
+// LLVM-AMD64-DAG: call double @llvm.fma.f64(double %x, double %y, double %z){{(, !dbg ![0-9]+)?$}}
 func llvmFMA64(x, y, z float64) float64 {
 	return math.FMA(x, y, z)
 }
@@ -33,3 +33,6 @@ func llvmMin32(x, y float32) float32 {
 func llvmMax32(x, y float32) float32 {
 	return max(x, y)
 }
+
+// Go's feature checks, not scalar opcode requirements, select variants.
+// LLVM-AMD64-DAG: !goallc.cpu.guard

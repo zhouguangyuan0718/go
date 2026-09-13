@@ -248,7 +248,7 @@ if(BUILD_TESTING)
   )
 
   goallc_add_filecheck_test(
-    GoALLCCPUFeatures.InvalidFeatureFloor
+    GoALLCCPUFeatures.DisabledTargetFeature
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-feature-floor-invalid.ll"
     CHECK
     "${GOALLC_NOT_EXECUTABLE}"
@@ -257,6 +257,18 @@ if(BUILD_TESTING)
     -passes=goallc-cpu-features
     -disable-output
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-feature-floor-invalid.ll"
+  )
+
+  goallc_add_filecheck_test(
+    GoALLCCPUFeatures.StandardTargetFeatures
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-target-features.ll"
+    CHECK
+    "${GOALLC_OPT_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -passes=goallc-cpu-features
+    -S
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-target-features.ll"
+    -o -
   )
 
   goallc_add_filecheck_test(

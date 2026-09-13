@@ -17,7 +17,7 @@ import "simd/archsimd"
 // LLVM-AMD64: load i8, ptr {{.*}}!goallc.cpu.guard ![[HIGH:[0-9]+]]
 // LLVM-AMD64: add <32 x i8> {{.*}}!dbg ![[ADD_LOC:[0-9]+]]
 // LLVM-AMD64-NEXT: call void @llvm.sideeffect(){{.*}}!dbg ![[ADD_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[LOW:[0-9]+]]
-// LLVM-AMD64: attributes #[[STRONG]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"{{.*}}"goallc.cpu.multiversion"="x86.avx512"
+// LLVM-AMD64: attributes #[[STRONG]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx512"{{.*}}"target-features"="+avx"
 // LLVM-AMD64-DAG: ![[HIGH]] = !{!"x86.avx512"}
 // LLVM-AMD64-DAG: ![[LOW]] = !{!"x86.avx2"}
 // LLVM-AMD64-DAG: ![[ANCHOR]] = !{}

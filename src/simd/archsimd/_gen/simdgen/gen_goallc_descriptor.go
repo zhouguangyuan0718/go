@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"simd/archsimd/_gen/internal/goallccpu"
 	"simd/archsimd/_gen/sgutil"
 	"strconv"
 	"strings"
@@ -32,30 +33,6 @@ func goALLCPointerString[T ~int | ~string](p *T) string {
 		return "-"
 	}
 	return fmt.Sprint(*p)
-}
-
-func goALLCCPUProfile(arch, feature string) string {
-	if arch != "amd64" {
-		return ""
-	}
-	switch {
-	case feature == "AVX512BITALG":
-		return "x86.avx512bitalg"
-	case feature == "AVX512VBMI":
-		return "x86.avx512vbmi"
-	case feature == "AVX512VPOPCNTDQ":
-		return "x86.avx512vpopcntdq"
-	case strings.HasPrefix(feature, "AVX512"):
-		return "x86.avx512"
-	case feature == "AVX2" || feature == "AVXVNNI":
-		return "x86.avx2"
-	case feature == "FMA":
-		return "x86.fma"
-	case feature == "AVX" || feature == "AVXAES" || feature == "VAES":
-		return "x86.avx"
-	default:
-		return ""
-	}
 }
 
 var goALLCVectorTypeRE = regexp.MustCompile(`^(Int|Uint|Float)(8|16|32|64)x([0-9]+)$`)
@@ -381,7 +358,7 @@ func goALLCSIMDDescriptor(op, genericOp Operation, genericIn inShape, genericOut
 		LaneBits: elemBits,
 		Arch: map[string]sgutil.SIMDArchData{
 			arch: {
-				CPUProfile:   goALLCCPUProfile(arch, op.CPUFeature),
+				CPUProfile:   goallccpu.ProfileForSIMD(arch, op.CPUFeature),
 				OperandOrder: operandOrder,
 			},
 		},

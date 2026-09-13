@@ -24,11 +24,11 @@ import (
 // LLVM-AMD64-NEXT: call void @llvm.sideeffect(){{.*}}!dbg ![[ADD_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[AVX2]]
 // LLVM-AMD64-DAG: ![[AVX2]] = !{!"x86.avx2"}
 // LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
-// LLVM-AMD64-DAG: attributes #[[SIMD512]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx512"
-// LLVM-AMD64-DAG: attributes #[[SIMD256]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx2"
-// LLVM-AMD64-DAG: attributes #[[SIMD128]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"
+// LLVM-AMD64-DAG: attributes #[[SIMD512]] = { {{.*}}"target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl"
+// LLVM-AMD64-DAG: attributes #[[SIMD256]] = { {{.*}}"target-features"="+avx,+avx2"
+// LLVM-AMD64-DAG: attributes #[[SIMD128]] = { {{.*}}"target-features"="+avx"
 // LLVM-AMD64-DAG: attributes #[[GUARDED_SIMD0]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx2"
-// LLVM-AMD64-DAG: attributes #[[GUARDED_SIMD128]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"{{.*}}"goallc.cpu.multiversion"="x86.avx2"
+// LLVM-AMD64-DAG: attributes #[[GUARDED_SIMD128]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx2"{{.*}}"target-features"="+avx"
 // LLVM-OPT-AMD64-DAG: define goabiinternal <64 x i8> @"codegen.llvmSIMDMidwayAdd@simd512"(<64 x i8> %x, <64 x i8> %y) #[[OPT_SIMD512:[0-9]+]]
 // LLVM-OPT-AMD64-DAG: define goabiinternal <32 x i8> @"codegen.llvmSIMDMidwayAdd@simd256"(<32 x i8> %x, <32 x i8> %y) #[[OPT_SIMD256:[0-9]+]]
 // LLVM-OPT-AMD64-DAG: define goabiinternal <16 x i8> @"codegen.llvmSIMDMidwayAdd@simd128"(<16 x i8> %x, <16 x i8> %y) #[[OPT_SIMD128:[0-9]+]]

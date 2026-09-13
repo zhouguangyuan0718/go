@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"simd/archsimd/_gen/internal/goallccpu"
 	"strings"
 )
 
@@ -23,6 +24,7 @@ var (
 	flagSimdgen = flag.Bool("simdgen", true, "run simdgen generator")
 	flagWasmgen = flag.Bool("wasmgen", true, "run wasmgen generator")
 	flagMidway  = flag.Bool("midway", true, "run midway generator")
+	flagCPUOnly = flag.Bool("cpu-only", false, "generate only shared GoALLC CPU tables (no ISA inputs)")
 
 	flagN         = flag.Bool("n", false, "dry run")
 	flagXedPath   = flag.String("xedPath", defaultXedPath, "load XED datafile from `path`, which must be the XED obj/dgen directory")
@@ -57,6 +59,18 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	// Shared CPU data is also consumed directly by simdgen. Generate its
+	// compiler/plugin/runtime outputs once, before the architecture stages.
+	if *flagN {
+		fmt.Fprintln(os.Stderr, "# generate shared GoALLC CPU tables")
+	} else if err := goallccpu.Generate(goRoot); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if *flagCPUOnly {
+		return
 	}
 
 	if *flagSimdgen {

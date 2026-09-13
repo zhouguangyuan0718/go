@@ -165,10 +165,10 @@ func TestLLVMGeneratedSIMDOrdinaryShifts(t *testing.T) {
 							// capability floor. The codegen fixtures independently
 							// check source guards and FMV for dynamic operands.
 							ctx := &LLVMFuncContext{
-								F:               &Func{Config: &Config{arch: arch}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}},
-								CPUFeatureFloor: info.archInfo(arch).cpuProfile,
-								Vs:              map[ID]llvm.Value{1: xValue, 2: countValue},
-								b:               builder,
+								F:           &Func{Config: &Config{arch: arch}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}},
+								CPUFeatures: &llvmCPUFeaturePlan{floor: info.archInfo(arch).cpuProfile},
+								Vs:          map[ID]llvm.Value{1: xValue, 2: countValue},
+								b:           builder,
 							}
 							result = ctx.GenLV(v)
 							if result.Type() != resultType || result.IsAConstant().IsNil() {

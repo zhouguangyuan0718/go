@@ -35,7 +35,7 @@ import "simd/archsimd"
 // LLVM-AMD64-DAG: mul <8 x i32>
 // LLVM-AMD64-DAG: ashr <8 x i32>
 // LLVM-AMD64-DAG: trunc <8 x i32>
-// LLVM-AMD64-DAG: "goallc.cpu.feature-floor"="x86.avx"
+// LLVM-AMD64-DAG: "target-features"="+avx"
 // LLVM-ASM-AMD64-LABEL: TEXT codegen.llvmSIMDComposeMulHighSigned(SB)
 // LLVM-ASM-AMD64: VPMULHW
 //
@@ -97,7 +97,7 @@ func llvmSIMDComposeAverageUnsigned256(x, y archsimd.Uint8x32) archsimd.Uint8x32
 // LLVM-AMD64-DAG: lshr <64 x i8>
 // LLVM-AMD64-DAG: or <64 x i8>
 // LLVM-AMD64-DAG: sub <64 x i8>
-// LLVM-AMD64-DAG: "goallc.cpu.feature-floor"="x86.avx512"
+// LLVM-AMD64-DAG: "target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl"
 // LLVM-ASM-AMD64-LABEL: TEXT codegen.llvmSIMDComposeAverageUnsigned512(SB)
 // LLVM-ASM-AMD64: VPAVGB
 //

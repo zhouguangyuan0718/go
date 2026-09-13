@@ -1,13 +1,18 @@
-; CHECK: error: GoALLC CPU feature floor x86.avx does not match module architecture arm64
+; A later negative feature overrides both the CPU default and an earlier +avx2.
+; CHECK: error: GoALLC CPU requirement x86.avx2 survives in function bad<goallc.fmv.baseline> without the required target features
 
-target triple = "aarch64-unknown-linux-gnu"
+target triple = "x86_64-unknown-linux-gnu"
 
-define void @bad() #0 {
+@runtime.goallcCPUFeatures = external global i64
+
+define <8 x i32> @bad(<8 x i32> %x) #0 {
 entry:
-  ret void
+  %v = add <8 x i32> %x, %x, !goallc.cpu.requires !1
+  ret <8 x i32> %v
 }
 
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx" }
+attributes #0 = { "target-cpu"="x86-64-v3" "target-features"="+avx2,-avx2" "goallc.cpu.multiversion"="x86.fma" }
 
 !goallc.cpu.config = !{!0}
-!0 = !{!"goallc.cpu.v1", !"arm64", !"v8.0"}
+!0 = !{!"goallc.cpu.v1", !"amd64", !"v1"}
+!1 = !{!"x86.avx2"}

@@ -56,7 +56,7 @@ done:
 ; CHECK-DAG: attributes #[[FMA]] = { "target-cpu"="x86-64-v2" "target-features"="+avx,+fma" }
 ; CHECK-DAG: attributes #[[RESOLVER]] = { noinline "go-nosplit" "target-cpu"="x86-64-v2" }
 
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx" "goallc.cpu.multiversion"="x86.fma" "target-cpu"="x86-64-v2" }
+attributes #0 = { "target-features"="+avx" "goallc.cpu.multiversion"="x86.fma" "target-cpu"="x86-64-v2" }
 
 !goallc.cpu.config = !{!0}
 !0 = !{!"goallc.cpu.v1", !"amd64", !"v2"}

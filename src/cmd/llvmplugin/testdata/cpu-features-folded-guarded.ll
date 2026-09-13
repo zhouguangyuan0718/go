@@ -83,7 +83,7 @@ define void @floor_anchors() #2 {
 
 attributes #0 = { "goallc.cpu.multiversion"="x86.avx2" }
 attributes #1 = { "goallc.cpu.multiversion"="x86.avx2,x86.avx512" }
-attributes #2 = { "goallc.cpu.feature-floor"="x86.avx2" }
+attributes #2 = { "target-features"="+avx,+avx2" }
 !goallc.cpu.config = !{!0}
 !0 = !{!"goallc.cpu.v1", !"amd64", !"v1"}
 !1 = !{!"x86.avx2"}
