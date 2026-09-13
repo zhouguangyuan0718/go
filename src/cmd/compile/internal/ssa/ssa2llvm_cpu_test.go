@@ -51,8 +51,8 @@ func TestLLVMCPUProfileBaselines(t *testing.T) {
 		})
 	}
 	avx2, avx512 := llvmCPUProfileByName(goCPUProfileX86AVX2), llvmCPUProfileByName(goCPUProfileX86AVX512)
-	if avx512.capabilities&avx2.capabilities != avx2.capabilities || avx512.predicate&avx2.predicate != 0 {
-		t.Fatal("AVX512 instruction capability was confused with the AVX2 predicate")
+	if avx512.capabilities&avx2.capabilities != avx2.capabilities {
+		t.Fatal("AVX512 did not supply AVX2 instruction capabilities")
 	}
 }
 
@@ -98,7 +98,7 @@ func TestLLVMCPUFeaturePlanStrongerGuard(t *testing.T) {
 	llvmCPUPlanBaselineForTest(t)
 	f := llvmCPUPlanGuardedFunc(t)
 	p := llvmPlanCPUFeatures(f.f)
-	if p.floor.profile != goCPUProfileX86AVX || p.floor.source != "entry-ssa" {
+	if p.floor != goCPUProfileX86AVX {
 		t.Fatalf("floor=%+v", p.floor)
 	}
 	if got := strings.Join(p.profiles, ","); got != goCPUProfileX86AVX512 {
@@ -148,11 +148,11 @@ func TestLLVMCPUFeaturePlanWideCalls(t *testing.T) {
 			call := block.NewValue1A(src.NoXPos, OpStaticCall, aux.LateExpansionResultType(), aux, f.values["mem"])
 			p := llvmPlanCPUFeatures(f.f)
 			if test.unguarded && test.registers {
-				if p.floor.profile != goCPUProfileX86AVX512 || p.floor.source != "wide-call" || p.floor.call != call.ID || len(p.profiles) != 0 || len(p.requirements) != 0 {
+				if p.floor != goCPUProfileX86AVX512 || len(p.profiles) != 0 || len(p.requirements) != 0 {
 					t.Fatalf("unguarded call did not establish the whole-function floor: %+v", p)
 				}
 			} else {
-				if p.floor.profile != goCPUProfileX86AVX || strings.Join(p.profiles, ",") != goCPUProfileX86AVX512 {
+				if p.floor != goCPUProfileX86AVX || strings.Join(p.profiles, ",") != goCPUProfileX86AVX512 {
 					t.Fatalf("unexpected floor/profiles: %+v", p)
 				}
 				want := ""
@@ -176,7 +176,7 @@ func TestLLVMCPUFeaturePlanMidway(t *testing.T) {
 	f := llvmCPUPlanGuardedFunc(t)
 	f.f.Name = "f@simd256"
 	p := llvmPlanCPUFeatures(f.f)
-	if p.floor.profile != goCPUProfileX86AVX2 || p.floor.source != "midway" || len(p.profiles) != 0 || len(p.requirements) != 0 {
+	if p.floor != goCPUProfileX86AVX2 || len(p.profiles) != 0 || len(p.requirements) != 0 {
 		t.Fatalf("Midway AVX2 floor created a redundant dispatch: %+v", p)
 	}
 	if len(p.guards) != 0 {

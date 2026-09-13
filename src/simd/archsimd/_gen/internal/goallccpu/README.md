@@ -28,8 +28,9 @@ the generator or importing this package.
 
 Feature bits are effective runtime predicates after GODEBUG, with append-only
 ABI positions. Provides describes instruction capabilities, never additional
-true predicates. Target bundles and the two existing frontend/plugin profile
-orders are preserved. Explicit SIMD aliases preserve reviewed lowering policy;
+true predicates. Target bundles and the plugin's variant order are preserved;
+frontend requests use that same canonical profile order. There is no second
+request-order table. Explicit SIMD aliases preserve reviewed lowering policy;
 unknown extensions must be audited instead of inheriting a prefix match.
 
 There are no SSA opcode names in this registry or a second scalar/atomic

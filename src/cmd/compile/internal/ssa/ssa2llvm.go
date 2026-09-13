@@ -4647,7 +4647,7 @@ func LLVMCompile(f *Func) {
 		// select the single-instruction LSE forms.
 		FCtxt.LF.AddTargetDependentFunctionAttr(llvmTargetFeaturesAttr, features)
 	}
-	if floor := FCtxt.CPUFeatures.floor.profile; floor != "" {
+	if floor := FCtxt.CPUFeatures.floor; floor != "" {
 		FCtxt.LF.AddTargetDependentFunctionAttr(goCPUFeatureFloorAttr, floor)
 	}
 	// Go has already made its source-level inlining decision before LLVM

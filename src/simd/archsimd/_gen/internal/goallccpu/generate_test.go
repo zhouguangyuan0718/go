@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -91,7 +92,7 @@ func TestRuntimeBitABI(t *testing.T) {
 }
 
 func TestPredicateAndCapabilities(t *testing.T) {
-	r, err := resolve(features, profiles, requestOrder)
+	r, err := resolve(features, profiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,27 +123,31 @@ func TestPredicateAndCapabilities(t *testing.T) {
 func TestRejectInvalidRegistry(t *testing.T) {
 	for _, test := range []struct {
 		name string
-		edit func([]feature, []profile, []string)
+		edit func([]feature, []profile)
 	}{
-		{"duplicate-bit", func(fs []feature, _ []profile, _ []string) { fs[1].Bit = fs[0].Bit }},
-		{"duplicate-feature", func(fs []feature, _ []profile, _ []string) { fs[1].Name = fs[0].Name }},
-		{"out-of-range-bit", func(fs []feature, _ []profile, _ []string) { fs[1].Bit = 64 }},
-		{"unknown-capability", func(fs []feature, _ []profile, _ []string) { fs[1].Provides = []string{"future"} }},
-		{"cyclic-capability", func(fs []feature, _ []profile, _ []string) { fs[1].Provides = []string{fs[1].Name} }},
-		{"cross-arch-capability", func(fs []feature, _ []profile, _ []string) { fs[1].Provides = []string{"ARM64LSE"} }},
-		{"duplicate-profile", func(_ []feature, ps []profile, _ []string) { ps[1].Name = ps[0].Name }},
-		{"unknown-feature", func(_ []feature, ps []profile, _ []string) { ps[1].Feature = "future" }},
-		{"duplicate-alias", func(_ []feature, ps []profile, _ []string) { ps[0].SIMDAliases = []string{"AVX"} }},
-		{"unprofiled-alias", func(_ []feature, ps []profile, _ []string) { ps[0].SIMDAliases = []string{"SHA"} }},
-		{"duplicate-runtime-guard", func(_ []feature, ps []profile, _ []string) { ps[1].RuntimeGuard = ps[0].RuntimeGuard }},
-		{"duplicate-order", func(_ []feature, _ []profile, order []string) { order[1] = order[0] }},
+		{"duplicate-bit", func(fs []feature, _ []profile) { fs[1].Bit = fs[0].Bit }},
+		{"duplicate-feature", func(fs []feature, _ []profile) { fs[1].Name = fs[0].Name }},
+		{"out-of-range-bit", func(fs []feature, _ []profile) { fs[1].Bit = 64 }},
+		{"unknown-capability", func(fs []feature, _ []profile) { fs[1].Provides = []string{"future"} }},
+		{"cyclic-capability", func(fs []feature, _ []profile) { fs[1].Provides = []string{fs[1].Name} }},
+		{"cross-arch-capability", func(fs []feature, _ []profile) { fs[1].Provides = []string{"ARM64LSE"} }},
+		{"duplicate-profile", func(_ []feature, ps []profile) { ps[1].Name = ps[0].Name }},
+		{"unknown-feature", func(_ []feature, ps []profile) { ps[1].Feature = "future" }},
+		{"duplicate-alias", func(_ []feature, ps []profile) { ps[0].SIMDAliases = []string{"AVX"} }},
+		{"unprofiled-alias", func(_ []feature, ps []profile) { ps[0].SIMDAliases = []string{"SHA"} }},
+		{"duplicate-runtime-guard", func(_ []feature, ps []profile) { ps[1].RuntimeGuard = ps[0].RuntimeGuard }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fs, ps, order := slices.Clone(features), slices.Clone(profiles), slices.Clone(requestOrder)
-			test.edit(fs, ps, order)
-			if _, err := resolve(fs, ps, order); err == nil {
+			fs, ps := slices.Clone(features), slices.Clone(profiles)
+			test.edit(fs, ps)
+			if _, err := resolve(fs, ps); err == nil {
 				t.Fatal("accepted invalid registry")
 			}
 		})
 	}
+}
+
+func sourceRoot() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "../../../../../.."))
 }

@@ -117,7 +117,7 @@ func TestLLVMGeneratedSIMDDynamicShuffles(t *testing.T) {
 					// These constant-folding unit functions run under the exact
 					// descriptor capability floor; separate FMV tests verify the
 					// source guard, resolver predicates, and unguarded rejection.
-					ctx := &LLVMFuncContext{F: &Func{Config: &Config{arch: arch}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}}, CPUFeatures: &llvmCPUFeaturePlan{floor: llvmCPUFeatureFloor{profile: info.archInfo(arch).cpuProfile}}, Vs: make(map[ID]llvm.Value), b: builder}
+					ctx := &LLVMFuncContext{F: &Func{Config: &Config{arch: arch}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}}, CPUFeatures: &llvmCPUFeaturePlan{floor: info.archInfo(arch).cpuProfile}, Vs: make(map[ID]llvm.Value), b: builder}
 					args := make([]*Value, arity)
 					sources := make([][]uint64, arity)
 					for side := range args {

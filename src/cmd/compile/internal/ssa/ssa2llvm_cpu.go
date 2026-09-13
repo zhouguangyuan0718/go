@@ -18,11 +18,11 @@ import (
 )
 
 // llvmCPUProfile is generated registry data, not a mutable per-function state.
-// predicate is used for dispatch and source tests; capabilities only for ISA
-// legality. A feature floor supplies capabilities without supplying predicates.
+// Profiles identify Go predicates; capabilities describe ISA legality.
+// A feature floor supplies capabilities without supplying predicates.
 type llvmCPUProfile struct {
 	name, arch, field, runtimeGuard string
-	predicate, capabilities         uint64
+	capabilities                    uint64
 }
 
 func llvmCPUProfileByName(name string) *llvmCPUProfile {
@@ -124,10 +124,6 @@ func llvmSIMDFeatureFloor(f *Func) string {
 	return ""
 }
 
-func llvmCPUProfileCoveredByFloor(required, floor string) bool {
-	return llvmCPUProfileSupplies(floor, required)
-}
-
 // llvmWideVectorTypeWidth returns the widest fixed SIMD vector nested directly
 // in a Go ABI value. Pointers deliberately stop the walk: their referents do
 // not cross the call boundary in vector registers.
@@ -212,7 +208,7 @@ func llvmX86CPUFeatureGuard(b *Block) (profile string, enabled int) {
 		taken = 1
 		condition = condition.Args[0]
 	}
-	profile = llvmX86CPUFeatureProfile(llvmX86CPUFeatureField(condition))
+	profile = llvmX86CPUFeatureProfile(x86CPUFeatureField(condition))
 	if profile == "" {
 		return "", -1
 	}
@@ -300,16 +296,9 @@ const (
 	llvmCPUWideCall
 )
 
-// Retain why the entry assumption exists instead of treating every floor as
-// an ABI property. Entry SSA facts also include unconditional block effects.
-type llvmCPUFeatureFloor struct {
-	profile string
-	source  string // "entry-ssa", "midway", or "wide-call"
-	call    ID     // the call which raised the floor, for "wide-call"
-}
-
+// Entry capability assumptions are not runtime predicates.
 type llvmCPUFeaturePlan struct {
-	floor        llvmCPUFeatureFloor
+	floor        string
 	requirements map[ID]string
 	guards       map[ID]string
 	profiles     []string
@@ -332,12 +321,9 @@ func llvmCPURequirement(v *Value, arch string) (string, llvmCPURequirementKind) 
 // consumes the completed plan; it does not discover or mutate feature policy.
 func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 	plan := &llvmCPUFeaturePlan{
-		floor:        llvmCPUFeatureFloor{profile: llvmSIMDFeatureFloor(f), source: "entry-ssa"},
+		floor:        llvmSIMDFeatureFloor(f),
 		requirements: make(map[ID]string),
 		guards:       make(map[ID]string),
-	}
-	if _, midway := llvmMidwaySIMDFeatureFloor(f); f.Config.arch == "amd64" && midway {
-		plan.floor.source = "midway"
 	}
 	type guardKey struct {
 		block    *Block
@@ -361,6 +347,12 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 		kind    llvmCPURequirementKind
 		guards  []string
 	}
+	type guardValue struct {
+		id        ID
+		profile   string
+		selective bool
+	}
+	var guards []guardValue
 	var pending []requirement
 	selected := make(map[string]bool)
 	for _, b := range f.Blocks {
@@ -368,9 +360,11 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 			// Go already supplies hardware/fallback feature checks for
 			// scalar and atomic intrinsics. Collect all of them before
 			// marking source loads, independently of block storage order.
-			if name, selective := llvmCPUFeatureGuardValue(v, f.Config.arch); name != "" && !selective &&
-				!llvmCPUProfileCoveredByBaseline(f.Config.arch, name) {
-				selected[name] = true
+			if name, selective := llvmCPUFeatureGuardValue(v, f.Config.arch); name != "" {
+				guards = append(guards, guardValue{v.ID, name, selective})
+				if !selective && !llvmCPUProfileCoveredByBaseline(f.Config.arch, name) {
+					selected[name] = true
+				}
 			}
 			profile, kind := llvmCPURequirement(v, f.Config.arch)
 			if profile == "" || llvmCPUProfileCoveredByBaseline(f.Config.arch, profile) {
@@ -378,7 +372,7 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 			}
 			r := requirement{value: v, profile: profile, kind: kind}
 			if kind == llvmCPUWideCall {
-				if llvmCPUProfileCoveredByFloor(profile, plan.floor.profile) {
+				if llvmCPUProfileSupplies(plan.floor, profile) {
 					continue
 				}
 				r.guards = findGuards(v, profile)
@@ -390,12 +384,12 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 	// raises the function floor, whereas a guarded call requests FMV. Finish
 	// this step before handling any operation, independent of block order.
 	for _, r := range pending {
-		if r.kind == llvmCPUWideCall && len(r.guards) == 0 && !llvmCPUProfileCoveredByFloor(r.profile, plan.floor.profile) {
-			plan.floor = llvmCPUFeatureFloor{profile: r.profile, source: "wide-call", call: r.value.ID}
+		if r.kind == llvmCPUWideCall && len(r.guards) == 0 && !llvmCPUProfileSupplies(plan.floor, r.profile) {
+			plan.floor = r.profile
 		}
 	}
 	for _, r := range pending {
-		if llvmCPUProfileCoveredByFloor(r.profile, plan.floor.profile) {
+		if llvmCPUProfileSupplies(plan.floor, r.profile) {
 			continue
 		}
 		guards := r.guards
@@ -412,17 +406,14 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 			selected[guard] = true
 		}
 	}
-	for _, b := range f.Blocks {
-		for _, v := range b.Values {
-			name, selective := llvmCPUFeatureGuardValue(v, f.Config.arch)
-			if name != "" && (!selective || selected[name]) {
-				plan.guards[v.ID] = name
-			}
+	for _, guard := range guards {
+		if !guard.selective || selected[guard.profile] {
+			plan.guards[guard.id] = guard.profile
 		}
 	}
-	for _, name := range llvmCPURequestOrder {
-		if selected[name] {
-			plan.profiles = append(plan.profiles, name)
+	for _, p := range llvmCPUProfiles {
+		if selected[p.name] {
+			plan.profiles = append(plan.profiles, p.name)
 		}
 	}
 	return plan
@@ -448,7 +439,7 @@ func llvmCPUFeatureGuardValue(v *Value, arch string) (profile string, selective 
 	}
 	if v.Op == OpLoad {
 		if arch == "amd64" {
-			return llvmX86CPUFeatureProfile(llvmX86CPUFeatureField(v)), true
+			return llvmX86CPUFeatureProfile(x86CPUFeatureField(v)), true
 		}
 		if arch == "arm64" && len(v.Args) != 0 && v.Args[0].Op == OpAddr {
 			if sym, ok := v.Args[0].Aux.(*obj.LSym); ok {
@@ -459,64 +450,20 @@ func llvmCPUFeatureGuardValue(v *Value, arch string) (profile string, selective 
 	return "", false
 }
 
-// llvmX86CPUFeatureField recognizes the ordinary internal/cpu.X86 field load
-// used by archsimd feature checks. Keep this LLVM-only matching separate from
-// the native SSA CPU-feature analysis.
-func llvmX86CPUFeatureField(v *Value) string {
-	if v.Op != OpLoad || len(v.Args) == 0 {
-		return ""
-	}
-	offPtr := v.Args[0]
-	if offPtr.Op != OpOffPtr || len(offPtr.Args) == 0 {
-		return ""
-	}
-	addr := offPtr.Args[0]
-	if addr.Op != OpAddr || len(addr.Args) == 0 || addr.Args[0].Op != OpSB {
-		return ""
-	}
-	sym, ok := addr.Aux.(*obj.LSym)
-	if !ok || sym.Name != "internal/cpu.X86" {
-		return ""
-	}
-	t := addr.Type
-	if !t.IsPtr() {
-		v.Fatalf("The symbol %s is not a pointer, found %v instead", sym.Name, t)
-	}
-	t = t.Elem()
-	if !t.IsStruct() {
-		v.Fatalf("The referent of symbol %s is not a struct, found %v instead", sym.Name, t)
-	}
-	for _, field := range t.Fields() {
-		if offPtr.AuxInt == field.Offset && field.Sym != nil {
-			return field.Sym.Name
-		}
-	}
-	return ""
-}
-
-// A few lowering unit tests construct contexts directly. They get the same
-// planner, once, rather than a second partial feature-discovery path.
-func (lfc *LLVMFuncContext) cpuFeaturePlan() *llvmCPUFeaturePlan {
-	if lfc.CPUFeatures == nil {
-		lfc.CPUFeatures = llvmPlanCPUFeatures(lfc.F)
-	}
-	return lfc.CPUFeatures
-}
-
 func (lfc *LLVMFuncContext) requireCPUFeature(v *Value, instruction llvm.Value) {
-	if profile := lfc.cpuFeaturePlan().requirements[v.ID]; profile != "" {
+	if profile := lfc.CPUFeatures.requirements[v.ID]; profile != "" {
 		instruction.SetMetadata(GlobalCtxt.MDKindID(goCPURequiresMD), GlobalCtxt.MDNode([]llvm.Metadata{GlobalCtxt.MDString(profile)}))
 	}
 }
 
 func (lfc *LLVMFuncContext) markCPUFeatureGuard(v *Value, load llvm.Value) {
-	if profile := lfc.cpuFeaturePlan().guards[v.ID]; profile != "" {
+	if profile := lfc.CPUFeatures.guards[v.ID]; profile != "" {
 		load.SetMetadata(GlobalCtxt.MDKindID(goCPUGuardMD), GlobalCtxt.MDNode([]llvm.Metadata{GlobalCtxt.MDString(profile)}))
 	}
 }
 
 func (lfc *LLVMFuncContext) finishCPUFeatures() {
-	if profiles := lfc.cpuFeaturePlan().profiles; len(profiles) != 0 {
+	if profiles := lfc.CPUFeatures.profiles; len(profiles) != 0 {
 		// Keep the canonical imported GoObj LSym identity alive for the early
 		// plugin, which materializes the load before normal optimization.
 		llvmGoDataRef(ir.Syms.GoALLCCPUFeatures)

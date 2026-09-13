@@ -60,11 +60,4 @@ var profiles = []profile{
 	{Name: "x86.avx512vbmi", Feature: "AVX512VBMI", SIMDAliases: []string{"AVX512VBMI"}},
 }
 
-// The frontend attribute historically has a different stable order from the
-// plugin's subset enumeration. Keep that textual interface unchanged too.
-var requestOrder = []string{
-	"x86.fma", "x86.sse41", "x86.popcnt", "x86.avx", "x86.avx2", "x86.avx512",
-	"x86.avx512bitalg", "x86.avx512vpopcntdq", "arm64.lse", "x86.avx512vbmi",
-}
-
 var unprofiledSIMDAliases = []string{"", "SHA"}

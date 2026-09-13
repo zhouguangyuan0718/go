@@ -10,7 +10,6 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 )
@@ -29,7 +28,7 @@ type resolvedFeature struct {
 	Targets []string
 }
 
-func resolve(fs []feature, ps []profile, order []string) (map[string]resolvedFeature, error) {
+func resolve(fs []feature, ps []profile) (map[string]resolvedFeature, error) {
 	byName := make(map[string]feature)
 	bits := make(map[uint]bool)
 	for _, f := range fs {
@@ -118,15 +117,6 @@ func resolve(fs []feature, ps []profile, order []string) (map[string]resolvedFea
 			return nil, fmt.Errorf("SIMD alias %q is both profiled and unprofiled", alias)
 		}
 	}
-	for _, name := range order {
-		if !names[name] {
-			return nil, fmt.Errorf("unknown or duplicate request profile %s", name)
-		}
-		delete(names, name)
-	}
-	if len(names) != 0 {
-		return nil, fmt.Errorf("request order omits profiles")
-	}
 	return resolved, nil
 }
 
@@ -146,7 +136,7 @@ func runtimeName(f feature) string {
 }
 
 func generatedFiles() (map[string][]byte, error) {
-	resolved, err := resolve(features, profiles, requestOrder)
+	resolved, err := resolve(features, profiles)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +170,7 @@ func generatedFiles() (map[string][]byte, error) {
 	fmt.Fprint(&defs, "#endif\n\n#ifdef GOALLC_CPU_PROFILE\n")
 	for _, p := range profiles {
 		f := resolved[p.Feature]
-		fmt.Fprintf(&goData, "{name:%s, arch:%q, field:%q, runtimeGuard:%q, predicate:%#x, capabilities:%#x},\n", goProfileName(p), f.Arch, f.Field, p.RuntimeGuard, uint64(1)<<f.Bit, f.Mask)
+		fmt.Fprintf(&goData, "{name:%s, arch:%q, field:%q, runtimeGuard:%q, capabilities:%#x},\n", goProfileName(p), f.Arch, f.Field, p.RuntimeGuard, f.Mask)
 		var caps []string
 		for _, candidate := range features {
 			if f.Mask&(uint64(1)<<candidate.Bit) != 0 {
@@ -192,10 +182,6 @@ func generatedFiles() (map[string][]byte, error) {
 		fmt.Fprintf(&defs, "GOALLC_CPU_PROFILE(%q, %q, %q, %q, Feature%s, %s)\n", p.Name, suffix, targets, f.Arch, f.Name, strings.Join(caps, " | "))
 	}
 	fmt.Fprint(&defs, "#endif\n")
-	fmt.Fprint(&goData, "}\n\nvar llvmCPURequestOrder = [...]string{\n")
-	for _, name := range requestOrder {
-		fmt.Fprintf(&goData, "%q,\n", name)
-	}
 	fmt.Fprint(&goData, "}\n")
 	fmt.Fprint(&snapshot, ")\n\n// Snapshot only effective Go booleans after internal/cpu applies GODEBUG.\n// Do not apply the compiler's instruction-capability closure here.\nfunc goallcCPUFeatureSnapshot() uint64 {\nvar mask uint64\nswitch GOARCH {\n")
 	for _, arch := range []string{"amd64", "arm64"} {
@@ -225,11 +211,6 @@ func generatedFiles() (map[string][]byte, error) {
 	}
 	files["src/cmd/llvmplugin/GoALLCCPUFeatures.def"] = defs.Bytes()
 	return files, nil
-}
-
-func sourceRoot() string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "../../../../../.."))
 }
 
 // Generate writes the committed tables, or checks them without writes.
