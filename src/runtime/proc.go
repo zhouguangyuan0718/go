@@ -780,55 +780,14 @@ func cpuinit(env string) {
 		x86HasFMA = cpu.X86.HasFMA
 		x86HasPOPCNT = cpu.X86.HasPOPCNT
 		x86HasSSE41 = cpu.X86.HasSSE41
-		var goallcFeatures uint64
-		if cpu.X86.HasSSE3 {
-			goallcFeatures |= goallcCPUFeatureSSE3
-		}
-		if cpu.X86.HasSSSE3 {
-			goallcFeatures |= goallcCPUFeatureSSSE3
-		}
-		if cpu.X86.HasSSE41 {
-			goallcFeatures |= goallcCPUFeatureSSE41
-		}
-		if cpu.X86.HasSSE42 {
-			goallcFeatures |= goallcCPUFeatureSSE42
-		}
-		if cpu.X86.HasAVX {
-			goallcFeatures |= goallcCPUFeatureAVX
-		}
-		if cpu.X86.HasAVX2 {
-			goallcFeatures |= goallcCPUFeatureAVX2
-		}
-		if cpu.X86.HasAVX512 {
-			goallcFeatures |= goallcCPUFeatureAVX512
-		}
-		if cpu.X86.HasAVX512BITALG {
-			goallcFeatures |= goallcCPUFeatureAVX512BITALG
-		}
-		if cpu.X86.HasAVX512VPOPCNTDQ {
-			goallcFeatures |= goallcCPUFeatureAVX512VPOPCNTDQ
-		}
-		if cpu.X86.HasAVX512VBMI {
-			goallcFeatures |= goallcCPUFeatureAVX512VBMI
-		}
-		if cpu.X86.HasFMA {
-			goallcFeatures |= goallcCPUFeatureFMA
-		}
-		if cpu.X86.HasPOPCNT {
-			goallcFeatures |= goallcCPUFeaturePOPCNT
-		}
-		goallcCPUFeatures = goallcFeatures | goallcCPUFeaturesInitialized
+		goallcCPUFeatures = goallcCPUFeatureSnapshot()
 
 	case "arm":
 		armHasVFPv4 = cpu.ARM.HasVFPv4
 
 	case "arm64":
 		arm64HasATOMICS = cpu.ARM64.HasATOMICS
-		var goallcFeatures uint64
-		if cpu.ARM64.HasATOMICS {
-			goallcFeatures |= goallcCPUFeatureARM64LSE
-		}
-		goallcCPUFeatures = goallcFeatures | goallcCPUFeaturesInitialized
+		goallcCPUFeatures = goallcCPUFeatureSnapshot()
 
 	case "loong64":
 		loong64HasLAMCAS = cpu.Loong64.HasLAMCAS

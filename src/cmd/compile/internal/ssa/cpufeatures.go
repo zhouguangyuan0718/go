@@ -36,37 +36,11 @@ func ifEffect(b *Block) (features CPUfeatures, taken int) {
 		taken = 1
 		c = c.Args[0]
 	}
-	if c.Op != OpLoad {
+	match := x86CPUFeatureField(c)
+	if match == "" {
 		return
 	}
-	offPtr := c.Args[0]
-	if offPtr.Op != OpOffPtr {
-		return
-	}
-	addr := offPtr.Args[0]
-	if addr.Op != OpAddr || addr.Args[0].Op != OpSB {
-		return
-	}
-	sym := addr.Aux.(*obj.LSym)
-	if sym.Name != "internal/cpu.X86" {
-		return
-	}
-	o := offPtr.AuxInt
-	t := addr.Type
-	if !t.IsPtr() {
-		b.Func.Fatalf("The symbol %s is not a pointer, found %v instead", sym.Name, t)
-	}
-	t = t.Elem()
-	if !t.IsStruct() {
-		b.Func.Fatalf("The referent of symbol %s is not a struct, found %v instead", sym.Name, t)
-	}
-	match := ""
-	for _, f := range t.Fields() {
-		if o == f.Offset && f.Sym != nil {
-			match = f.Sym.Name
-			break
-		}
-	}
+	o := c.Args[0].AuxInt
 
 	switch match {
 
@@ -110,6 +84,41 @@ func ifEffect(b *Block) (features CPUfeatures, taken int) {
 		b.Func.Warnl(b.Pos, "%s, block b%v has features offset %d, match is %s, features is %v", b.Func.Name, b.ID, o, match, features)
 	}
 	return
+}
+
+// x86CPUFeatureField recognizes the ordinary internal/cpu.X86 field load
+// used by archsimd feature checks. Native and LLVM analyses share only the
+// source-shape recognition; their feature and predicate policies stay separate.
+func x86CPUFeatureField(v *Value) string {
+	if v == nil || v.Op != OpLoad || len(v.Args) == 0 {
+		return ""
+	}
+	offPtr := v.Args[0]
+	if offPtr.Op != OpOffPtr || len(offPtr.Args) == 0 {
+		return ""
+	}
+	addr := offPtr.Args[0]
+	if addr.Op != OpAddr || len(addr.Args) == 0 || addr.Args[0].Op != OpSB {
+		return ""
+	}
+	sym, ok := addr.Aux.(*obj.LSym)
+	if !ok || sym.Name != "internal/cpu.X86" {
+		return ""
+	}
+	t := addr.Type
+	if !t.IsPtr() {
+		v.Fatalf("The symbol %s is not a pointer, found %v instead", sym.Name, t)
+	}
+	t = t.Elem()
+	if !t.IsStruct() {
+		v.Fatalf("The referent of symbol %s is not a struct, found %v instead", sym.Name, t)
+	}
+	for _, field := range t.Fields() {
+		if offPtr.AuxInt == field.Offset && field.Sym != nil {
+			return field.Sym.Name
+		}
+	}
+	return ""
 }
 
 func cpufeatures(f *Func) {

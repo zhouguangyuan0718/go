@@ -136,7 +136,7 @@ done:
 ; CHECK: attributes #[[BITALG]] = {{.*}}"target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512bitalg"
 ; CHECK: attributes #[[VPOPCNTDQ]] = {{.*}}"target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512vpopcntdq"
 
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx" "goallc.cpu.multiversion"="x86.avx512bitalg" "target-cpu"="x86-64" }
+attributes #0 = { "target-features"="+avx" "goallc.cpu.multiversion"="x86.avx512bitalg" "target-cpu"="x86-64" }
 attributes #1 = { "goallc.cpu.multiversion"="x86.avx512vpopcntdq" "target-cpu"="x86-64" }
 attributes #2 = { "goallc.cpu.multiversion"="x86.avx512,x86.avx512bitalg" "target-cpu"="x86-64" }
 

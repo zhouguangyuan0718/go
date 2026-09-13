@@ -6,7 +6,7 @@ define goabiinternal <64 x i8> @bad(<64 x i8> %x, <64 x i8> %y) #0 {
   %result = add <64 x i8> %x, %y, !goallc.cpu.requires !1
   ret <64 x i8> %result
 }
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx512" "goallc.cpu.multiversion"="x86.avx512vbmi" }
+attributes #0 = { "target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl" "goallc.cpu.multiversion"="x86.avx512vbmi" }
 !goallc.cpu.config = !{!0}
 !0 = !{!"goallc.cpu.v1", !"amd64", !"v4"}
 !1 = !{!"x86.avx512vbmi"}

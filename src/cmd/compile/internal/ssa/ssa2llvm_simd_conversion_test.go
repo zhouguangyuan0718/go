@@ -63,6 +63,7 @@ func TestLLVMGeneratedSIMDIntegerConversions(t *testing.T) {
 					F:  &Func{Config: &Config{arch: "amd64"}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}},
 					Vs: make(map[ID]llvm.Value), b: builder,
 				}
+				context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 				x := &Value{ID: 1, Op: OpArg, Type: input}
 				context.Vs[x.ID] = function.Param(0)
 				v := &Value{ID: 2, Op: test.op, Type: output, Args: []*Value{x}}

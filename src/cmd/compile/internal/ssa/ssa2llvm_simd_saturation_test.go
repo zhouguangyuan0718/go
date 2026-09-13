@@ -106,6 +106,7 @@ func TestLLVMGeneratedSIMDSaturatingConversions(t *testing.T) {
 					F:  &Func{Config: &Config{arch: "amd64"}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}},
 					Vs: make(map[ID]llvm.Value), b: builder,
 				}
+				context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 				args := make([]*Value, test.arity)
 				for i := range args {
 					args[i] = &Value{ID: ID(i + 1), Op: OpArg, Type: input}

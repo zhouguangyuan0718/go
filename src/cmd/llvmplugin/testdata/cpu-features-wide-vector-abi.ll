@@ -17,7 +17,7 @@ fallback:
   ret <32 x i8> %x
 }
 
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx" "goallc.cpu.multiversion"="x86.avx2" "target-cpu"="x86-64" }
+attributes #0 = { "target-features"="+avx" "goallc.cpu.multiversion"="x86.avx2" "target-cpu"="x86-64" }
 
 !goallc.cpu.config = !{!0}
 !0 = !{!"goallc.cpu.v1", !"amd64", !"v1"}

@@ -247,6 +247,7 @@ func TestLLVMGeneratedSIMDStaticShuffles(t *testing.T) {
 						F:  &Func{Config: &Config{arch: arch}, Entry: &Block{CPUfeatures: CPUavx | CPUavx2 | CPUavx512}},
 						Vs: make(map[ID]llvm.Value), b: builder,
 					}
+					context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 					args := make([]*Value, len(inputs))
 					for i, input := range inputs {
 						args[i] = &Value{ID: ID(i + 1), Op: OpArg, Type: input}
