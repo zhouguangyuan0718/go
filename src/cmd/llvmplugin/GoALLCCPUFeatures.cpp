@@ -18,6 +18,8 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -42,6 +44,7 @@ constexpr StringLiteral ConfigMD = "goallc.cpu.config";
 constexpr StringLiteral DoneMD = "goallc.cpu.fmv.done";
 constexpr StringLiteral GuardMD = "goallc.cpu.guard";
 constexpr StringLiteral RequiresMD = "goallc.cpu.requires";
+constexpr StringLiteral RequireAnchorMD = "goallc.cpu.require-anchor";
 constexpr StringLiteral MultiversionAttr = "goallc.cpu.multiversion";
 constexpr StringLiteral RuntimeFeatureMask = "runtime.goallcCPUFeatures";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
@@ -314,7 +317,33 @@ Expected<bool> specializeGuards(Function &F, uint64_t Predicates) {
   return !Guards.empty();
 }
 
+Error validateRequirementAnchor(const Instruction &I) {
+  const MDNode *Marker = I.getMetadata(RequireAnchorMD);
+  if (!Marker)
+    return Error::success();
+  if (Marker->getNumOperands() != 0)
+    return createStringError(inconvertibleErrorCode(),
+                             "!goallc.cpu.require-anchor must be empty");
+  const auto *Call = dyn_cast<IntrinsicInst>(&I);
+  if (!Call || Call->getIntrinsicID() != Intrinsic::sideeffect ||
+      !Call->getType()->isVoidTy() || !Call->arg_empty() ||
+      Call->hasOperandBundles())
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goallc.cpu.require-anchor must mark a void llvm.sideeffect() call "
+        "without arguments or operand bundles");
+  if (!I.getMetadata(RequiresMD))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "!goallc.cpu.require-anchor must have !goallc.cpu.requires");
+  return Error::success();
+}
+
 Error verifyRequirements(Function &F, const CPUConfig &Config) {
+  if (llvm::none_of(instructions(F), [](const Instruction &I) {
+        return I.getMetadata(RequiresMD) != nullptr;
+      }))
+    return Error::success();
   // LLVM owns CPU defaults, feature implication and ordered +/- overrides.
   // Query that effective target instead of maintaining another ISA model.
   std::string ErrorMessage;
@@ -340,6 +369,7 @@ Error verifyRequirements(Function &F, const CPUConfig &Config) {
   if (!STI)
     return createStringError(inconvertibleErrorCode(),
                              "cannot query GoALLC CPU target features");
+  SmallVector<Instruction *, 8> Anchors;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (!I.getMetadata(RequiresMD))
@@ -357,8 +387,17 @@ Error verifyRequirements(Function &F, const CPUConfig &Config) {
                                  "GoALLC CPU requirement " + *Name +
                                      " survives in function " + F.getName() +
                                      " without the required target features");
+      if (I.getMetadata(RequireAnchorMD))
+        Anchors.push_back(&I);
     }
   }
+  // Keep source-local requirements alive through guard specialization and
+  // local simplification, even when their value folds to an argument or a
+  // constant. Once every requirement has passed, remove only these dedicated
+  // anchors so they cannot inhibit later optimization. An unmarked
+  // llvm.sideeffect call can carry unrelated semantics and must remain.
+  for (Instruction *Anchor : Anchors)
+    Anchor->eraseFromParent();
   return Error::success();
 }
 
@@ -695,8 +734,18 @@ Error llvm::goallc::runEarlyIRPipeline(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    if (F.hasFnAttribute(MultiversionAttr))
+    // Check the marker contract before folding can erase a malformed anchor.
+    // Capability requirements themselves are checked on each surviving path
+    // after specialization.
+    for (BasicBlock &BB : F)
+      for (Instruction &I : BB)
+        if (Error Err = validateRequirementAnchor(I))
+          return Err;
+    if (F.hasFnAttribute(MultiversionAttr)) {
       Candidates.push_back(&F);
+    } else if (Error Err = verifyRequirements(F, *Config)) {
+      return Err;
+    }
   }
 
   if (!Candidates.empty()) {

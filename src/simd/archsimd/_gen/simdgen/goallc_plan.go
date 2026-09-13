@@ -92,15 +92,16 @@ var goALLCSIMDPlannedFamilies = map[goALLCSIMDPlan][]string{
 		"broadcast1To32Masked", "broadcast1To64Masked",
 	},
 
-	// Shift and rotate operations share edge conditions around oversized,
-	// negative, saturating, and concatenate shifts.
+	// Ordinary shifts have generated lowering descriptors. The remaining
+	// shift and rotate operations have signed counts, saturation, or
+	// concatenate/modulo semantics that need separate recipes.
 	goALLCSIMDPlanShift: {
-		"RotateLeft", "RotateRight", "Shift", "ShiftAllLeft",
+		"RotateLeft", "RotateRight", "Shift",
 		"ShiftAllLeftConcatMod16", "ShiftAllLeftConcatMod32",
-		"ShiftAllLeftConcatMod64", "ShiftAllRight",
+		"ShiftAllLeftConcatMod64",
 		"ShiftAllRightConcatMod16", "ShiftAllRightConcatMod32",
-		"ShiftAllRightConcatMod64", "ShiftLeft", "ShiftLeftConcatMod16",
-		"ShiftLeftConcatMod32", "ShiftLeftConcatMod64", "ShiftRight",
+		"ShiftAllRightConcatMod64", "ShiftLeftConcatMod16",
+		"ShiftLeftConcatMod32", "ShiftLeftConcatMod64",
 		"ShiftRightConcatMod16", "ShiftRightConcatMod32",
 		"ShiftRightConcatMod64", "ShiftSaturated",
 	},

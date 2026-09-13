@@ -13,9 +13,10 @@ import "simd/archsimd"
 // Fixed 256-bit values only establish the AVX ABI floor. These operations
 // require AVX2, so their matching feature guards produce baseline, AVX2, and
 // resolver variants. Fixed 512-bit values already establish the AVX512 floor.
-// LLVM-AMD64-DAG: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard !{{[0-9]+}}
+// Each source operation and its requirement anchor share a debug location.
+// LLVM-AMD64-DAG: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard ![[AVX2:[0-9]+]]
 // LLVM-AMD64-DAG: "goallc.cpu.multiversion"="x86.avx2"
-// LLVM-AMD64-DAG: !{!"x86.avx2"}
+// LLVM-AMD64-DAG: ![[AVX2]] = !{!"x86.avx2"}
 // LLVM-OPT-AMD64-DAG: define internal {{.*}} @"codegen.llvmSIMDComposeAverageUnsigned256<goallc.fmv.baseline>"
 // LLVM-OPT-AMD64-DAG: define internal {{.*}} @"codegen.llvmSIMDComposeAverageUnsigned256<goallc.fmv.avx2>"
 // LLVM-OPT-AMD64-DAG: define internal {{.*}} @"codegen.llvmSIMDComposeAverageUnsigned256<goallc.fmv.resolve>"
@@ -79,7 +80,9 @@ func llvmSIMDComposeMulSign(x, y archsimd.Int8x16) archsimd.Int8x16 {
 // LLVM-AMD64-DAG: xor <32 x i8>
 // LLVM-AMD64-DAG: lshr <32 x i8>
 // LLVM-AMD64-DAG: or <32 x i8>
-// LLVM-AMD64-DAG: sub <32 x i8> {{.*}}!goallc.cpu.requires !{{[0-9]+}}
+// LLVM-AMD64-DAG: sub <32 x i8> {{.*}}!dbg ![[AVERAGE_LOC:[0-9]+]]
+// LLVM-AMD64-DAG: call void @llvm.sideeffect(){{.*}}!dbg ![[AVERAGE_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[AVX2]]
+// LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 //
 //go:noinline
 func llvmSIMDComposeAverageUnsigned256(x, y archsimd.Uint8x32) archsimd.Uint8x32 {
@@ -110,7 +113,8 @@ func llvmSIMDComposeAverageUnsigned512(x, y archsimd.Uint8x64) archsimd.Uint8x64
 // LLVM-AMD64-DAG: sext <16 x i16>
 // LLVM-AMD64-DAG: mul <16 x i32>
 // LLVM-AMD64-DAG: ashr <16 x i32>
-// LLVM-AMD64-DAG: trunc <16 x i32> {{.*}}!goallc.cpu.requires !{{[0-9]+}}
+// LLVM-AMD64-DAG: trunc <16 x i32> {{.*}}!dbg ![[MULHIGH_LOC:[0-9]+]]
+// LLVM-AMD64-DAG: call void @llvm.sideeffect(){{.*}}!dbg ![[MULHIGH_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR]]{{.*}}!goallc.cpu.requires ![[AVX2]]
 //
 //go:noinline
 func llvmSIMDComposeMulHighSigned256(x, y archsimd.Int16x16) archsimd.Int16x16 {
@@ -137,7 +141,8 @@ func llvmSIMDComposeMulHighUnsigned512(x, y archsimd.Uint16x32) archsimd.Uint16x
 }
 
 // LLVM-AMD64-DAG: define {{.*}} <32 x i8> @codegen.llvmSIMDComposeMulSign256(
-// LLVM-AMD64-DAG: call <32 x i8> @llvm.x86.avx2.psign.b{{.*}}!goallc.cpu.requires !{{[0-9]+}}
+// LLVM-AMD64-DAG: call <32 x i8> @llvm.x86.avx2.psign.b{{.*}}!dbg ![[MULSIGN_LOC:[0-9]+]]
+// LLVM-AMD64-DAG: call void @llvm.sideeffect(){{.*}}!dbg ![[MULSIGN_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR]]{{.*}}!goallc.cpu.requires ![[AVX2]]
 //
 //go:noinline
 func llvmSIMDComposeMulSign256(x, y archsimd.Int8x32) archsimd.Int8x32 {

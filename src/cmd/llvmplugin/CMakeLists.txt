@@ -128,6 +128,54 @@ if(BUILD_TESTING)
   )
 
   goallc_add_filecheck_test(
+    GoALLCCPUFeatures.FoldedGuarded
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-folded-guarded.ll"
+    CHECK
+    "${GOALLC_OPT_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -passes=goallc-cpu-features,goallc-cpu-features
+    -S
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-folded-guarded.ll"
+    -o -
+  )
+
+  goallc_add_filecheck_test(
+    GoALLCCPUFeatures.FoldedUnguarded
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-folded-unguarded.ll"
+    CHECK
+    "${GOALLC_NOT_EXECUTABLE}"
+    "${GOALLC_OPT_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -passes=goallc-cpu-features
+    -disable-output
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-folded-unguarded.ll"
+  )
+
+  goallc_add_filecheck_test(
+    GoALLCCPUFeatures.AnchorNoFloor
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-anchor-no-floor.ll"
+    CHECK
+    "${GOALLC_NOT_EXECUTABLE}"
+    "${GOALLC_OPT_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -passes=goallc-cpu-features
+    -disable-output
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-anchor-no-floor.ll"
+  )
+
+  goallc_add_filecheck_test(
+    GoALLCCPUFeatures.InvalidAnchor
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-invalid-anchor.ll"
+    CHECK
+    "${GOALLC_NOT_EXECUTABLE}"
+    "${GOALLC_OPT_EXECUTABLE}"
+    "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
+    -passes=goallc-cpu-features
+    -disable-output
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-features-invalid-anchor.ll"
+  )
+
+  goallc_add_filecheck_test(
     GoALLCCPUFeatures.FeatureFloorAVX
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/cpu-feature-floor-avx.ll"
     CHECK

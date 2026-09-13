@@ -110,6 +110,7 @@ const llvmTargetFeaturesAttr = "target-features"
 const goCPUConfigMD = "goallc.cpu.config"
 const goCPUGuardMD = "goallc.cpu.guard"
 const goCPURequiresMD = "goallc.cpu.requires"
+const goCPURequireAnchorMD = "goallc.cpu.require-anchor"
 const goCPUMultiversionAttr = "goallc.cpu.multiversion"
 
 // Keep fixed-size memmoves within the store expansion limits of the supported
@@ -1942,11 +1943,13 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 	laneBits := int(info.laneBits)
 	isFloat := info.lane == goALLCSIMDLaneFloat
 	finish := func(result llvm.Value) (llvm.Value, bool) {
-		lfc.requireCPUFeature(v, result)
+		lfc.requireGeneratedSIMDCPUFeature(v)
 		return result, true
 	}
 
 	switch info.lowering {
+	case goALLCSIMDLowerShiftAllLeft, goALLCSIMDLowerShiftAllRight, goALLCSIMDLowerShiftLeft, goALLCSIMDLowerShiftRight:
+		return finish(lfc.simdShift(v, info, laneType, lanes))
 	case goALLCSIMDLowerPermute, goALLCSIMDLowerConcatPermute, goALLCSIMDLowerLookupOrZero, goALLCSIMDLowerPermuteOrZero, goALLCSIMDLowerPermuteOrZero128:
 		return finish(lfc.simdDynamicShuffle(v, info, laneType, lanes))
 	case goALLCSIMDLowerPermute32_128, goALLCSIMDLowerPermuteLow16_128, goALLCSIMDLowerPermuteHigh16_128, goALLCSIMDLowerConcatSelect128, goALLCSIMDLowerConcatPermute128, goALLCSIMDLowerConcatShiftBytes128:
