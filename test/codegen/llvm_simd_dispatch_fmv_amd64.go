@@ -22,9 +22,9 @@ import (
 // LLVM-AMD64-DAG: define goabiinternal void @"codegen.llvmSIMDDispatchFMVMatrix@simd256"{{.*}} #[[MATRIX256:[0-9]+]]
 // LLVM-AMD64-DAG: define goabiinternal void @"codegen.llvmSIMDDispatchFMVMatrix@simd512"{{.*}} #[[MATRIX512:[0-9]+]]
 // LLVM-AMD64-DAG: attributes #[[MATRIX0]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx2,x86.avx512"
-// LLVM-AMD64-DAG: attributes #[[MATRIX128]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"{{.*}}"goallc.cpu.multiversion"="x86.avx2,x86.avx512"
-// LLVM-AMD64-DAG: attributes #[[MATRIX256]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx2"{{.*}}"goallc.cpu.multiversion"="x86.avx512"
-// LLVM-AMD64-DAG: attributes #[[MATRIX512]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx512"
+// LLVM-AMD64-DAG: attributes #[[MATRIX128]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx2,x86.avx512"{{.*}}"target-features"="+avx"
+// LLVM-AMD64-DAG: attributes #[[MATRIX256]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx512"{{.*}}"target-features"="+avx,+avx2"
+// LLVM-AMD64-DAG: attributes #[[MATRIX512]] = { {{.*}}"target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl"
 // LLVM-NM-AMD64: codegen.llvmSIMDDispatchFMVMatrix@simd0.goallc.fmv.slot
 // LLVM-NM-AMD64-COUNT-5: codegen.llvmSIMDDispatchFMVMatrix@simd0<1>
 // LLVM-NM-AMD64-NOT: codegen.llvmSIMDDispatchFMVMatrix@simd0<1>

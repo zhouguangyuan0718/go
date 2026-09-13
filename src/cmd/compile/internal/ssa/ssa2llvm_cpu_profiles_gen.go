@@ -26,14 +26,14 @@ const (
 )
 
 var llvmCPUProfiles = [...]llvmCPUProfile{
-	{name: goCPUProfileX86SSE41, arch: "amd64", field: "HasSSE41", runtimeGuard: "runtime.x86HasSSE41", capabilities: 0x4},
-	{name: goCPUProfileX86AVX, arch: "amd64", field: "HasAVX", runtimeGuard: "", capabilities: 0x10},
-	{name: goCPUProfileX86AVX2, arch: "amd64", field: "HasAVX2", runtimeGuard: "", capabilities: 0x210},
-	{name: goCPUProfileX86AVX512, arch: "amd64", field: "HasAVX512", runtimeGuard: "", capabilities: 0x610},
-	{name: goCPUProfileX86AVX512BITALG, arch: "amd64", field: "HasAVX512BITALG", runtimeGuard: "", capabilities: 0xe10},
-	{name: goCPUProfileX86AVX512VPOPCNTDQ, arch: "amd64", field: "HasAVX512VPOPCNTDQ", runtimeGuard: "", capabilities: 0x1610},
-	{name: goCPUProfileX86FMA, arch: "amd64", field: "HasFMA", runtimeGuard: "runtime.x86HasFMA", capabilities: 0x20},
-	{name: goCPUProfileX86POPCNT, arch: "amd64", field: "HasPOPCNT", runtimeGuard: "runtime.x86HasPOPCNT", capabilities: 0x80},
-	{name: goCPUProfileARM64LSE, arch: "arm64", field: "HasATOMICS", runtimeGuard: "runtime.arm64HasATOMICS", capabilities: 0x100},
-	{name: goCPUProfileX86AVX512VBMI, arch: "amd64", field: "HasAVX512VBMI", runtimeGuard: "", capabilities: 0x2610},
+	{name: goCPUProfileX86SSE41, arch: "amd64", field: "HasSSE41", runtimeGuard: "runtime.x86HasSSE41", capabilities: 0x4, targetFeatures: "+sse4.1"},
+	{name: goCPUProfileX86AVX, arch: "amd64", field: "HasAVX", runtimeGuard: "", capabilities: 0x10, targetFeatures: "+avx"},
+	{name: goCPUProfileX86AVX2, arch: "amd64", field: "HasAVX2", runtimeGuard: "", capabilities: 0x210, targetFeatures: "+avx,+avx2"},
+	{name: goCPUProfileX86AVX512, arch: "amd64", field: "HasAVX512", runtimeGuard: "", capabilities: 0x610, targetFeatures: "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl"},
+	{name: goCPUProfileX86AVX512BITALG, arch: "amd64", field: "HasAVX512BITALG", runtimeGuard: "", capabilities: 0xe10, targetFeatures: "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512bitalg"},
+	{name: goCPUProfileX86AVX512VPOPCNTDQ, arch: "amd64", field: "HasAVX512VPOPCNTDQ", runtimeGuard: "", capabilities: 0x1610, targetFeatures: "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512vpopcntdq"},
+	{name: goCPUProfileX86FMA, arch: "amd64", field: "HasFMA", runtimeGuard: "runtime.x86HasFMA", capabilities: 0x20, targetFeatures: "+fma"},
+	{name: goCPUProfileX86POPCNT, arch: "amd64", field: "HasPOPCNT", runtimeGuard: "runtime.x86HasPOPCNT", capabilities: 0x80, targetFeatures: "+popcnt"},
+	{name: goCPUProfileARM64LSE, arch: "arm64", field: "HasATOMICS", runtimeGuard: "runtime.arm64HasATOMICS", capabilities: 0x100, targetFeatures: "+lse"},
+	{name: goCPUProfileX86AVX512VBMI, arch: "amd64", field: "HasAVX512VBMI", runtimeGuard: "", capabilities: 0x2610, targetFeatures: "+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+avx512vbmi"},
 }

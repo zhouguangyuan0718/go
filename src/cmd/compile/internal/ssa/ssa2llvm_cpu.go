@@ -22,6 +22,7 @@ import (
 // A feature floor supplies capabilities without supplying predicates.
 type llvmCPUProfile struct {
 	name, arch, field, runtimeGuard string
+	targetFeatures                  string
 	capabilities                    uint64
 }
 
@@ -100,8 +101,7 @@ func llvmMidwaySIMDFeatureFloor(f *Func) (string, bool) {
 // selected width. The generic Vec256 ABI itself needs AVX, while @simd256 is
 // reached only after the portable dispatcher has observed HasAVX2; keep those
 // two contracts distinct. This is a precondition, not a new runtime dispatch
-// request: the shared early CPU-feature pass consumes the attribute and adds
-// the target feature.
+// request: the frontend adds the corresponding LLVM target features directly.
 func llvmSIMDFeatureFloor(f *Func) string {
 	if f.Config.arch != "amd64" {
 		return ""

@@ -21,7 +21,7 @@ import "simd/archsimd"
 // LLVM-AMD64-DAG: ![[GUARD_AVX2:[0-9]+]] = !{!"x86.avx2"}
 // LLVM-AMD64-DAG: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard ![[GUARD_AVX2]]
 // LLVM-AMD64-DAG: ![[CALL_AVX]] = !{!"x86.avx"}
-// LLVM-AMD64-DAG: attributes #[[IDENTITY256]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx"
+// LLVM-AMD64-DAG: attributes #[[IDENTITY256]] = { {{.*}}"target-features"="+avx"
 // LLVM-AMD64-DAG: attributes #[[GUARDED256]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx2"
 // LLVM-NM-AMD64: codegen.llvmSIMDGuardedWideCall256.goallc.fmv.slot
 // LLVM-NM-AMD64-COUNT-3: codegen.llvmSIMDGuardedWideCall256<1>
@@ -31,7 +31,7 @@ import "simd/archsimd"
 // LLVM-AMD64-DAG: call goabiinternal <64 x i8> @codegen.llvmSIMDWideIdentity512(<64 x i8> {{.*}}){{.*}}!goallc.cpu.requires ![[CALL_AVX512:[0-9]+]]
 // LLVM-AMD64-DAG: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard ![[CALL_AVX512]]
 // LLVM-AMD64-DAG: ![[CALL_AVX512]] = !{!"x86.avx512"}
-// LLVM-AMD64-DAG: attributes #[[IDENTITY512]] = { {{.*}}"goallc.cpu.feature-floor"="x86.avx512"
+// LLVM-AMD64-DAG: attributes #[[IDENTITY512]] = { {{.*}}"target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl"
 // LLVM-AMD64-DAG: attributes #[[GUARDED512]] = { {{.*}}"goallc.cpu.multiversion"="x86.avx512"
 // LLVM-NM-AMD64: codegen.llvmSIMDGuardedWideCall512.goallc.fmv.slot
 // LLVM-NM-AMD64-COUNT-3: codegen.llvmSIMDGuardedWideCall512<1>

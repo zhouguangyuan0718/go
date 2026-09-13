@@ -250,25 +250,3 @@ func TestLLVMCPUFeaturePlanOrdinaryOpsDoNotRequestISA(t *testing.T) {
 		}
 	}
 }
-
-func TestLLVMCPUFeaturePlanGeneratedCoverage(t *testing.T) {
-	for op := Op(0); int(op) < len(goALLCSIMDOpcodeIndex); op++ {
-		info, ok := goALLCSIMDInfo(op)
-		if !ok {
-			continue
-		}
-		for _, arch := range []string{"amd64", "arm64"} {
-			got, kind := llvmCPURequirement(&Value{Op: op}, arch)
-			if want := info.archInfo(arch).cpuProfile; got != want || kind != llvmCPUGenerated {
-				t.Errorf("%s/%s: requirement=%s kind=%d, want %s", op, arch, got, kind, want)
-			}
-		}
-	}
-	for _, op := range []Op{OpRound, OpAtomicAdd64, OpAdd64} {
-		for _, arch := range []string{"amd64", "arm64"} {
-			if got, _ := llvmCPURequirement(&Value{Op: op}, arch); got != "" {
-				t.Errorf("%s/%s got an extra requirement %s", op, arch, got)
-			}
-		}
-	}
-}

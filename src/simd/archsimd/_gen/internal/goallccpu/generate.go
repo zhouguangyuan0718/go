@@ -28,7 +28,7 @@ type resolvedFeature struct {
 	Targets []string
 }
 
-func resolve(fs []feature, ps []profile) (map[string]resolvedFeature, error) {
+func resolve(fs []feature) (map[string]resolvedFeature, error) {
 	byName := make(map[string]feature)
 	bits := make(map[uint]bool)
 	for _, f := range fs {
@@ -85,38 +85,6 @@ func resolve(fs []feature, ps []profile) (map[string]resolvedFeature, error) {
 			return nil, err
 		}
 	}
-	names, aliases, guards := map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, p := range ps {
-		f, ok := resolved[p.Feature]
-		if !ok || f.Arch == "" || len(f.Targets) == 0 || names[p.Name] {
-			return nil, fmt.Errorf("invalid or duplicate profile %s", p.Name)
-		}
-		prefix := "x86."
-		if f.Arch == "arm64" {
-			prefix = "arm64."
-		}
-		if !strings.HasPrefix(p.Name, prefix) {
-			return nil, fmt.Errorf("profile %s has wrong architecture", p.Name)
-		}
-		names[p.Name] = true
-		if p.RuntimeGuard != "" {
-			if guards[p.RuntimeGuard] {
-				return nil, fmt.Errorf("duplicate runtime guard %s", p.RuntimeGuard)
-			}
-			guards[p.RuntimeGuard] = true
-		}
-		for _, alias := range p.SIMDAliases {
-			if aliases[alias] {
-				return nil, fmt.Errorf("duplicate SIMD alias %s", alias)
-			}
-			aliases[alias] = true
-		}
-	}
-	for _, alias := range unprofiledSIMDAliases {
-		if aliases[alias] {
-			return nil, fmt.Errorf("SIMD alias %q is both profiled and unprofiled", alias)
-		}
-	}
 	return resolved, nil
 }
 
@@ -136,7 +104,7 @@ func runtimeName(f feature) string {
 }
 
 func generatedFiles() (map[string][]byte, error) {
-	resolved, err := resolve(features, profiles)
+	resolved, err := resolve(features)
 	if err != nil {
 		return nil, err
 	}
@@ -170,16 +138,10 @@ func generatedFiles() (map[string][]byte, error) {
 	fmt.Fprint(&defs, "#endif\n\n#ifdef GOALLC_CPU_PROFILE\n")
 	for _, p := range profiles {
 		f := resolved[p.Feature]
-		fmt.Fprintf(&goData, "{name:%s, arch:%q, field:%q, runtimeGuard:%q, capabilities:%#x},\n", goProfileName(p), f.Arch, f.Field, p.RuntimeGuard, f.Mask)
-		var caps []string
-		for _, candidate := range features {
-			if f.Mask&(uint64(1)<<candidate.Bit) != 0 {
-				caps = append(caps, "Feature"+candidate.Name)
-			}
-		}
 		targets := "+" + strings.Join(f.Targets, ",+")
+		fmt.Fprintf(&goData, "{name:%s, arch:%q, field:%q, runtimeGuard:%q, capabilities:%#x, targetFeatures:%q},\n", goProfileName(p), f.Arch, f.Field, p.RuntimeGuard, f.Mask, targets)
 		_, suffix, _ := strings.Cut(p.Name, ".")
-		fmt.Fprintf(&defs, "GOALLC_CPU_PROFILE(%q, %q, %q, %q, Feature%s, %s)\n", p.Name, suffix, targets, f.Arch, f.Name, strings.Join(caps, " | "))
+		fmt.Fprintf(&defs, "GOALLC_CPU_PROFILE(%q, %q, %q, %q, Feature%s)\n", p.Name, suffix, targets, f.Arch, f.Name)
 	}
 	fmt.Fprint(&defs, "#endif\n")
 	fmt.Fprint(&goData, "}\n")

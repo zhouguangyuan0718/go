@@ -15,7 +15,7 @@ feature:
 fallback:
   ret <32 x i8> %x
 }
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx" "goallc.cpu.multiversion"="x86.avx512" "target-cpu"="x86-64" }
+attributes #0 = { "target-features"="+avx" "goallc.cpu.multiversion"="x86.avx512" "target-cpu"="x86-64" }
 !goallc.cpu.config = !{!0}
 !0 = !{!"goallc.cpu.v1", !"amd64", !"v1"}
 !1 = !{!"x86.avx512"}
@@ -58,7 +58,7 @@ only.low:
 fallback:
   ret <32 x i8> %x
 }
-attributes #1 = { "goallc.cpu.feature-floor"="x86.avx" "goallc.cpu.multiversion"="x86.avx2,x86.avx512" }
+attributes #1 = { "target-features"="+avx" "goallc.cpu.multiversion"="x86.avx2,x86.avx512" }
 
 ; CHECK-LABEL: define internal goabiinternal <32 x i8> @"mixed<goallc.fmv.baseline>"
 ; CHECK-NOT: add <32 x i8>
@@ -79,7 +79,7 @@ define i8 @floor_boolean() #2 {
   %low = load i8, ptr @runtime.x86HasAVX2, !goallc.cpu.guard !2
   ret i8 %low
 }
-attributes #2 = { "goallc.cpu.feature-floor"="x86.avx2" "goallc.cpu.multiversion"="x86.avx2" }
+attributes #2 = { "target-features"="+avx,+avx2" "goallc.cpu.multiversion"="x86.avx2" }
 ; CHECK-LABEL: define internal i8 @"floor_boolean<goallc.fmv.baseline>"
 ; CHECK: ret i8 0
 ; CHECK-LABEL: define internal i8 @"floor_boolean<goallc.fmv.avx2>"

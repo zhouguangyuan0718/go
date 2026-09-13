@@ -111,7 +111,6 @@ const goCPUConfigMD = "goallc.cpu.config"
 const goCPUGuardMD = "goallc.cpu.guard"
 const goCPURequiresMD = "goallc.cpu.requires"
 const goCPUMultiversionAttr = "goallc.cpu.multiversion"
-const goCPUFeatureFloorAttr = "goallc.cpu.feature-floor"
 
 // Keep fixed-size memmoves within the store expansion limits of the supported
 // LLVM targets. Larger moves must use runtime.memmove rather than a libc symbol,
@@ -4641,14 +4640,18 @@ func LLVMCompile(f *Func) {
 		// and instruction selection without selecting a host-specific CPU.
 		FCtxt.LF.AddTargetDependentFunctionAttr(llvmTargetCPUAttr, cpu)
 	}
-	if features := llvmBaselineTargetFeatures(f.Config.arch, buildcfg.GOARM64); features != "" {
+	features := llvmBaselineTargetFeatures(f.Config.arch, buildcfg.GOARM64)
+	if floor := FCtxt.CPUFeatures.floor; floor != "" {
+		if features != "" {
+			features += ","
+		}
+		features += llvmCPUProfileByName(floor).targetFeatures
+	}
+	if features != "" {
 		// GOARM64 makes LSE mandatory at v8.1 and can request it explicitly at
 		// v8.0. Generic LLVM atomics need the same function feature in order to
 		// select the single-instruction LSE forms.
 		FCtxt.LF.AddTargetDependentFunctionAttr(llvmTargetFeaturesAttr, features)
-	}
-	if floor := FCtxt.CPUFeatures.floor; floor != "" {
-		FCtxt.LF.AddTargetDependentFunctionAttr(goCPUFeatureFloorAttr, floor)
 	}
 	// Go has already made its source-level inlining decision before LLVM
 	// lowering. Preserve both explicit //go:noinline boundaries and the

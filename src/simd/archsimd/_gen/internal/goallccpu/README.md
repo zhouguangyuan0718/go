@@ -43,7 +43,12 @@ existing hardware/fallback feature checks; wide-call requirements come from
 the ABI. Ordinary LLVM intrinsics and atomics carry no ISA requirement
 metadata: LLVM legalizes them for the selected target. The per-function
 planner combines Go feature checks and SIMD/ABI requirements with entry
-assumptions before LLVM emission. The LLVM plugin remains the only
+assumptions before LLVM emission. Entry assumptions become standard LLVM
+`target-features`, using the same generated target bundles as the plugin.
+The plugin queries LLVM's effective target for instruction legality, without
+turning those capabilities into Go predicates. Scalar dispatchers retain
+baseline features; wide-register ABI dispatchers retain source features.
+The LLVM plugin remains the only
 owner of CPU specialization and dispatch. Midway width dispatch, unguarded
 wide-call floors, fail-closed unguarded SIMD policy and FMV subset enumeration
 are unchanged.
