@@ -6,12 +6,15 @@ standalone generator. From `src/simd/archsimd/_gen`:
 ```
 go run .                 # existing full pipeline, including CPU tables
 go run . -cpu-only       # only CPU tables; no XED/ARM ISA inputs needed
-go run . -check-cpu      # check CPU tables without writes or ISA inputs
 go test ./internal/goallccpu ./simdgen/... ./sgutil/...
 ```
 
 The existing `-goroot` destination and `-n` dry-run options apply to the CPU
 stage too. Full generation still requires the usual ISA inputs.
+
+The ordinary SSA test `TestCPUGeneratedFilesUpToDate` runs the CPU generator
+into a temporary tree and compares its outputs with committed files, like
+the existing SSA rewrite-generation test. There is no separate check command.
 
 `registry.go` is the hand-maintained feature/profile source. The SIMD
 descriptor generator calls `ProfileForSIMD` directly using the upstream

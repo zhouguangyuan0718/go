@@ -5,67 +5,10 @@
 package goallccpu
 
 import (
-	"bytes"
-	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 )
-
-func TestGeneratedFilesCurrent(t *testing.T) {
-	files, err := generatedFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range files {
-		got, err := os.ReadFile(filepath.Join(sourceRoot(), name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s is stale; regenerate with simd/archsimd/_gen", name)
-		}
-	}
-}
-
-func TestGenerateAndCheck(t *testing.T) {
-	files, err := generatedFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 3 {
-		t.Fatalf("got %d outputs, want compiler/plugin/runtime only", len(files))
-	}
-	root := t.TempDir()
-	for name := range files {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := Generate(root, true); err == nil {
-		t.Fatal("check accepted missing outputs")
-	}
-	if err := Generate(root, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := Generate(root, true); err != nil {
-		t.Fatal(err)
-	}
-	name := filepath.Join(root, "src/runtime/cpuflags_goallc_gen.go")
-	stale := []byte("stale")
-	if err := os.WriteFile(name, stale, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := Generate(root, true); err == nil {
-		t.Fatal("check accepted stale output")
-	}
-	got, err := os.ReadFile(name)
-	if err != nil || !bytes.Equal(got, stale) {
-		t.Fatalf("check rewrote stale output: %q, %v", got, err)
-	}
-}
 
 func TestRuntimeBitABI(t *testing.T) {
 	// Existing object files contain these literal numbers. Do not regenerate
@@ -145,9 +88,4 @@ func TestRejectInvalidRegistry(t *testing.T) {
 			}
 		})
 	}
-}
-
-func sourceRoot() string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "../../../../../.."))
 }

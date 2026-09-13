@@ -213,9 +213,9 @@ func generatedFiles() (map[string][]byte, error) {
 	return files, nil
 }
 
-// Generate writes the committed tables, or checks them without writes.
+// Generate writes the committed tables.
 // No XED or ARM ISA data is needed for this stage.
-func Generate(root string, check bool) error {
+func Generate(root string) error {
 	files, err := generatedFiles()
 	if err != nil {
 		return err
@@ -227,15 +227,7 @@ func Generate(root string, check bool) error {
 	slices.Sort(names)
 	for _, name := range names {
 		path := filepath.Join(root, name)
-		if check {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(data, files[name]) {
-				return fmt.Errorf("%s is stale; regenerate with simd/archsimd/_gen", name)
-			}
-		} else if err := os.WriteFile(path, files[name], 0644); err != nil {
+		if err := os.WriteFile(path, files[name], 0644); err != nil {
 			return err
 		}
 	}
