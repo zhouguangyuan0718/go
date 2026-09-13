@@ -8,7 +8,7 @@ entry:
   ret <16 x i8> %sum
 }
 
-attributes #0 = { "goallc.cpu.feature-floor"="x86.avx" }
+attributes #0 = { "target-features"="+avx" }
 
 !goallc.cpu.config = !{!0}
 !0 = !{!"goallc.cpu.v1", !"amd64", !"v1"}

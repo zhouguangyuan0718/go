@@ -164,6 +164,7 @@ func TestLLVMWidthOnlySIMDValuesKeepNaturalOperationTypes(t *testing.T) {
 		Vs: make(map[ID]llvm.Value),
 		b:  builder,
 	}
+	context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 	x := &Value{ID: 1, Op: OpArg, Type: floatType}
 	y := &Value{ID: 2, Op: OpArg, Type: floatType}
 	context.Vs[x.ID] = function.Param(0)
@@ -216,6 +217,7 @@ func TestLLVMSIMDLaneViewsAreOnDemand(t *testing.T) {
 		Vs: make(map[ID]llvm.Value),
 		b:  builder,
 	}
+	context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 	x := &Value{ID: 1, Op: OpArg, Type: floatType}
 	y := &Value{ID: 2, Op: OpArg, Type: floatType}
 	context.Vs[x.ID] = function.Param(0)
@@ -1168,6 +1170,7 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			x := &Value{ID: 1, Op: OpArg, Type: typ}
 			y := &Value{ID: 2, Op: OpArg, Type: typ}
 			context.Vs[x.ID] = function.Param(0)
@@ -1206,6 +1209,7 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 			Vs: make(map[ID]llvm.Value),
 			b:  builder,
 		}
+		context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 		// simdgen's AMD64 intrinsic table passes method y before method x so
 		// VPANDN receives the order required by that target instruction.
 		methodY := &Value{ID: 1, Op: OpArg, Type: typ}
@@ -1261,6 +1265,7 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			x := &Value{ID: 1, Op: OpArg, Type: typ}
 			context.Vs[x.ID] = function.Param(0)
 			result := &Value{ID: 2, Op: test.op, Type: typ, Args: []*Value{x}}
@@ -1319,6 +1324,7 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			x := &Value{ID: 1, Op: OpArg, Type: inputType}
 			y := &Value{ID: 2, Op: OpArg, Type: inputType}
 			context.Vs[x.ID] = function.Param(0)
@@ -1368,6 +1374,7 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			x := &Value{ID: 1, Op: OpArg, Type: typ}
 			y := &Value{ID: 2, Op: OpArg, Type: typ}
 			mask := &Value{ID: 3, Op: OpArg, Type: typ}
@@ -1408,6 +1415,7 @@ func TestLLVMGenericVec128Lowering(t *testing.T) {
 			Vs: make(map[ID]llvm.Value),
 			b:  builder,
 		}
+		context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 		vecPointer := types.NewPtr(typ)
 		src := &Value{ID: 1, Op: OpArg, Type: vecPointer}
 		dst := &Value{ID: 2, Op: OpArg, Type: vecPointer}
@@ -1479,6 +1487,7 @@ func TestLLVMGenericSIMDElementLowering(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			x := &Value{ID: 1, Op: OpArg, Type: vectorGoType}
 			y := &Value{ID: 2, Op: OpArg, Type: test.elem}
 			context.Vs[x.ID] = function.Param(0)
@@ -1573,6 +1582,7 @@ func TestLLVMGenericWideSIMDLowering(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			args := make([]*Value, test.arity)
 			for i := range args {
 				args[i] = &Value{ID: ID(i + 1), Op: OpArg, Type: inputType}
@@ -1639,6 +1649,7 @@ func TestLLVMGeneratedSIMDReductions(t *testing.T) {
 				Vs: make(map[ID]llvm.Value),
 				b:  builder,
 			}
+			context.CPUFeatures = llvmPlanCPUFeatures(context.F)
 			x := &Value{ID: 1, Op: OpArg, Type: vectorGoType}
 			context.Vs[x.ID] = function.Param(0)
 			result := &Value{ID: 2, Op: test.op, Type: types.TypeVec128, Args: []*Value{x}}
@@ -1828,8 +1839,8 @@ func TestLLVMCPUProfileCoverage(t *testing.T) {
 		{name: "no-floor", required: goCPUProfileX86AVX, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := llvmCPUProfileCoveredByFloor(test.required, test.floor); got != test.want {
-				t.Fatalf("llvmCPUProfileCoveredByFloor(%q, %q) = %v, want %v", test.required, test.floor, got, test.want)
+			if got := llvmCPUProfileSupplies(test.floor, test.required); got != test.want {
+				t.Fatalf("llvmCPUProfileSupplies(%q, %q) = %v, want %v", test.floor, test.required, got, test.want)
 			}
 		})
 	}
@@ -2021,6 +2032,7 @@ func TestLLVMX86CPUFeatureGuard(t *testing.T) {
 	disabled := &Block{ID: 3}
 
 	guard := &Block{
+		Func:     &Func{pass: &pass{}},
 		Kind:     BlockIf,
 		Controls: [2]*Value{load, nil},
 		Succs:    []Edge{{b: enabled}, {b: disabled}},
@@ -2029,12 +2041,26 @@ func TestLLVMX86CPUFeatureGuard(t *testing.T) {
 	if profile != goCPUProfileX86AVX2 || successor != 0 {
 		t.Fatalf("positive guard = (%q, %v), want (%q, %v)", profile, successor, goCPUProfileX86AVX2, 0)
 	}
+	if caps, taken := ifEffect(guard); caps != CPUavx|CPUavx2 || taken != 0 {
+		t.Fatalf("native positive guard = (%v, %d)", caps, taken)
+	}
 
 	not := &Value{Op: OpNot, Args: []*Value{load}}
 	guard.Controls[0] = not
 	profile, successor = llvmX86CPUFeatureGuard(guard)
 	if profile != goCPUProfileX86AVX2 || successor != 1 {
 		t.Fatalf("negated guard = (%q, %v), want (%q, %v)", profile, successor, goCPUProfileX86AVX2, 1)
+	}
+	if caps, taken := ifEffect(guard); caps != CPUavx|CPUavx2 || taken != 1 {
+		t.Fatalf("native negated guard = (%v, %d)", caps, taken)
+	}
+	// Shared recognition must not merge the two analyses' feature policies.
+	x86Type.Field(0).Sym = pkg.Lookup("HasFMA")
+	if caps, _ := ifEffect(guard); caps != CPUNone {
+		t.Fatalf("shared recognition widened native FMA policy: %v", caps)
+	}
+	if profile, taken := llvmX86CPUFeatureGuard(guard); profile != goCPUProfileX86FMA || taken != 1 {
+		t.Fatalf("shared recognition lost LLVM FMA predicate: (%s, %d)", profile, taken)
 	}
 }
 
@@ -2105,50 +2131,6 @@ func TestLLVMBaselineTargetFeatures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := llvmBaselineTargetFeatures(test.arch, test.goarm64); got != test.want {
 				t.Fatalf("llvmBaselineTargetFeatures(%q, %+v) = %q, want %q", test.arch, test.goarm64, got, test.want)
-			}
-		})
-	}
-}
-
-func TestLLVMRequiredCPUProfiles(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		arch          string
-		goamd64       int
-		baselineLevel int
-		profile       string
-		want          string
-	}{
-		{"arm64-round", "arm64", 1, 2, goCPUProfileX86SSE41, ""},
-		{"v1-round", "amd64", 1, 2, goCPUProfileX86SSE41, goCPUProfileX86SSE41},
-		{"v2-round", "amd64", 2, 2, goCPUProfileX86SSE41, ""},
-		{"v1-fma", "amd64", 1, 3, goCPUProfileX86FMA, goCPUProfileX86FMA},
-		{"v2-fma", "amd64", 2, 3, goCPUProfileX86FMA, goCPUProfileX86FMA},
-		{"v3-fma", "amd64", 3, 3, goCPUProfileX86FMA, ""},
-		{"v4-fma", "amd64", 4, 3, goCPUProfileX86FMA, ""},
-		{"v1-popcnt", "amd64", 1, 2, goCPUProfileX86POPCNT, goCPUProfileX86POPCNT},
-		{"v2-popcnt", "amd64", 2, 2, goCPUProfileX86POPCNT, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := llvmRequiredAMD64CPUProfile(test.arch, test.goamd64, test.baselineLevel, test.profile); got != test.want {
-				t.Fatalf("llvmRequiredAMD64CPUProfile(%q, %d, %d, %q) = %q, want %q", test.arch, test.goamd64, test.baselineLevel, test.profile, got, test.want)
-			}
-		})
-	}
-
-	for _, test := range []struct {
-		name               string
-		arch               string
-		baselineHasFeature bool
-		want               string
-	}{
-		{"amd64", "amd64", false, ""},
-		{"arm64-v8.0", "arm64", false, goCPUProfileARM64LSE},
-		{"arm64-lse", "arm64", true, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := llvmRequiredARM64CPUProfile(test.arch, test.baselineHasFeature, goCPUProfileARM64LSE); got != test.want {
-				t.Fatalf("llvmRequiredARM64CPUProfile(%q, %t, %q) = %q, want %q", test.arch, test.baselineHasFeature, goCPUProfileARM64LSE, got, test.want)
 			}
 		})
 	}

@@ -4,7 +4,10 @@
 
 package main
 
-import "testing"
+import (
+	"simd/archsimd/_gen/internal/goallccpu"
+	"testing"
+)
 
 func TestGoALLCDynamicShuffleShape(t *testing.T) {
 	operand := func(name string) Operand {
@@ -85,7 +88,7 @@ func TestGoALLCDynamicShuffleListAndControlShape(t *testing.T) {
 			validateGoALLCLowering(op, op, "lookup-or-zero", test.input, OneVregOut, test.mask, test.imm)
 		}()
 	}
-	if got := goALLCCPUProfile("amd64", "AVX512VBMI"); got != "x86.avx512vbmi" {
+	if got := goallccpu.ProfileForSIMD("amd64", "AVX512VBMI"); got != "x86.avx512vbmi" {
 		t.Fatalf("VBMI profile = %q", got)
 	}
 }
