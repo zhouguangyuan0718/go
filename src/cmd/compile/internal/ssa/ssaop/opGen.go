@@ -26961,10 +26961,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPD128",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMAXPD,
+		Name:   "VMAXPD128",
+		ArgLen: 2,
+		asm:    x86.AVMAXPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -26976,10 +26975,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPD256",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMAXPD,
+		Name:   "VMAXPD256",
+		ArgLen: 2,
+		asm:    x86.AVMAXPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -26991,10 +26989,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPD512",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMAXPD,
+		Name:   "VMAXPD512",
+		ArgLen: 2,
+		asm:    x86.AVMAXPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 281474976645120, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14 X15 X16 X17 X18 X19 X20 X21 X22 X23 X24 X25 X26 X27 X28 X29 X30 X31
@@ -27006,10 +27003,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPDMasked128",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMAXPD,
+		Name:   "VMAXPDMasked128",
+		ArgLen: 3,
+		asm:    x86.AVMAXPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27022,10 +27018,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPDMasked256",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMAXPD,
+		Name:   "VMAXPDMasked256",
+		ArgLen: 3,
+		asm:    x86.AVMAXPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27038,10 +27033,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPDMasked512",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMAXPD,
+		Name:   "VMAXPDMasked512",
+		ArgLen: 3,
+		asm:    x86.AVMAXPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27054,10 +27048,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPS128",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMAXPS,
+		Name:   "VMAXPS128",
+		ArgLen: 2,
+		asm:    x86.AVMAXPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -27069,10 +27062,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPS256",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMAXPS,
+		Name:   "VMAXPS256",
+		ArgLen: 2,
+		asm:    x86.AVMAXPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -27084,10 +27076,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPS512",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMAXPS,
+		Name:   "VMAXPS512",
+		ArgLen: 2,
+		asm:    x86.AVMAXPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 281474976645120, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14 X15 X16 X17 X18 X19 X20 X21 X22 X23 X24 X25 X26 X27 X28 X29 X30 X31
@@ -27099,10 +27090,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPSMasked128",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMAXPS,
+		Name:   "VMAXPSMasked128",
+		ArgLen: 3,
+		asm:    x86.AVMAXPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27115,10 +27105,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPSMasked256",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMAXPS,
+		Name:   "VMAXPSMasked256",
+		ArgLen: 3,
+		asm:    x86.AVMAXPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27131,10 +27120,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMAXPSMasked512",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMAXPS,
+		Name:   "VMAXPSMasked512",
+		ArgLen: 3,
+		asm:    x86.AVMAXPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27147,10 +27135,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPD128",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMINPD,
+		Name:   "VMINPD128",
+		ArgLen: 2,
+		asm:    x86.AVMINPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -27162,10 +27149,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPD256",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMINPD,
+		Name:   "VMINPD256",
+		ArgLen: 2,
+		asm:    x86.AVMINPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -27177,10 +27163,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPD512",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMINPD,
+		Name:   "VMINPD512",
+		ArgLen: 2,
+		asm:    x86.AVMINPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 281474976645120, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14 X15 X16 X17 X18 X19 X20 X21 X22 X23 X24 X25 X26 X27 X28 X29 X30 X31
@@ -27192,10 +27177,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPDMasked128",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMINPD,
+		Name:   "VMINPDMasked128",
+		ArgLen: 3,
+		asm:    x86.AVMINPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27208,10 +27192,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPDMasked256",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMINPD,
+		Name:   "VMINPDMasked256",
+		ArgLen: 3,
+		asm:    x86.AVMINPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27224,10 +27207,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPDMasked512",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMINPD,
+		Name:   "VMINPDMasked512",
+		ArgLen: 3,
+		asm:    x86.AVMINPD,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27240,10 +27222,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPS128",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMINPS,
+		Name:   "VMINPS128",
+		ArgLen: 2,
+		asm:    x86.AVMINPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -27255,10 +27236,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPS256",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMINPS,
+		Name:   "VMINPS256",
+		ArgLen: 2,
+		asm:    x86.AVMINPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 2147418112, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
@@ -27270,10 +27250,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPS512",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         x86.AVMINPS,
+		Name:   "VMINPS512",
+		ArgLen: 2,
+		asm:    x86.AVMINPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 281474976645120, V2: 0}}, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14 X15 X16 X17 X18 X19 X20 X21 X22 X23 X24 X25 X26 X27 X28 X29 X30 X31
@@ -27285,10 +27264,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPSMasked128",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMINPS,
+		Name:   "VMINPSMasked128",
+		ArgLen: 3,
+		asm:    x86.AVMINPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27301,10 +27279,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPSMasked256",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMINPS,
+		Name:   "VMINPSMasked256",
+		ArgLen: 3,
+		asm:    x86.AVMINPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -27317,10 +27294,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VMINPSMasked512",
-		ArgLen:      3,
-		Commutative: true,
-		asm:         x86.AVMINPS,
+		Name:   "VMINPSMasked512",
+		ArgLen: 3,
+		asm:    x86.AVMINPS,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{2, RegMask{V1: 71494644084506624, V2: 0}}, // K1 K2 K3 K4 K5 K6 K7
@@ -82605,10 +82581,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VFMAX2D",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         arm64.AVFMAX,
+		Name:   "VFMAX2D",
+		ArgLen: 2,
+		asm:    arm64.AVFMAX,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 9223372034707292160, V2: 0}}, // F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
@@ -82620,10 +82595,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VFMAX4S",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         arm64.AVFMAX,
+		Name:   "VFMAX4S",
+		ArgLen: 2,
+		asm:    arm64.AVFMAX,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 9223372034707292160, V2: 0}}, // F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
@@ -82648,10 +82622,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VFMIN2D",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         arm64.AVFMIN,
+		Name:   "VFMIN2D",
+		ArgLen: 2,
+		asm:    arm64.AVFMIN,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 9223372034707292160, V2: 0}}, // F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
@@ -82663,10 +82636,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "VFMIN4S",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         arm64.AVFMIN,
+		Name:   "VFMIN4S",
+		ArgLen: 2,
+		asm:    arm64.AVFMIN,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 9223372034707292160, V2: 0}}, // F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
@@ -109108,10 +109080,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "F32x4Max",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         wasm.AF32x4Max,
+		Name:   "F32x4Max",
+		ArgLen: 2,
+		asm:    wasm.AF32x4Max,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 18446462598732840960, V2: 0}}, // V0 V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15
@@ -109123,10 +109094,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "F64x2Max",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         wasm.AF64x2Max,
+		Name:   "F64x2Max",
+		ArgLen: 2,
+		asm:    wasm.AF64x2Max,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 18446462598732840960, V2: 0}}, // V0 V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15
@@ -109228,10 +109198,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "F32x4Min",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         wasm.AF32x4Min,
+		Name:   "F32x4Min",
+		ArgLen: 2,
+		asm:    wasm.AF32x4Min,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 18446462598732840960, V2: 0}}, // V0 V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15
@@ -109243,10 +109212,9 @@ var OpcodeTable = [...]OpInfo{
 		},
 	},
 	{
-		Name:        "F64x2Min",
-		ArgLen:      2,
-		Commutative: true,
-		asm:         wasm.AF64x2Min,
+		Name:   "F64x2Min",
+		ArgLen: 2,
+		asm:    wasm.AF64x2Min,
 		Reg: RegInfo{
 			Inputs: []InputInfo{
 				{0, RegMask{V1: 18446462598732840960, V2: 0}}, // V0 V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15
@@ -116877,40 +116845,34 @@ var OpcodeTable = [...]OpInfo{
 		Generic: true,
 	},
 	{
-		Name:        "MaxFloat32x16",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MaxFloat32x16",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MaxFloat32x4",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MaxFloat32x4",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MaxFloat32x8",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MaxFloat32x8",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MaxFloat64x2",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MaxFloat64x2",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MaxFloat64x4",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MaxFloat64x4",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MaxFloat64x8",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MaxFloat64x8",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
 		Name:        "MaxInt16x16",
@@ -117057,40 +117019,34 @@ var OpcodeTable = [...]OpInfo{
 		Generic:     true,
 	},
 	{
-		Name:        "MinFloat32x16",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MinFloat32x16",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MinFloat32x4",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MinFloat32x4",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MinFloat32x8",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MinFloat32x8",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MinFloat64x2",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MinFloat64x2",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MinFloat64x4",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MinFloat64x4",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
-		Name:        "MinFloat64x8",
-		ArgLen:      2,
-		Commutative: true,
-		Generic:     true,
+		Name:    "MinFloat64x8",
+		ArgLen:  2,
+		Generic: true,
 	},
 	{
 		Name:        "MinInt16x16",
