@@ -57,17 +57,20 @@
 
 # Shared ops (AMD64 + ARM64)
 - go: ShiftAllLeft
+  llvmLowering: shift-all-left
   commutative: false
   documentation: !string |-
     // NAME shifts each element of x left by y bits.
     // If y is greater than the element width, the result is 0.
 - go: ShiftAllRight
+  llvmLowering: shift-all-right
   signed: false
   commutative: false
   documentation: !string |-
     // NAME logically shifts each element of x right by y bits.
     // If y is greater than the element width, the result is 0.
 - go: ShiftAllRight
+  llvmLowering: shift-all-right
   signed: true
   commutative: false
   documentation: !string |-
@@ -89,17 +92,20 @@
   commutative: false
 
 - go: ShiftLeft
+  llvmLowering: shift-left
   commutative: false
   documentation: !string |-
     // NAME shifts x[i] left by y[i] bits.
     // If y[i] is greater than the element width, the result is 0.
 - go: ShiftRight
+  llvmLowering: shift-right
   signed: false
   commutative: false
   documentation: !string |-
     // NAME logically shifts x[i] right by y[i] bits.
     // If y[i] is greater than the element width, the result is 0.
 - go: ShiftRight
+  llvmLowering: shift-right
   signed: true
   commutative: false
   documentation: !string |-

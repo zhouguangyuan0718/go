@@ -11,8 +11,10 @@ package codegen
 import "simd/archsimd"
 
 // LLVM-AMD64: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard ![[VPOPCNTDQ:[0-9]+]]
-// LLVM-AMD64: call <4 x i32> @llvm.ctpop.v4i32{{.*}}!goallc.cpu.requires ![[VPOPCNTDQ]]
+// LLVM-AMD64: call <4 x i32> @llvm.ctpop.v4i32{{.*}}!dbg ![[COUNT_LOC:[0-9]+]]
+// LLVM-AMD64-NEXT: call void @llvm.sideeffect(){{.*}}!dbg ![[COUNT_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[VPOPCNTDQ]]
 // LLVM-AMD64-DAG: ![[VPOPCNTDQ]] = !{!"x86.avx512vpopcntdq"}
+// LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 //
 //go:noinline
 func llvmSIMDStandardOnesCount32(x archsimd.Uint32x4) archsimd.Uint32x4 {

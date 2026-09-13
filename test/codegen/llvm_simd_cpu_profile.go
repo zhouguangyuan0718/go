@@ -20,8 +20,10 @@ import (
 // LLVM-AMD64-DAG: define goabiinternal void @"codegen.llvmSIMDMidwayGuardedAVX2@simd128"{{.*}} #[[GUARDED_SIMD128:[0-9]+]]
 // LLVM-AMD64-LABEL: define goabiinternal void @codegen.llvmSIMDGeneratedAVX2(
 // LLVM-AMD64: load i8, ptr getelementptr {{.*}}!goallc.cpu.guard ![[AVX2:[0-9]+]]
-// LLVM-AMD64: add <32 x i8> {{.*}}!goallc.cpu.requires ![[AVX2]]
+// LLVM-AMD64: add <32 x i8> {{.*}}!dbg ![[ADD_LOC:[0-9]+]]
+// LLVM-AMD64-NEXT: call void @llvm.sideeffect(){{.*}}!dbg ![[ADD_LOC]]{{.*}}!goallc.cpu.require-anchor ![[ANCHOR:[0-9]+]]{{.*}}!goallc.cpu.requires ![[AVX2]]
 // LLVM-AMD64-DAG: ![[AVX2]] = !{!"x86.avx2"}
+// LLVM-AMD64-DAG: ![[ANCHOR]] = !{}
 // LLVM-AMD64-DAG: attributes #[[SIMD512]] = { {{.*}}"target-features"="+avx,+avx2,+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl"
 // LLVM-AMD64-DAG: attributes #[[SIMD256]] = { {{.*}}"target-features"="+avx,+avx2"
 // LLVM-AMD64-DAG: attributes #[[SIMD128]] = { {{.*}}"target-features"="+avx"

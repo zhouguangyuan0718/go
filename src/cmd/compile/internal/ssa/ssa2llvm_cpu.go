@@ -456,6 +456,20 @@ func (lfc *LLVMFuncContext) requireCPUFeature(v *Value, instruction llvm.Value) 
 	}
 }
 
+// A generated operation may fold to a constant, argument, or a producer
+// outside its source guard. Anchor the preplanned requirement at the source
+// position instead of attaching it to that result. The early FMV pass keeps
+// the anchor through specialization and removes it after checking legality.
+func (lfc *LLVMFuncContext) requireGeneratedSIMDCPUFeature(v *Value) {
+	if lfc.CPUFeatures.requirements[v.ID] == "" {
+		return
+	}
+	fn := getLLVMIntrinsicDeclaration("llvm.sideeffect")
+	anchor := lfc.b.CreateCall(fn.GlobalValueType(), fn, nil, "")
+	anchor.SetMetadata(GlobalCtxt.MDKindID(goCPURequireAnchorMD), GlobalCtxt.MDNode(nil))
+	lfc.requireCPUFeature(v, anchor)
+}
+
 func (lfc *LLVMFuncContext) markCPUFeatureGuard(v *Value, load llvm.Value) {
 	if profile := lfc.CPUFeatures.guards[v.ID]; profile != "" {
 		load.SetMetadata(GlobalCtxt.MDKindID(goCPUGuardMD), GlobalCtxt.MDNode([]llvm.Metadata{GlobalCtxt.MDString(profile)}))
