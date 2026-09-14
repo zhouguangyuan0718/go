@@ -111,6 +111,8 @@ func goALLCPrimaryLane(op Operation) (base string, elemBits, lanes int) {
 }
 
 var goALLCLoweringArity = map[string]int{
+	"reciprocal": 1, "reciprocal-sqrt": 1,
+	"scale":       2,
 	"sha1-rounds": 2, "sha1-next-e": 2, "sha1-message1": 2, "sha1-message2": 2,
 	"sha256-rounds": 3, "sha256-message1": 2, "sha256-message2": 2,
 	"gf-mul": 2, "gf-affine": 2, "gf-affine-inverse": 2,
@@ -144,6 +146,7 @@ var goALLCLoweringArity = map[string]int{
 	"and": 2, "or": 2, "xor": 2, "andnot": 2, "ornot": 2,
 	"not": 1, "neg": 1, "abs": 1,
 	"sqrt": 1, "round-even": 1, "floor": 1, "ceil": 1, "trunc": 1,
+	"round-scaled": 1, "floor-scaled": 1, "ceil-scaled": 1, "trunc-scaled": 1,
 	"ones-count": 1, "leading-zeros": 1,
 	"average": 2, "leading-sign-bits": 1,
 	"mul-high": 2, "mul-sign": 2,
@@ -186,6 +189,8 @@ func validateGoALLCLowering(op, genericOp Operation, lowering string, genericIn 
 	case "extract-element":
 		wantOut, wantImm = OneGregOut, VarImm
 	case "insert-element", "funnel-all-left", "funnel-all-right", "carryless-mul", "aes-keygen", "gf-affine", "gf-affine-inverse", "sha1-rounds":
+		wantImm = VarImm
+	case "round-scaled", "floor-scaled", "ceil-scaled", "trunc-scaled":
 		wantImm = VarImm
 	}
 	validIn := genericIn == PureVregIn || (lowering == "lookup-or-zero" && genericIn == VlistIn)

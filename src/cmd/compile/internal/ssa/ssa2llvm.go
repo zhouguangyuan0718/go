@@ -2127,6 +2127,68 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 			return finish(lfc.simdUnaryIntrinsic(v, laneType, lanes, name))
 		}
 		return finish(lfc.simdIntegerAbs(v, laneType, lanes))
+	case goALLCSIMDLowerReciprocal, goALLCSIMDLowerReciprocalSqrt:
+		op := "rcp"
+		if info.lowering == goALLCSIMDLowerReciprocalSqrt {
+			op = "rsqrt"
+		}
+		x := lfc.simdValueAs(v, v.Args[0], llvm.VectorType(laneType, lanes), ".x")
+		args := []llvm.Value{x}
+		var name string
+		if laneBits == 32 && width < 512 {
+			// Preserve the legacy estimate, including its denormal behavior.
+			name = "llvm.x86.sse." + op + ".ps"
+			if width == 256 {
+				name = "llvm.x86.avx." + op + ".ps.256"
+			}
+		} else {
+			kind := "ps"
+			if laneBits == 64 {
+				kind = "pd"
+			}
+			name = fmt.Sprintf("llvm.x86.avx512.%s14.%s.%d", op, kind, width)
+			args = append(args, llvm.ConstNull(x.Type()), llvm.ConstAllOnes(GlobalCtxt.IntType(max(8, lanes))))
+		}
+		fn := getLLVMIntrinsicDeclaration(name)
+		return finish(lfc.simdLaneResult(v, lfc.b.CreateCall(fn.GlobalValueType(), fn, args, v.String()+".estimate")))
+	case goALLCSIMDLowerRoundScaled, goALLCSIMDLowerFloorScaled, goALLCSIMDLowerCeilScaled, goALLCSIMDLowerTruncScaled:
+		var mode uint8
+		switch info.lowering {
+		case goALLCSIMDLowerFloorScaled:
+			mode = 1
+		case goALLCSIMDLowerCeilScaled:
+			mode = 2
+		case goALLCSIMDLowerTruncScaled:
+			mode = 3
+		}
+		// The frontend has already shifted prec into imm8[7:4]. Add only
+		// the operation's rounding mode, as the native rewrite does.
+		imm := llvm.ConstInt(GlobalCtxt.Int32Type(), uint64(uint8(v.AuxInt)|mode), false)
+		x := lfc.simdValueAs(v, v.Args[0], llvm.VectorType(laneType, lanes), ".x")
+		args := []llvm.Value{x, imm, llvm.ConstNull(x.Type()), llvm.ConstAllOnes(GlobalCtxt.IntType(max(8, lanes)))}
+		kind := "ps"
+		if laneBits == 64 {
+			kind = "pd"
+		}
+		if width == 512 {
+			args = append(args, llvm.ConstInt(GlobalCtxt.Int32Type(), 4, false))
+		}
+		fn := getLLVMIntrinsicDeclaration(fmt.Sprintf("llvm.x86.avx512.mask.rndscale.%s.%d", kind, width))
+		return finish(lfc.simdLaneResult(v, lfc.b.CreateCall(fn.GlobalValueType(), fn, args, v.String()+".roundscaled")))
+	case goALLCSIMDLowerScale:
+		x, y := lfc.simdLaneOperands(v, laneType, lanes)
+		kind := "ps"
+		if laneBits == 64 {
+			kind = "pd"
+		}
+		fn := getLLVMIntrinsicDeclaration(fmt.Sprintf("llvm.x86.avx512.mask.scalef.%s.%d", kind, width))
+		// These Go operations enable every lane; the passthrough is unused.
+		args := []llvm.Value{x, y, llvm.ConstNull(x.Type()), llvm.ConstAllOnes(GlobalCtxt.IntType(max(8, lanes)))}
+		if width == 512 {
+			// Use MXCSR rounding, as the native non-SAE instruction does.
+			args = append(args, llvm.ConstInt(GlobalCtxt.Int32Type(), 4, false))
+		}
+		return finish(lfc.simdLaneResult(v, lfc.b.CreateCall(fn.GlobalValueType(), fn, args, v.String()+".scale")))
 	case goALLCSIMDLowerSqrt, goALLCSIMDLowerRoundEven, goALLCSIMDLowerFloor, goALLCSIMDLowerCeil, goALLCSIMDLowerTrunc:
 		if !isFloat {
 			v.Fatalf("%s generated SIMD floating-point intrinsic has non-floating lanes", v.Op)

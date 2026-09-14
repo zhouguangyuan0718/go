@@ -91,9 +91,7 @@ var goALLCSIMDPlannedFamilies = map[goALLCSIMDPlan][]string{
 	// existing target intrinsics. This does not authorize a Go-specific LLVM
 	// intrinsic or a new target node.
 	goALLCSIMDPlanTargetIntrinsic: {
-		"CeilScaled", "CeilScaledResidue", "FloorScaled",
-		"FloorScaledResidue", "Reciprocal",
-		"ReciprocalSqrt", "RoundScaled", "RoundScaledResidue", "Scale", "TruncScaled",
+		"CeilScaledResidue", "FloorScaledResidue", "RoundScaledResidue",
 		"TruncScaledResidue",
 	},
 }

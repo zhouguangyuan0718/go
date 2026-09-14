@@ -28,10 +28,17 @@ const (
 	goALLCSIMDLowerNeg
 	goALLCSIMDLowerAbs
 	goALLCSIMDLowerSqrt
+	goALLCSIMDLowerScale
+	goALLCSIMDLowerReciprocal
+	goALLCSIMDLowerReciprocalSqrt
 	goALLCSIMDLowerRoundEven
 	goALLCSIMDLowerFloor
 	goALLCSIMDLowerCeil
 	goALLCSIMDLowerTrunc
+	goALLCSIMDLowerRoundScaled
+	goALLCSIMDLowerFloorScaled
+	goALLCSIMDLowerCeilScaled
+	goALLCSIMDLowerTruncScaled
 	goALLCSIMDLowerOnesCount
 	goALLCSIMDLowerLeadingZeros
 	goALLCSIMDLowerMax
