@@ -462,6 +462,12 @@ if(BUILD_TESTING)
   )
 
   goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.GCLeafDefinition
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/gc-leaf-definition.ll"
+    CHECK
+  )
+
+  goallc_add_ir_filecheck_test(
     GoALLCStatepoints.TailTransfer
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/musttail-transfer.ll"
     CHECK
@@ -1960,19 +1966,6 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/testdata/unsupported-param-attr.ll"
   )
   set_tests_properties(GoALLCStatepoints.ParamAttrFails PROPERTIES
-    WILL_FAIL TRUE
-  )
-
-  add_test(
-    NAME GoALLCStatepoints.InvalidGCLeafDefinitionFails
-    COMMAND
-      "${GOALLC_LLC_EXECUTABLE}"
-      "-load-pass-plugin=$<TARGET_FILE:GoALLCStatepoints>"
-      -filetype=null
-      -o -
-      "${CMAKE_CURRENT_SOURCE_DIR}/testdata/invalid-gc-leaf-definition.ll"
-  )
-  set_tests_properties(GoALLCStatepoints.InvalidGCLeafDefinitionFails PROPERTIES
     WILL_FAIL TRUE
   )
 endif()

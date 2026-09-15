@@ -413,40 +413,7 @@ func llvmFunctionStorageName(name string, cc llvm.CallConv) string {
 }
 
 func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallConv) llvm.Value {
-	storageName := llvmFunctionStorageName(name, cc)
-	fn := CurrentModule.NamedFunction(storageName)
-	if fn.IsNil() {
-		fn = llvm.AddFunction(CurrentModule, storageName+".goallc.final", sig.Type)
-		if placeholder := CurrentModule.NamedGlobal(storageName); !placeholder.IsNil() {
-			// An OpAddr may have needed the code address before this function
-			// reached the compile queue. Opaque pointers let the provisional
-			// global be replaced by the correctly typed function definition.
-			placeholder.ReplaceAllUsesWith(fn)
-			placeholder.EraseFromParentAsGlobal()
-		}
-		fn.SetName(storageName)
-	} else if got := fn.GlobalValueType(); got != sig.Type {
-		if fn.BasicBlocksCount() != 0 {
-			base.Fatalf("conflicting LLVM function type for definition %s", name)
-		}
-		// Compiler data can refer to an ABI function before AuxCall exposes
-		// its exact signature. Replace that provisional declaration now.
-		replacement := llvm.AddFunction(CurrentModule, storageName+".goallc.final", sig.Type)
-		fn.ReplaceAllUsesWith(replacement)
-		fn.EraseFromParentAsFunction()
-		replacement.SetName(storageName)
-		fn = replacement
-	}
-	configureLLVMFunction(fn, sig, cc)
-	// These APIs terminate the goroutine or process. Do not use the inliner's
-	// NeverReturns heuristic: a callee can recover its own panic and return.
-	switch name {
-	case "runtime.Goexit", "os.Exit",
-		"testing.(*common).Skip", "testing.(*common).Skipf", "testing.(*common).SkipNow",
-		"testing.(*common).Fatal", "testing.(*common).Fatalf", "testing.(*common).FailNow":
-		fn.AddFunctionAttr(GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("noreturn"), 0))
-	}
-	return fn
+	return llvmFunctions.getOrInsert(llvmFunctionStorageName(name, cc), sig, cc)
 }
 
 func getOrInsertLLVMIntrinsic(name string, typ llvm.Type) llvm.Value {
@@ -1326,7 +1293,6 @@ func (lfc *LLVMFuncContext) llvmRuntimeMemmove(dst, src, length llvm.Value) llvm
 	fn := getOrInsertLLVMABISymbolRef("runtime.memmove", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{dst, src, length}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	markLLVMGCLeafCall(call)
 	return call
 }
 
@@ -1413,7 +1379,6 @@ func (lfc *LLVMFuncContext) llvmMemEq(v *Value) llvm.Value {
 	fn := getOrInsertLLVMABISymbolRef("runtime.memequal", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{left, right, size}, v.String())
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	markLLVMGCLeafCall(call)
 	return call
 }
 
@@ -3455,12 +3420,6 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	sig := llvmStaticCallSignature(aux, llvmSignature(aux))
 	cc := llvmCallConv(aux.ABI().Which())
 	fn := getOrInsertLLVMFunctionRef(aux.Fn, sig, cc)
-	// AMD64 rewrites some Move and Eq operations to static runtime calls before
-	// LLVM emission. Keep the same leaf contract as the dedicated LLVM lowering
-	// paths so RewriteStatepointsForGC does not turn these raw helpers into
-	// statepoints.
-	llvmGCLeaf := aux.Fn == ir.Syms.WBZero || aux.Fn == ir.Syms.WBMove ||
-		aux.Fn == ir.Syms.Memmove || aux.Fn == ir.Syms.Memequal
 	args := make([]llvm.Value, 0, len(sig.Type.ParamTypes()))
 	for i := int64(0); i < aux.NArgs(); i++ {
 		var arg llvm.Value
@@ -3487,9 +3446,6 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	configureLLVMCall(call, sig)
 	lfc.requireCPUFeature(v, call)
 	lfc.materializeAddressedResults(v, call, aux)
-	if llvmGCLeaf {
-		markLLVMGCLeafCall(call)
-	}
 	return call
 }
 

@@ -58,7 +58,10 @@ The initial statepoint pass handles ordinary calls in Go ABI functions. It
 computes pointer liveness with a backwards CFG dataflow analysis, assigns
 stable callsite IDs, emits `gc.statepoint` and `gc.relocate`, and respects
 LLVM's `gc-leaf-function` attribute on callees and individual call sites.
-Definitions carrying that attribute are verified to contain only GC-leaf calls.
+The attribute describes calls to the entry point. Definitions carrying it still
+undergo ordinary statepoint rewriting; each internal call is classified using
+its own callee or call-site attributes. An unannotated internal helper does not
+by itself disprove the entry-point contract, and is handled conservatively.
 Pointer classification is conservative and independent of LLVM address spaces.
 After all calls have been rewritten, the pass models each ordinary pointer and
 all of its relocates as definitions of a temporary promotable alloca. Loads at
