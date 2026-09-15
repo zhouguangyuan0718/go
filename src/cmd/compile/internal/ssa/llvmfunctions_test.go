@@ -61,7 +61,7 @@ func TestLLVMFunctionModelSurvivesDeclarationReplacement(t *testing.T) {
 	}
 }
 
-func TestLLVMFunctionModelsKeepGCLeafOnCalls(t *testing.T) {
+func TestLLVMFunctionModelsBindGCLeafToFunctions(t *testing.T) {
 	oldModule := CurrentModule
 	module := GlobalCtxt.NewModule("function_model_leaf_calls")
 	CurrentModule = module
@@ -103,13 +103,12 @@ func TestLLVMFunctionModelsKeepGCLeafOnCalls(t *testing.T) {
 				fn := getOrInsertLLVMFunction(reference, sig, cc)
 				call := builder.CreateCall(sig.Type, fn, nil, "")
 				call.SetInstructionCallConv(cc)
-				llvmFunctions.configureCall(call)
 				wantLeaf := cc == goABIInternalCallConv && test.leaf
-				if got := call.GetCallSiteStringAttribute(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != wantLeaf {
-					t.Errorf("%s: GC-leaf call = %v, want %v", fn.Name(), got, wantLeaf)
+				if got := fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != wantLeaf {
+					t.Errorf("%s: GC-leaf function = %v, want %v", fn.Name(), got, wantLeaf)
 				}
-				if fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil {
-					t.Errorf("%s: call-only GC-leaf contract leaked to the declaration", fn.Name())
+				if call.GetCallSiteStringAttribute(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil {
+					t.Errorf("%s: function contract was duplicated on the call", fn.Name())
 				}
 			}
 		}

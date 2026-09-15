@@ -4152,20 +4152,8 @@ void repairRelocationSSA(Function &F, DominatorTree &DT,
 }
 
 Error rewriteFunction(Function &F) {
-  if (F.hasFnAttribute(GCLeafAttr)) {
-    for (Instruction &I : instructions(F)) {
-      auto *Call = dyn_cast<CallBase>(&I);
-      if (!Call)
-        continue;
-      if (isa<GCStatepointInst>(Call) ||
-          (!Call->isMustTailCall() && !isLeafCall(*Call)))
-        return createStringError(
-            std::errc::invalid_argument,
-            "GoALLC gc-leaf-function contains a non-leaf call");
-    }
-    return Error::success();
-  }
-
+  // GCLeafAttr is a contract for calls to F. It does not classify calls
+  // inside F: rewrite those using their own callee/call-site contracts.
   DominatorTree DT(F);
   LoopInfo LI(DT);
   Expected<std::optional<OpenDeferInfo>> OpenDeferOrErr =

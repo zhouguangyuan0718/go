@@ -15,15 +15,15 @@ import (
 )
 
 // llvmFunctionModel describes audited contracts of compiler-known functions.
-// An absent model is conservative. Keep unconditional declaration properties
-// separate from call properties: a GC-leaf call does not require compiling the
-// helper's own implementation as a GC-leaf definition.
+// An absent model is conservative. Unconditional properties are attached to
+// the function so every direct caller sees the same contract. GC leaf describes
+// calls to the function, not how calls inside its body should be compiled.
 //
 // Future argument-dependent properties belong on the call, never on the shared
 // declaration. Parameter properties must use the lowered ABI signature.
 type llvmFunctionModel struct {
-	noReturn   bool
-	gcLeafCall bool
+	noReturn bool
+	gcLeaf   bool
 }
 
 // llvmFunctionManager owns the association between exact LLVM function names,
@@ -40,10 +40,10 @@ func newLLVMFunctionManager() llvmFunctionManager {
 	models := map[string]llvmFunctionModel{
 		// These raw helpers already have a GC-leaf call contract in both the SSA
 		// static-call path and the dedicated memory-operation lowering paths.
-		"runtime.memmove":  {gcLeafCall: true},
-		"runtime.memequal": {gcLeafCall: true},
-		"runtime.wbMove":   {gcLeafCall: true},
-		"runtime.wbZero":   {gcLeafCall: true},
+		"runtime.memmove":  {gcLeaf: true},
+		"runtime.memequal": {gcLeaf: true},
+		"runtime.wbMove":   {gcLeaf: true},
+		"runtime.wbZero":   {gcLeaf: true},
 
 		// These APIs terminate the goroutine or process. Do not use the inliner's
 		// NeverReturns heuristic: a callee can recover its own panic and return.
@@ -103,20 +103,9 @@ func (m *llvmFunctionManager) getOrInsert(name string, sig llvmFuncSignature, cc
 	if m.models[fn.Name()].noReturn {
 		fn.AddFunctionAttr(GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("noreturn"), 0))
 	}
+	// The leaf contract belongs to the ABIInternal entry, not its ABI0 wrapper.
+	if m.models[fn.Name()].gcLeaf && cc == goABIInternalCallConv {
+		fn.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, ""))
+	}
 	return fn
-}
-
-// configureCall binds call-only contracts after ordinary ABI configuration.
-// All direct runtime call paths use this entry, regardless of whether they
-// originated in SSA or were introduced by LLVM IR emission.
-func (m *llvmFunctionManager) configureCall(call llvm.Value) {
-	fn := call.CalledValue()
-	if fn.IsAFunction().IsNil() {
-		return
-	}
-	// These contracts describe the ABIInternal entry. An ABI0 wrapper may
-	// have different stack-growth and safepoint behavior.
-	if m.models[fn.Name()].gcLeafCall && call.InstructionCallConv() == goABIInternalCallConv {
-		markLLVMGCLeafCall(call)
-	}
 }

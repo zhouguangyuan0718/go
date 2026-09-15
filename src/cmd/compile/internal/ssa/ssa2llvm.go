@@ -1293,7 +1293,6 @@ func (lfc *LLVMFuncContext) llvmRuntimeMemmove(dst, src, length llvm.Value) llvm
 	fn := getOrInsertLLVMABISymbolRef("runtime.memmove", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{dst, src, length}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -1380,7 +1379,6 @@ func (lfc *LLVMFuncContext) llvmMemEq(v *Value) llvm.Value {
 	fn := getOrInsertLLVMABISymbolRef("runtime.memequal", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{left, right, size}, v.String())
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -3448,7 +3446,6 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	configureLLVMCall(call, sig)
 	lfc.requireCPUFeature(v, call)
 	lfc.materializeAddressedResults(v, call, aux)
-	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -3614,7 +3611,6 @@ func (lfc *LLVMFuncContext) panicBounds(v *Value) llvm.Value {
 	fn := getOrInsertLLVMABISymbolRef(llvmBoundsPanicNames[kind], obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{x, y}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -4606,7 +4602,6 @@ func (lfc *LLVMFuncContext) emitOpenDeferRecovery() {
 	lfc.setDebugLocation(frontendFunc.Endlineno)
 	call := lfc.b.CreateCall(deferReturnSig.Type, deferReturn, nil, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall(call)
 	lfc.b.ClearCurrentDebugLocation()
 
 	outParams := lfc.F.OwnAux.ABIInfo().OutParams()

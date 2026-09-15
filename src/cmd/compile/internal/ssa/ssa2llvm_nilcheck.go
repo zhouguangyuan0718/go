@@ -143,7 +143,6 @@ func (lfc *LLVMFuncContext) expandNilCheckIntrinsics() {
 		panicmem, sig := llvmPanicmem()
 		panicCall := b.CreateCall(sig.Type, panicmem, nil, "")
 		panicCall.SetInstructionCallConv(goABIInternalCallConv)
-		llvmFunctions.configureCall(panicCall)
 		// panicmem enters the runtime panic path and may reach GC while this
 		// frame is suspended, so it remains an ordinary non-leaf call for
 		// statepoint and stack-map construction.
