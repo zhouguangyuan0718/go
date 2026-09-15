@@ -490,6 +490,9 @@ func llvmStoreDeferResultHome(value llvm.Value, home llvmStackSlot, before llvm.
 	b := GlobalCtxt.NewBuilder()
 	defer b.Dispose()
 	b.SetInsertPointBefore(before)
+	if home.Type.IsBoolean() && value.Type() == GlobalCtxt.Int1Type() {
+		value = b.CreateZExt(value, getLLVMType(home.Type), "defer.bool")
+	}
 	store := b.CreateStore(value, home.Value)
 	store.SetAlignment(int(home.Type.Alignment()))
 }
@@ -922,7 +925,7 @@ func (lfc *LLVMFuncContext) selectPureTuple(v, src *Value, sel int) llvm.Value {
 	// overflow flag into that bool while lowering the select. Do the same here
 	// rather than letting the carrier type escape into subsequent bool phis.
 	if sel == 1 && (src.Op == OpMul32uover || src.Op == OpMul64uover) && v.Type.IsBoolean() && result.Type().TypeKind() == llvm.IntegerTypeKind {
-		return lfc.goBool(lfc.llvmCondition(result, v.String()+".i1"), v.String())
+		return lfc.llvmCondition(result, v.String()+".i1")
 	}
 	v.Fatalf("%s source %s field %d has LLVM kind %v, want %v for Go type %v", v.Op, src.Op, sel, result.Type().TypeKind(), getLLVMType(v.Type).TypeKind(), v.Type)
 	return llvm.Value{}
@@ -1424,20 +1427,22 @@ func (lfc *LLVMFuncContext) llvmSlicemask(v *Value) llvm.Value {
 	return lfc.b.CreateAShr(neg, shift, v.String())
 }
 
-func (lfc *LLVMFuncContext) goBool(cond llvm.Value, name string) llvm.Value {
-	if cond.Type().IntTypeWidth() == getLLVMType(types.Types[types.TBOOL]).IntTypeWidth() {
-		cond.SetName(name)
-		return cond
+// getLLVMValueType separates scalar SSA predicates from Go storage and ABI
+// types. Aggregates retain their Go representation; their fields are converted
+// when inserted or extracted.
+func getLLVMValueType(t *types.Type) llvm.Type {
+	if t.IsBoolean() {
+		return GlobalCtxt.Int1Type()
 	}
-	return lfc.b.CreateZExt(cond, getLLVMType(types.Types[types.TBOOL]), name)
+	return getLLVMType(t)
 }
 
 func (lfc *LLVMFuncContext) llvmCondition(v llvm.Value, name string) llvm.Value {
 	if v.Type().IntTypeWidth() == 1 {
 		return v
 	}
-	// Comparisons are widened to Go bools by goBool. Reuse their i1
-	// predicate when branching instead of comparing the widened value to zero.
+	// Reuse predicates that have crossed a byte-valued storage or ABI
+	// boundary instead of comparing the widened value to zero.
 	if !v.IsAZExtInst().IsNil() {
 		cond := v.Operand(0)
 		if cond.Type().IntTypeWidth() == 1 {
@@ -2263,7 +2268,9 @@ func (lfc *LLVMFuncContext) lowerGeneratedSIMD(v *Value) (llvm.Value, bool) {
 		return finish(lfc.simdLaneResult(v, lfc.b.CreateCall(sig, fn, []llvm.Value{x, y}, v.String()+".product")))
 	case goALLCSIMDLowerCarrylessMul:
 		x, y := lfc.simdLaneOperands(v, laneType, lanes)
-		imm := llvm.ConstInt(GlobalCtxt.Int8Type(), uint64(v.AuxInt), false)
+		// Go stores imm8 AuxInt values sign-extended from int8. Restore the
+		// byte bit pattern before constructing LLVM's unsigned i8 constant.
+		imm := llvm.ConstInt(GlobalCtxt.Int8Type(), uint64(uint8(v.AuxInt)), false)
 		name := "llvm.x86.pclmulqdq"
 		if lanes > 2 {
 			name += fmt.Sprintf(".%d", lanes*laneBits)
@@ -2908,7 +2915,11 @@ func (lfc *LLVMFuncContext) FinishPhi() {
 						v.Fatalf("phi input %s produced no LLVM value", incoming.LongString())
 					}
 				}
-				incomingLVal = lfc.reshapeLLVMValue(v, incomingLVal, incoming.Type, v.Type, v.String()+".incoming")
+				if v.Type.IsBoolean() {
+					incomingLVal = lfc.llvmCondition(incomingLVal, v.String()+".incoming")
+				} else {
+					incomingLVal = lfc.reshapeLLVMValue(v, incomingLVal, incoming.Type, v.Type, v.String()+".incoming")
+				}
 				if got, want := incomingLVal.Type(), lfc.Vs[v.ID].Type(); got != want {
 					v.Fatalf("phi input %s has LLVM kind %s, want %s", incoming.LongString(), got.TypeKind(), want.TypeKind())
 				}
@@ -3278,6 +3289,9 @@ func (lfc *LLVMFuncContext) reshapeLLVMValueToType(value llvm.Value, target llvm
 	}
 
 	source := value.Type()
+	if source == GlobalCtxt.Int1Type() && target == GlobalCtxt.Int8Type() {
+		return lfc.b.CreateZExt(value, target, name)
+	}
 	// Go ABI analysis may describe a promoted method receiver using its single
 	// physical register carrier while the generated wrapper definition retains
 	// the named aggregate receiver type. Peel and rebuild singleton aggregates
@@ -3756,7 +3770,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		flag.SetAlignment(1)
 		lfc.markCPUFeatureGuard(v, flag)
 		cond := lfc.b.CreateICmp(llvm.IntNE, flag, llvm.ConstInt(flag.Type(), 0, false), v.String()+".i1")
-		lVal = lfc.goBool(cond, v.String())
+		lVal = cond
 	case OpArg:
 		lVal = lfc.paramForArg(v)
 		lVal.SetName(v.Aux.(*ir.Name).Sym().Name)
@@ -3775,7 +3789,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		// as an out-of-range unsigned i8/i16/i32.
 		lVal = llvmConstInt(v.Type, auxIntToInt64(v.AuxInt))
 	case OpConstBool:
-		lVal = llvm.ConstInt(getLLVMType(v.Type), uint64(v.AuxInt), false)
+		lVal = llvm.ConstInt(getLLVMValueType(v.Type), uint64(v.AuxInt), false)
 	case OpConst32F:
 		lVal = llvm.ConstFloat(getLLVMType(v.Type), float64(auxIntToFloat32(v.AuxInt)))
 	case OpConst64F:
@@ -3865,7 +3879,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		lVal = lfc.b.CreateNot(arg0(), v.String())
 	case OpNot:
 		zero := llvm.ConstInt(arg0().Type(), 0, false)
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, arg0(), zero, v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntEQ, arg0(), zero, v.String()+".i1")
 	case OpNeg64, OpNeg32, OpNeg16, OpNeg8:
 		lVal = lfc.b.CreateNeg(arg0(), v.String())
 	case OpNeg32F, OpNeg64F:
@@ -3897,15 +3911,15 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 	case OpFMA:
 		lVal = lfc.llvmTernaryIntrinsic(v, "llvm.fma.f64")
 	case OpEq64, OpEq32, OpEq16, OpEq8, OpEqB:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntEQ, arg0(), arg1(), v.String()+".i1")
 	case OpEqPtr:
 		x, y := lfc.pointerComparisonOperands(v)
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntEQ, x, y, v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntEQ, x, y, v.String()+".i1")
 	case OpNeq64, OpNeq32, OpNeq16, OpNeq8, OpNeqB:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntNE, arg0(), arg1(), v.String()+".i1")
 	case OpNeqPtr:
 		x, y := lfc.pointerComparisonOperands(v)
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, x, y, v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntNE, x, y, v.String()+".i1")
 	case OpEqInter, OpNeqInter:
 		x := lfc.b.CreateExtractValue(arg0(), 0, v.String()+".x")
 		y := lfc.b.CreateExtractValue(arg1(), 0, v.String()+".y")
@@ -3914,29 +3928,29 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		if v.Op == OpNeqInter {
 			pred = llvm.IntNE
 		}
-		lVal = lfc.goBool(lfc.b.CreateICmp(pred, x, y, v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(pred, x, y, v.String()+".i1")
 	case OpLess64, OpLess32, OpLess16, OpLess8:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntSLT, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntSLT, arg0(), arg1(), v.String()+".i1")
 	case OpLess64U, OpLess32U, OpLess16U, OpLess8U:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULT, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntULT, arg0(), arg1(), v.String()+".i1")
 	case OpLeq64, OpLeq32, OpLeq16, OpLeq8:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntSLE, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntSLE, arg0(), arg1(), v.String()+".i1")
 	case OpLeq64U, OpLeq32U, OpLeq16U, OpLeq8U:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULE, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntULE, arg0(), arg1(), v.String()+".i1")
 	case OpEq32F, OpEq64F:
-		lVal = lfc.goBool(lfc.b.CreateFCmp(llvm.FloatOEQ, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateFCmp(llvm.FloatOEQ, arg0(), arg1(), v.String()+".i1")
 	case OpNeq32F, OpNeq64F:
-		lVal = lfc.goBool(lfc.b.CreateFCmp(llvm.FloatUNE, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateFCmp(llvm.FloatUNE, arg0(), arg1(), v.String()+".i1")
 	case OpLess32F, OpLess64F:
-		lVal = lfc.goBool(lfc.b.CreateFCmp(llvm.FloatOLT, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateFCmp(llvm.FloatOLT, arg0(), arg1(), v.String()+".i1")
 	case OpLeq32F, OpLeq64F:
-		lVal = lfc.goBool(lfc.b.CreateFCmp(llvm.FloatOLE, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateFCmp(llvm.FloatOLE, arg0(), arg1(), v.String()+".i1")
 	case OpIsInBounds:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULT, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntULT, arg0(), arg1(), v.String()+".i1")
 	case OpIsSliceInBounds:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntULE, arg0(), arg1(), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntULE, arg0(), arg1(), v.String()+".i1")
 	case OpIsNonNil:
-		lVal = lfc.goBool(lfc.b.CreateICmp(llvm.IntNE, arg0(), llvm.ConstNull(arg0().Type()), v.String()+".i1"), v.String())
+		lVal = lfc.b.CreateICmp(llvm.IntNE, arg0(), llvm.ConstNull(arg0().Type()), v.String()+".i1")
 	case OpLsh64x64, OpLsh64x32, OpLsh64x16, OpLsh64x8,
 		OpLsh32x64, OpLsh32x32, OpLsh32x16, OpLsh32x8,
 		OpLsh16x64, OpLsh16x32, OpLsh16x16, OpLsh16x8,
@@ -3977,7 +3991,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 			lVal = lfc.b.CreateSelect(cond, x, y, v.String())
 			break
 		}
-		if x.Type() != y.Type() || x.Type() != getLLVMType(v.Type) {
+		if x.Type() != y.Type() || x.Type() != getLLVMValueType(v.Type) {
 			v.Fatalf("%s has incompatible LLVM value types", v.Op)
 		}
 		cond := lfc.llvmCondition(lfc.GenLV(v.Args[2]), v.String()+".cond")
@@ -4017,7 +4031,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		}
 	case OpCopy:
 		lVal = arg0()
-		if v.Type.IsMemory() || v.Type.IsVoid() {
+		if v.Type.IsMemory() || v.Type.IsVoid() || v.Type.IsBoolean() {
 			break
 		}
 		if v.Type.IsSIMD() && lVal.Type().TypeKind() == llvm.VectorTypeKind {
@@ -4031,7 +4045,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 			v.Fatalf("%s changes LLVM representation", v.Op)
 		}
 	case OpCvtBoolToUint8:
-		lVal = arg0()
+		lVal = lfc.b.CreateZExt(arg0(), getLLVMType(v.Type), v.String())
 		if got, want := lVal.Type(), getLLVMType(v.Type); got != want {
 			v.Fatalf("%s changes LLVM representation", v.Op)
 		}
@@ -4256,7 +4270,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		}
 	case OpPhi:
 		if !v.Type.IsMemory() {
-			lVal = lfc.b.CreatePHI(getLLVMType(v.Type), v.String())
+			lVal = lfc.b.CreatePHI(getLLVMValueType(v.Type), v.String())
 		}
 	case OpLoad, OpDereference:
 		// LLVM lowering runs before expandCalls, where the native backend
@@ -4411,7 +4425,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 			false,
 		)
 		success := lfc.b.CreateExtractValue(pair, 1, v.String()+".success")
-		lVal = lfc.b.CreateZExt(success, getLLVMType(v.Type.FieldType(0)), v.String())
+		lVal = success
 	case OpPubBarrier:
 		lVal = lfc.publicationBarrier(v)
 	case OpPrefetchCache:
@@ -4422,7 +4436,11 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		lVal = lfc.emitNilCheckIntrinsic(v)
 	case OpStore:
 		address := lfc.llvmAddressPointer(v, arg0(), v.Args[0].Type, v.String()+".address")
-		lVal = lfc.b.CreateStore(arg1(), address)
+		value := arg1()
+		if v.Args[1].Type.IsBoolean() {
+			value = lfc.b.CreateZExt(value, getLLVMType(v.Args[1].Type), v.String()+".store")
+		}
+		lVal = lfc.b.CreateStore(value, address)
 		if v.Args[1].Type.IsSIMD() {
 			lVal.SetAlignment(int(v.Args[1].Type.Alignment()))
 		}
@@ -4464,6 +4482,12 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		lVal = lfc.b.CreateExtractValue(arg0(), 2, v.String())
 	default:
 		v.Fatalf("unsupported SSA operation in LLVM lowering: %s (%s)", v.Op, v.LongString())
+	}
+	// Loads, calls and aggregate extraction retain their storage/ABI type
+	// while being emitted. Normalize scalar bools before exposing them to
+	// any SSA consumer, including copies and PHIs.
+	if v.Type.IsBoolean() {
+		lVal = lfc.llvmCondition(lVal, v.String()+".bool")
 	}
 	lfc.Vs[v.ID] = lVal
 	return lVal
@@ -5414,7 +5438,7 @@ func LLVMCompile(f *Func) {
 		FCtxt.b.SetInsertPointAtEnd(FCtxt.BBs[BB.ID])
 		for _, v := range BB.Values {
 			if v.Op == OpPhi && !v.Type.IsMemory() {
-				FCtxt.Vs[v.ID] = FCtxt.b.CreatePHI(getLLVMType(v.Type), v.String())
+				FCtxt.Vs[v.ID] = FCtxt.b.CreatePHI(getLLVMValueType(v.Type), v.String())
 			}
 		}
 	}
@@ -5644,8 +5668,7 @@ func InitModule(pkg *types.Pkg) {
 		types.Types[types.TINT64]:  GlobalCtxt.Int64Type(),
 		types.Types[types.TUINT64]: GlobalCtxt.Int64Type(),
 		// The Go ABI represents bool in an 8-bit integer slot. LLVM
-		// comparisons are widened to this type before crossing SSA or ABI
-		// boundaries.
+		// SSA predicates use i1 and are widened at storage and ABI boundaries.
 		types.Types[types.TBOOL]:      GlobalCtxt.Int8Type(),
 		types.Types[types.TFLOAT32]:   GlobalCtxt.FloatType(),
 		types.Types[types.TFLOAT64]:   GlobalCtxt.DoubleType(),
