@@ -438,6 +438,14 @@ func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallCon
 		fn = replacement
 	}
 	configureLLVMFunction(fn, sig, cc)
+	// These APIs terminate the goroutine or process. Do not use the inliner's
+	// NeverReturns heuristic: a callee can recover its own panic and return.
+	switch name {
+	case "runtime.Goexit", "os.Exit",
+		"testing.(*common).Skip", "testing.(*common).Skipf", "testing.(*common).SkipNow",
+		"testing.(*common).Fatal", "testing.(*common).Fatalf", "testing.(*common).FailNow":
+		fn.AddFunctionAttr(GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("noreturn"), 0))
+	}
 	return fn
 }
 
@@ -3675,6 +3683,13 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		lfc.b.SetInsertPointAtEnd(lfc.BBs[v.Block.ID])
 	}
 	lfc.setDebugLocation(v.Pos)
+	if lfc.CPUFeatures != nil && lfc.CPUFeatures.automatic[v.ID] {
+		// Materialize operands before the operation's automatic CPU precondition.
+		for _, arg := range v.Args {
+			lfc.GenLV(arg)
+		}
+		lfc.markCPUAutoCheck(v)
+	}
 	var lVal llvm.Value
 	arg0 := func() llvm.Value { return lfc.GenLV(v.Args[0]) }
 	arg1 := func() llvm.Value { return lfc.GenLV(v.Args[1]) }
@@ -4304,9 +4319,9 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 		if v.Op == OpLoad {
 			lfc.markCPUFeatureGuard(v, lVal)
 		}
-		if v.Type.IsSIMD() {
-			lVal.SetAlignment(int(v.Type.Alignment()))
-		}
+		// Go's alignment also applies to aggregates containing SIMD fields;
+		// LLVM's default vector/aggregate alignment may be stronger.
+		lVal.SetAlignment(int(v.Type.Alignment()))
 		// The runtime may resume at the first deferreturn call recorded for the
 		// function, which can be an ordinary exit rather than the fake recovery
 		// successor. Reload named results from their stack homes at every such
@@ -4441,9 +4456,7 @@ func (lfc *LLVMFuncContext) genLV(v *Value, restoreBuilder bool) llvm.Value {
 			value = lfc.b.CreateZExt(value, getLLVMType(v.Args[1].Type), v.String()+".store")
 		}
 		lVal = lfc.b.CreateStore(value, address)
-		if v.Args[1].Type.IsSIMD() {
-			lVal.SetAlignment(int(v.Args[1].Type.Alignment()))
-		}
+		lVal.SetAlignment(int(v.Args[1].Type.Alignment()))
 		if lfc.isDeferResultAddress(v.Args[0]) || lfc.isOpenDeferAddress(v.Args[0]) {
 			lVal.SetVolatile(true)
 		}
@@ -4820,6 +4833,10 @@ func llvmIsAtomicMemoryOp(op Op) bool {
 }
 
 func LLVMCompile(f *Func) {
+	// Match native metadata emission when SSA construction lowered no defer.
+	if len(f.OpenDeferSlots) == 0 {
+		f.OpenDeferBits = nil
+	}
 	if f.OwnAux == nil || f.OwnAux.Fn == nil || f.OwnAux.ABIInfo() == nil {
 		f.fe.Fatalf(f.Entry.Pos, "missing function ABI information in LLVM lowering for %s", f.Name)
 	}

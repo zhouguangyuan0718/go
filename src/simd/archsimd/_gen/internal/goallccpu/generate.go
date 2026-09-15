@@ -156,7 +156,8 @@ func generatedFiles(virtuals map[string][]string) (map[string][]byte, error) {
 	for _, p := range profiles {
 		f := resolved[p.Feature]
 		targets := "+" + strings.Join(f.Targets, ",+")
-		fmt.Fprintf(&goData, "{name:%s, arch:%q, field:%q, runtimeGuard:%q, predicates:%#x, capabilities:%#x, targetFeatures:%q},\n", goProfileName(p), f.Arch, f.Field, p.RuntimeGuard, f.Predicates, f.Mask, targets)
+		fmt.Fprintf(&goData, "{name:%s, arch:%q, field:%q, runtimeGuard:%q, predicates:%#x, capabilities:%#x, targetFeatures:%q", goProfileName(p), f.Arch, f.Field, p.RuntimeGuard, f.Predicates, f.Mask, targets)
+		fmt.Fprint(&goData, "},\n")
 		_, suffix, _ := strings.Cut(p.Name, ".")
 		var predicates []string
 		for _, atom := range features {

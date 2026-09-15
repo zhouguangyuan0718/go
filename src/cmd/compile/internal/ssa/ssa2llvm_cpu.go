@@ -114,13 +114,21 @@ func llvmSIMDFeatureFloor(f *Func) string {
 	// vector hoisted out of a guarded region. Those are not caller promises
 	// and must not raise the target features of fallback implementations.
 	// Preserve the direct SIMD parameter/result contract used by cpufeatures;
-	// pointers and ordinary aggregates do not establish that contract.
+	// pointers do not establish that contract.
 	var width int64
 	if f.Type != nil {
 		for _, field := range f.Type.RecvParamsResults() {
 			if field.Type.IsSIMD() {
 				width = max(width, field.Type.Size())
 			}
+		}
+	}
+	// Generic shape functions may receive SIMD fields inside aggregates
+	// without a Midway name or a direct SIMD parameter. Use Go's ABI analysis
+	// for these carriers just as for calls; stack-only values need no feature.
+	if f.OwnAux != nil && f.OwnAux.ABIInfo() != nil {
+		if abiWidth := llvmWideVectorCallWidth(f.OwnAux); abiWidth > 16 {
+			width = max(width, abiWidth)
 		}
 	}
 	switch width {
@@ -214,7 +222,7 @@ func llvmCPUFeatureGuard(b *Block, arch string) (profile string, enabled int) {
 		taken = 1
 		condition = condition.Args[0]
 	}
-	profile = llvmCPUFieldProfile(arch, llvmCPUFeatureField(condition, arch))
+	profile, _ = llvmCPUFeatureGuardValue(condition, arch)
 	if profile == "" {
 		return "", -1
 	}
@@ -252,29 +260,41 @@ func llvmCPUFeatureGuardProfiles(f *Func, v *Value, required string) []string {
 		}
 	}
 
-	// Cut each backwards path at an enabled edge supplying the requirement.
-	// Reaching entry means some path is unguarded. Visited blocks also bound
-	// traversal through loops, whose first entry must still cross the cut.
-	seen := make(map[*Block]bool)
+	// Cut each backwards path once its enabled edges jointly supply the
+	// requirement (for example AVX && AES). Reaching entry with capabilities
+	// still missing means some path is unguarded. Include the remaining
+	// capabilities in the visited state so a join cannot mix separate paths.
+	type path struct {
+		block   *Block
+		missing uint64
+	}
+	seen := make(map[path]bool)
 	profiles := make(map[string]bool)
-	work := []*Block{v.Block}
+	work := []path{{v.Block, llvmCPUProfileByName(required).capabilities}}
 	for len(work) != 0 {
-		b := work[len(work)-1]
+		current := work[len(work)-1]
 		work = work[:len(work)-1]
+		b := current.block
 		if b == f.Entry {
 			return nil
 		}
-		if seen[b] {
+		if seen[current] {
 			continue
 		}
-		seen[b] = true
+		seen[current] = true
 		for _, pred := range b.Preds {
+			missing := current.missing
 			profile, taken := llvmCPUFeatureGuard(pred.Block(), f.Config.arch)
-			if taken == pred.Index() && llvmCPUProfileSupplies(profile, required) {
-				profiles[profile] = true
+			if taken == pred.Index() {
+				if caps := llvmCPUProfileByName(profile).capabilities; caps&missing != 0 {
+					profiles[profile] = true
+					missing &^= caps
+				}
+			}
+			if missing == 0 {
 				continue
 			}
-			work = append(work, pred.Block())
+			work = append(work, path{pred.Block(), missing})
 		}
 	}
 	var guards []string
@@ -295,34 +315,28 @@ func llvmCallAux(v *Value) *AuxCall {
 	return nil
 }
 
-type llvmCPURequirementKind uint8
-
-const (
-	llvmCPUGenerated llvmCPURequirementKind = iota
-	llvmCPUWideCall
-)
-
 // Entry capability assumptions are not runtime predicates.
 type llvmCPUFeaturePlan struct {
 	floor        string
 	requirements map[ID]string
+	automatic    map[ID]bool
 	guards       map[ID]string
 	profiles     []string
 }
 
-func llvmCPURequirement(v *Value, arch string) (string, llvmCPURequirementKind) {
+func llvmCPURequirement(v *Value, arch string) string {
 	if info, ok := goALLCSIMDInfo(v.Op); ok {
-		return info.archInfo(arch).cpuProfile, llvmCPUGenerated
+		return info.archInfo(arch).cpuProfile
 	}
 	if arch == "amd64" {
 		if helper, ok := llvmSIMDHelperInfo(v); ok {
-			return helper.profile, llvmCPUGenerated
+			return helper.profile
 		}
 		if aux := llvmCallAux(v); aux != nil {
-			return llvmWideVectorCPUProfile(llvmWideVectorCallWidth(aux)), llvmCPUWideCall
+			return llvmWideVectorCPUProfile(llvmWideVectorCallWidth(aux))
 		}
 	}
-	return "", llvmCPUGenerated
+	return ""
 }
 
 // llvmPlanCPUFeatures is the one planning boundary for generated SIMD,
@@ -332,6 +346,7 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 	plan := &llvmCPUFeaturePlan{
 		floor:        llvmSIMDFeatureFloor(f),
 		requirements: make(map[ID]string),
+		automatic:    make(map[ID]bool),
 		guards:       make(map[ID]string),
 	}
 	type guardKey struct {
@@ -353,8 +368,6 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 	type requirement struct {
 		value   *Value
 		profile string
-		kind    llvmCPURequirementKind
-		guards  []string
 	}
 	type guardValue struct {
 		id        ID
@@ -375,43 +388,25 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 					selected[name] = true
 				}
 			}
-			profile, kind := llvmCPURequirement(v, f.Config.arch)
-			if profile == "" || llvmCPUProfileCoveredByBaseline(f.Config.arch, profile) {
+			profile := llvmCPURequirement(v, f.Config.arch)
+			if profile == "" || llvmCPUProfileCoveredByBaseline(f.Config.arch, profile) || llvmCPUProfileSupplies(plan.floor, profile) {
 				continue
 			}
-			r := requirement{value: v, profile: profile, kind: kind}
-			if kind == llvmCPUWideCall {
-				if llvmCPUProfileSupplies(plan.floor, profile) {
-					continue
-				}
-				r.guards = findGuards(v, profile)
-			}
-			pending = append(pending, r)
-		}
-	}
-	// Preserve native fixed-width calling semantics: an unguarded wide call
-	// raises the function floor, whereas a guarded call requests FMV. Finish
-	// this step before handling any operation, independent of block order.
-	for _, r := range pending {
-		if r.kind == llvmCPUWideCall && len(r.guards) == 0 && !llvmCPUProfileSupplies(plan.floor, r.profile) {
-			plan.floor = r.profile
+			pending = append(pending, requirement{value: v, profile: profile})
 		}
 	}
 	for _, r := range pending {
-		if llvmCPUProfileSupplies(plan.floor, r.profile) {
-			continue
-		}
-		guards := r.guards
-		if r.kind == llvmCPUGenerated {
-			guards = findGuards(r.value, r.profile)
-		}
+		plan.requirements[r.value.ID] = r.profile
+		guards := findGuards(r.value, r.profile)
 		if len(guards) == 0 {
-			// An unguarded SIMD operation requests its Go feature so the baseline
-			// verifier continues to reject the surviving requirement.
+			// Select whole-function versions from the operation's requirements,
+			// without interpreting ordinary program state as a CPU predicate.
+			// The program guarantees this operation is unreachable in unsupported versions.
+			plan.automatic[r.value.ID] = true
 			guards = []string{r.profile}
 		}
-		plan.requirements[r.value.ID] = r.profile
 		for _, guard := range guards {
+			selected[guard] = true
 			// A virtual Go feature is a conjunction, not a new runtime bit.
 			// Request its atoms independently so partial feature combinations
 			// preserve other observations of those same Go booleans.
@@ -429,7 +424,7 @@ func llvmPlanCPUFeatures(f *Func) *llvmCPUFeaturePlan {
 		}
 	}
 	for _, p := range llvmCPUProfiles {
-		if selected[p.name] {
+		if selected[p.name] && p.field != "" {
 			plan.profiles = append(plan.profiles, p.name)
 		}
 	}
@@ -471,9 +466,11 @@ func llvmCPUFeatureGuardValue(v *Value, arch string) (profile string, selective 
 		if profile := llvmCPUFieldProfile(arch, llvmCPUFeatureField(v, arch)); profile != "" {
 			return profile, true
 		}
-		if arch == "arm64" && len(v.Args) != 0 && v.Args[0].Op == OpAddr {
+		if len(v.Args) != 0 && v.Args[0].Op == OpAddr {
 			if sym, ok := v.Args[0].Aux.(*obj.LSym); ok {
-				return llvmCPUProfileByRuntimeGuard(arch, sym.Name), false
+				if profile := llvmCPUProfileByRuntimeGuard(arch, sym.Name); profile != "" {
+					return profile, false
+				}
 			}
 		}
 	}
@@ -486,18 +483,30 @@ func (lfc *LLVMFuncContext) requireCPUFeature(v *Value, instruction llvm.Value) 
 	}
 }
 
+// Insert before the operation, after evaluating its operands. Unsupported FMV
+// versions make this point unreachable, relying on the program's CPU precondition.
+func (lfc *LLVMFuncContext) markCPUAutoCheck(v *Value) {
+	anchor := lfc.cpuRequirementAnchor(v)
+	anchor.SetMetadata(GlobalCtxt.MDKindID("goallc.cpu.auto"), GlobalCtxt.MDNode(nil))
+}
+
 // A SIMD operation may fold to a constant, argument, or a producer
 // outside its source guard. Anchor the preplanned requirement at the source
 // position instead of attaching it to that result. The early FMV pass keeps
 // the anchor through specialization and removes it after checking legality.
 func (lfc *LLVMFuncContext) requireSIMDCPUFeature(v *Value) {
-	if lfc.CPUFeatures.requirements[v.ID] == "" {
+	if lfc.CPUFeatures.requirements[v.ID] == "" || lfc.CPUFeatures.automatic[v.ID] {
 		return
 	}
+	lfc.cpuRequirementAnchor(v)
+}
+
+func (lfc *LLVMFuncContext) cpuRequirementAnchor(v *Value) llvm.Value {
 	fn := getLLVMIntrinsicDeclaration("llvm.sideeffect")
 	anchor := lfc.b.CreateCall(fn.GlobalValueType(), fn, nil, "")
 	anchor.SetMetadata(GlobalCtxt.MDKindID(goCPURequireAnchorMD), GlobalCtxt.MDNode(nil))
 	lfc.requireCPUFeature(v, anchor)
+	return anchor
 }
 
 func (lfc *LLVMFuncContext) markCPUFeatureGuard(v *Value, load llvm.Value) {

@@ -28,7 +28,9 @@
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/FunctionComparator.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
 #include <cstdint>
@@ -45,6 +47,7 @@ constexpr StringLiteral DoneMD = "goallc.cpu.fmv.done";
 constexpr StringLiteral GuardMD = "goallc.cpu.guard";
 constexpr StringLiteral RequiresMD = "goallc.cpu.requires";
 constexpr StringLiteral RequireAnchorMD = "goallc.cpu.require-anchor";
+constexpr StringLiteral AutoMD = "goallc.cpu.auto";
 constexpr StringLiteral MultiversionAttr = "goallc.cpu.multiversion";
 constexpr StringLiteral RuntimeFeatureMask = "runtime.goallcCPUFeatures";
 constexpr StringLiteral GoResultsTupleAttr = "go_results_tuple";
@@ -344,6 +347,9 @@ Error verifyRequirements(Function &F, const CPUConfig &Config) {
         return I.getMetadata(RequiresMD) != nullptr;
       }))
     return Error::success();
+  // LLVM also removes continuations after noreturn calls and repairs PHIs.
+  // Discard their dead requirements before validating surviving operations.
+  removeUnreachableBlocks(F);
   // LLVM owns CPU defaults, feature implication and ordered +/- overrides.
   // Query that effective target instead of maintaining another ISA model.
   std::string ErrorMessage;
@@ -369,6 +375,33 @@ Error verifyRequirements(Function &F, const CPUConfig &Config) {
   if (!STI)
     return createStringError(inconvertibleErrorCode(),
                              "cannot query GoALLC CPU target features");
+  // Explicit hardware guards have already been specialized. Automatic checks
+  // mark only the unsupported operation's path unreachable, relying on the
+  // program's CPU precondition. Supported clones retain the original IR
+  // and register ABI; there are no extracted helpers or memory carriers.
+  SmallVector<Instruction *, 8> Unsupported;
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (!I.getMetadata(AutoMD))
+        continue;
+      Expected<StringRef> Name = getInstructionProfile(I, RequiresMD);
+      if (!Name)
+        return Name.takeError();
+      const Profile *P = findProfile(*Name);
+      if (!P || P->Arch != Config.Arch)
+        return createStringError(inconvertibleErrorCode(),
+                                 "invalid automatic CPU profile " + *Name);
+      if (!STI->checkFeatures(P->TargetFeature)) {
+        Unsupported.push_back(&I);
+        break;
+      }
+    }
+  }
+  if (!Unsupported.empty()) {
+    for (Instruction *I : Unsupported)
+      changeToUnreachable(I);
+    removeUnreachableBlocks(F);
+  }
   SmallVector<Instruction *, 8> Anchors;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
@@ -481,6 +514,30 @@ Expected<SmallVector<const Profile *, 4>> requestedProfiles(Function &F,
                                    Name);
     Result.push_back(P);
   }
+  if (llvm::none_of(instructions(F), [](const Instruction &I) {
+        return I.getMetadata(AutoMD) != nullptr;
+      }))
+    return Result;
+
+  // Automatic requests precede LLVM's noreturn/CFG cleanup. Rebuild them
+  // from live anchors, keeping conjunctions intact. Explicit observations
+  // still request their own versions, even when they share an automatic bit.
+  removeUnreachableBlocks(F);
+  Result.clear();
+  for (Instruction &I : instructions(F)) {
+    StringRef Kind = I.getMetadata(GuardMD) ? GuardMD : RequiresMD;
+    if (!I.getMetadata(GuardMD) && !I.getMetadata(AutoMD))
+      continue;
+    Expected<StringRef> Name = getInstructionProfile(I, Kind);
+    if (!Name)
+      return Name.takeError();
+    const Profile *P = findProfile(*Name);
+    if (!P || P->Arch != Arch)
+      return createStringError(inconvertibleErrorCode(),
+                               "invalid GoALLC CPU profile " + *Name);
+    if (!llvm::is_contained(Result, P))
+      Result.push_back(P);
+  }
   return Result;
 }
 
@@ -542,14 +599,13 @@ Function *cloneResolver(Function &Source) {
 }
 
 Error multiversionFunction(Function &F, const CPUConfig &Config,
-                           GlobalVariable &RuntimeMask) {
+                           GlobalVariable &RuntimeMask,
+                           ArrayRef<const Profile *> Requested) {
   const bool DuplicateOK = isGoObjDuplicateOK(F);
   const bool WideVectorABI = hasWideVectorRegisterCarrier(F);
-  Expected<SmallVector<const Profile *, 4>> Requested =
-      requestedProfiles(F, Config.Arch);
-  if (!Requested)
-    return Requested.takeError();
-
+  const bool Automatic = llvm::any_of(instructions(F), [](const Instruction &I) {
+    return I.getMetadata(AutoMD) != nullptr;
+  });
   Expected<Function *> BaselineOrErr = cloneVariant(
       F, "baseline", Config.Baseline, {});
   if (!BaselineOrErr)
@@ -560,10 +616,14 @@ Error multiversionFunction(Function &F, const CPUConfig &Config,
     return Err;
   if (Error Err = registerGoObjDebugFunction(*BaselineImpl))
     return Err;
+  if (Automatic)
+    for (BasicBlock &BB : *BaselineImpl)
+      SimplifyInstructionsInBlock(&BB);
+  GlobalNumberState GlobalNumbers;
 
   SmallVector<const Profile *, 4> OrderedProfiles;
   for (const Profile &P : Profiles) {
-    if (llvm::find(*Requested, &P) != Requested->end())
+    if (llvm::is_contained(Requested, &P))
       OrderedProfiles.push_back(&P);
   }
 
@@ -587,6 +647,11 @@ Error multiversionFunction(Function &F, const CPUConfig &Config,
       Suffix += P->Suffix;
       Required |= P->Predicate;
     }
+    // Overlapping conjunctions can produce the same predicate union.
+    if (llvm::any_of(Variants, [&](const Variant &V) {
+          return V.RuntimeRequired == (Required & ~Config.Baseline);
+        }))
+      continue;
     uint64_t Predicates = Config.Baseline | Required;
     Expected<Function *> CloneOrErr =
         cloneVariant(F, Suffix, Predicates, EnabledProfiles);
@@ -595,10 +660,37 @@ Error multiversionFunction(Function &F, const CPUConfig &Config,
     Function *Clone = *CloneOrErr;
     if (Error Err = verifyRequirements(*Clone, Config))
       return Err;
-    if (Error Err = registerGoObjDebugFunction(*Clone))
-      return Err;
+    if (Automatic) {
+      for (BasicBlock &BB : *Clone)
+        SimplifyInstructionsInBlock(&BB);
+      // Reuse the already-legal baseline only when LLVM finds the same body
+      // and ABI. Ignore just the extra target features, not other attributes.
+      Attribute Features = Clone->getFnAttribute("target-features");
+      Clone->removeFnAttr("target-features");
+      if (BaselineImpl->hasFnAttribute("target-features"))
+        Clone->addFnAttr(BaselineImpl->getFnAttribute("target-features"));
+      bool Same =
+          FunctionComparator(Clone, BaselineImpl, &GlobalNumbers).compare() == 0;
+      Clone->removeFnAttr("target-features");
+      if (Features.isValid())
+        Clone->addFnAttr(Features);
+      if (Same) {
+        Clone->dropAllReferences();
+        Clone->eraseFromParent();
+        Clone = BaselineImpl;
+      }
+    }
+    if (Clone != BaselineImpl)
+      if (Error Err = registerGoObjDebugFunction(*Clone))
+        return Err;
+    // Keep the predicate mapping even when its implementation is shared:
+    // another partial profile may otherwise win selection on this CPU.
     Variants.push_back({Clone, Required & ~Config.Baseline});
   }
+  // A matching superset must win over its subsets, independent of profile order.
+  llvm::sort(Variants, [](const Variant &A, const Variant &B) {
+    return A.RuntimeRequired < B.RuntimeRequired;
+  });
 
   LLVMContext &C = F.getContext();
   Module &M = *F.getParent();
@@ -730,7 +822,7 @@ Error llvm::goallc::runEarlyIRPipeline(Module &M) {
   if (!Config)
     return Config.takeError();
 
-  SmallVector<Function *, 16> Candidates;
+  SmallVector<std::pair<Function *, SmallVector<const Profile *, 4>>, 16> Candidates;
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
@@ -742,8 +834,16 @@ Error llvm::goallc::runEarlyIRPipeline(Module &M) {
         if (Error Err = validateRequirementAnchor(I))
           return Err;
     if (F.hasFnAttribute(MultiversionAttr)) {
-      Candidates.push_back(&F);
-    } else if (Error Err = verifyRequirements(F, *Config)) {
+      auto Requested = requestedProfiles(F, Config->Arch);
+      if (!Requested)
+        return Requested.takeError();
+      if (!Requested->empty()) {
+        Candidates.emplace_back(&F, std::move(*Requested));
+        continue;
+      }
+      F.removeFnAttr(MultiversionAttr);
+    }
+    if (Error Err = verifyRequirements(F, *Config)) {
       return Err;
     }
   }
@@ -754,10 +854,22 @@ Error llvm::goallc::runEarlyIRPipeline(Module &M) {
       return createStringError(
           inconvertibleErrorCode(),
           "GoALLC CPU multiversioning requires runtime.goallcCPUFeatures");
-    for (Function *F : Candidates)
+    for (auto &[F, Requested] : Candidates)
       if (Error Err =
-              multiversionFunction(*F, *Config, *RuntimeMask))
+              multiversionFunction(*F, *Config, *RuntimeMask, Requested))
         return Err;
+  }
+
+  // Named debug records do not keep symbols alive through GlobalDCE. Publish
+  // all roots once: rebuilding llvm.compiler.used for every generated version
+  // retains quadratically many uniqued constants in large SIMD packages.
+  if (NamedMDNode *Funcs = M.getNamedMetadata(GoObjDebugFuncsMD)) {
+    SmallVector<GlobalValue *, 32> Roots;
+    for (MDNode *Node : Funcs->operands())
+      if (Node->getNumOperands() == 2)
+        if (auto *F = mdconst::dyn_extract<Function>(Node->getOperand(1)))
+          Roots.push_back(F);
+    appendToCompilerUsed(M, Roots);
   }
 
   NamedMDNode *Done = M.getOrInsertNamedMetadata(DoneMD);

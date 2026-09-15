@@ -25,8 +25,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PINNED_LLVM_RELEASE: goallc-llvm23.1.0-20260913T101743Z
-  PINNED_LLVM_REVISION: 24e17992764c93eb974eceae277fcdad768025d0
+  PINNED_LLVM_RELEASE: goallc-llvm23.1.0-20260915T064629Z
+  PINNED_LLVM_REVISION: 3ae99ac6d4a2f3e79e5c51125699cd17521ee93d
 
 jobs:
   llvm-payload:
@@ -94,6 +94,12 @@ jobs:
             task: stdlib
             shard: 1
             shards: 2
+          - arch: amd64
+            runner: ubuntu-22.04
+            name: linux-amd64-simd
+            task: simd
+            shard: 0
+            shards: 1
           - arch: arm64
             runner: ubuntu-22.04-arm
             name: linux-arm64
@@ -112,6 +118,12 @@ jobs:
             task: stdlib
             shard: 1
             shards: 2
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            name: linux-arm64-simd
+            task: simd
+            shard: 0
+            shards: 1
     env:
       LLVM_RELEASE: ${{ needs.llvm-payload.outputs.release_tag }}
       LLVM_REVISION: ${{ needs.llvm-payload.outputs.revision }}
@@ -277,6 +289,55 @@ jobs:
           free -h
           swapon --show
           df -h "$RUNNER_TEMP"
+
+      - name: Test SIMD packages and direct standard library consumers with LLVM
+        if: matrix.task == 'simd'
+        shell: bash
+        env:
+          GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
+          GOEXPERIMENT: simd
+          # Also compile testdata subprocesses launched by the package tests
+          # with LLVM; a command-line -gcflags would not be inherited.
+          GOFLAGS: -gcflags=all=-enablellvm
+        run: |
+          set -euo pipefail
+          # internal/runtime/maps directly uses archsimd for amd64 AES hashing.
+          ./bin/go test -p=1 -short -count=1 -v simd/... internal/runtime/maps
+
+      - name: Test runtime with SIMD and LLVM
+        if: matrix.task == 'simd'
+        shell: bash
+        env:
+          GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
+          GOALLC_FILECHECK: ${{ env.LLVM_ROOT }}/bin/FileCheck
+          GOALLC_RUN_LLVM_STDLIB: "1"
+          GOEXPERIMENT: simd
+        run: |
+          set -euo pipefail
+          # Reuse the runtime capability skips, but not the full stdlib suite.
+          # The final empty component excludes runtime/* packages.
+          ./bin/go test -short cmd/internal/testdir \
+            -run '^TestLLVM$/^stdlib$/^runtime$/^$' -count=1 -timeout=40m -v
+
+      - name: Test SIMD testdir cases with LLVM
+        if: matrix.task == 'simd'
+        shell: bash
+        env:
+          GOALLC_LLVM_DIR: ${{ env.LLVM_ROOT }}
+          GOALLC_FILECHECK: ${{ env.LLVM_ROOT }}/bin/FileCheck
+          GOEXPERIMENT: simd
+        run: |
+          set -euo pipefail
+          ./bin/go test -short cmd/internal/testdir \
+            -run '^TestLLVM$/^testdir$/^(llvm_simd.*\.go|simd)$' \
+            -count=1 -timeout=30m -v
+          ./bin/go test -short cmd/internal/testdir \
+            -run '^TestLLVM$/^testdir$/^codegen$/^(llvm_)?simd' \
+            -count=1 -timeout=30m -v
+          # These upstream tests assert native compiler diagnostics and use
+          # the ordinary errorcheck runner, not LLVM code generation.
+          ./bin/go test -short cmd/internal/testdir \
+            -run '^Test$/^simd(_inline)?\.go$' -count=1 -timeout=10m -v
 
       - name: Test LLVM standard library package policy
         if: matrix.task == 'stdlib'

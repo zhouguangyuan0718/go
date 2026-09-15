@@ -34,6 +34,50 @@ the relative order of the native Go passes. New generic Go optimizations added
 before the LLVM boundary therefore become available without copying their
 scheduling into a separate LLVM pipeline.
 
+## SIMD CPU preconditions
+
+Go CPU features map to LLVM capabilities through the existing `archsimd`
+generator. Fixed-width ABI requirements and Midway implementation widths supply
+function `target-features`; they do not make runtime CPU predicates true.
+
+Locally hardware-guarded operations use the early LLVM FMV pass. Explicit checks
+and fallback paths retain their meaning, including feature disabling with
+`GODEBUG`. If a SIMD operation or wide-register call needs features beyond the
+function's contract and has no recognized hardware guard, its requirement
+automatically requests FMV instead of raising the original function's feature
+floor. This also applies to unguarded operations in the entry block. The same
+Go CPU profiles and runtime resolver select the whole-function versions.
+
+Automatic requests are collected from live instructions after LLVM's noreturn
+cleanup. Compound requirements stay together instead of requesting every
+individual feature combination; independent hardware observations still get
+their own versions. Overlapping requests with the same runtime predicate share
+one version. After specialization, a version whose simplified body and ABI match
+the baseline reuses that baseline implementation, ignoring only the extra
+`target-features` during comparison and retaining its dispatch predicate.
+
+Supported versions retain the original SIMD instructions and register ABI,
+without outlining or aggregate-memory argument/result carriers. In versions
+without the required features, a source-local anchor becomes `unreachable`.
+The anchor precedes the operation but follows operand evaluation. Unsupported
+instructions and their now-unreachable continuation are removed before normal
+LLVM optimization.
+Surviving requirements are checked against each version's target features.
+
+Ordinary algorithm flags such as `maps.UseAeshash` are not interpreted by the
+compiler. The program must ensure that an unsupported SIMD operation is not
+executed, including when its protection is outside the function or callback.
+Violating that precondition is undefined behavior, not a recoverable panic or
+a guaranteed trap. LLVM may
+simplify control flow using this precondition. Automatic FMV does not invent
+a software algorithm or interpret an ordinary business flag as a CPU predicate.
+The resolver still uses the effective Go CPU snapshot after `GODEBUG` overrides;
+before CPU initialization it uses baseline without caching the selection.
+
+Known terminating Go APIs, including `testing.T.Skip`, receive LLVM's standard
+`noreturn` attribute. LLVM removes their unreachable continuations before CPU
+requirement checks; this does not rewrite Go SSA control flow.
+
 ## An optimization exposed by the shared pipeline
 
 Before builtin decomposition, an interface data word can remain hidden behind
