@@ -147,7 +147,7 @@ struct PointerAllocaRecord {
   DenseMap<const Instruction *, SmallBitVector> ContentUses;
   DenseMap<const Instruction *, SmallBitVector> ContentDefs;
   SmallVector<CallInst *, 4> GoRetDefs;
-  SmallVector<CallInst *, 8> ActiveCalls;
+  SmallPtrSet<CallInst *, 8> ActiveCalls;
   bool WholeLifetime = false;
   bool ActivityUnclear = false;
 };
@@ -160,7 +160,7 @@ struct PointerFixedArgRecord {
   PointerFrameLayout Layout;
   DenseMap<const Instruction *, SmallBitVector> ContentUses;
   DenseMap<const Instruction *, SmallBitVector> ContentDefs;
-  SmallVector<CallInst *, 8> ActiveCalls;
+  SmallPtrSet<CallInst *, 8> ActiveCalls;
   bool ActivityUnclear = false;
 };
 
@@ -3256,7 +3256,7 @@ Error computePointerAllocaActivity(
         bool IsGoRetDef = llvm::is_contained(Record.GoRetDefs, Call);
         if (Call && SafepointCalls.contains(Call) && !IsGoRetDef &&
             (Live.any() || !DT.isReachableFromEntry(Call->getParent())))
-          Record.ActiveCalls.push_back(Call);
+          Record.ActiveCalls.insert(Call);
         transferPointerAllocaLiveness(Record, I, Live);
       }
     }
@@ -3427,7 +3427,7 @@ bool hasInitializedPointerSlotsBeforeSafepoint(
     if (auto *Call = dyn_cast<CallBase>(I);
         Call && !Call->isMustTailCall() && !isLeafCall(*Call)) {
       if (auto *OrdinaryCall = dyn_cast<CallInst>(Call);
-          OrdinaryCall && llvm::is_contained(Record.ActiveCalls, OrdinaryCall))
+          OrdinaryCall && Record.ActiveCalls.contains(OrdinaryCall))
         return Initialized.count() == Record.Layout.Leaves.size();
       // On a normal return, a typed goret call has initialized the complete
       // logical result object. The caller stack map at that call describes
@@ -3670,7 +3670,7 @@ void computeByValContentActivity(
       auto *Call = dyn_cast<CallInst>(&I);
       if (Call && SafepointCalls.contains(Call) &&
           (Live.any() || !DT.isReachableFromEntry(Call->getParent())))
-        Record.ActiveCalls.push_back(Call);
+        Record.ActiveCalls.insert(Call);
       transferByValContentLiveness(Record, I, Live);
     }
   }
@@ -3735,7 +3735,7 @@ void computeGoRetContentActivity(
       if (Call && SafepointCalls.contains(Call) &&
           (Record.DeferResult || FullyInitialized ||
            !DT.isReachableFromEntry(Call->getParent())))
-        Record.ActiveCalls.push_back(Call);
+        Record.ActiveCalls.insert(Call);
       transferGoRetInitialization(Record, I, Initialized);
     }
   }
@@ -3973,6 +3973,12 @@ void splitStatepointContinuations(ArrayRef<SafepointRecord> Records) {
   // blocks: SelectionDAG performs local CSE while lowering one block, and the
   // explicit edge puts gc.result and gc.relocate in a fresh local CSE scope.
   for (const SafepointRecord &Record : Records) {
+    // Empty statepoints need no fresh SelectionDAG scope. Fixed-frame
+    // addresses remain a separate condition: a goret call can define its
+    // carrier without gc-live roots, but its address still crosses the call.
+    if (Record.Statepoint->use_empty() && Record.Live.empty() &&
+        Record.FixedFrameAddresses.empty())
+      continue;
     Instruction *Continuation = Record.Statepoint->getNextNode();
     assert(Continuation && "statepoint must have a continuation instruction");
     BasicBlock *StatepointBlock = Record.Statepoint->getParent();
@@ -4310,7 +4316,7 @@ Error rewriteFunction(Function &F) {
       // marks named result homes whose contents must therefore remain visible
       // to Go's stack scanner at every possible suspension call.
       bool ContentsLive = Alloca.DeferResult || Alloca.OpenDeferSlot ||
-                          llvm::is_contained(Alloca.ActiveCalls, Record.Call);
+                          Alloca.ActiveCalls.contains(Record.Call);
       if (ContentsLive) {
         Record.Live.insert(Alloca.Alloca);
         LiveContents.insert(Alloca.Alloca);
@@ -4333,7 +4339,7 @@ Error rewriteFunction(Function &F) {
       // object contributes its complete typed bitmap to ArgsPointerMaps.
       // Address-observable layouts still describe function-level StackObjects
       // at every call.
-      bool IsActive = llvm::is_contained(FixedArg.ActiveCalls, Record.Call);
+      bool IsActive = FixedArg.ActiveCalls.contains(Record.Call);
       if (IsActive) {
         Record.Live.insert(FixedArg.Base);
         LiveContents.insert(FixedArg.Base);
