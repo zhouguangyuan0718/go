@@ -183,7 +183,7 @@ func getOrInsertLLVMFunctionRef(s *obj.LSym, sig llvmFuncSignature, cc llvm.Call
 	if s == nil || llvmCallConv(s.ABI()) != cc {
 		base.Fatalf("invalid LLVM GoObj function reference")
 	}
-	value := llvmFunctions.getOrInsert(s.Name, llvmGoObjReferenceName(s), sig, cc)
+	value := getOrInsertLLVMFunction(llvmGoObjReferenceName(s), sig, cc)
 	attachGoObjSymbolRef(value, s)
 	return value
 }
@@ -221,7 +221,7 @@ func emitLateGoObjBuiltinDeclarations() {
 			base.Fatalf("late LLVM runtime helper %s is absent from GoObj builtin table", name)
 		}
 		abi := obj.ABI(abiValue)
-		fn := llvmFunctions.getOrInsert(name, storageName, voidSig, llvmCallConv(abi))
+		fn := getOrInsertLLVMFunction(storageName, voidSig, llvmCallConv(abi))
 		preserveGoObjMetadataValues(fn)
 	}
 }

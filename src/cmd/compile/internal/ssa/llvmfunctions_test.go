@@ -30,10 +30,10 @@ func TestLLVMFunctionModelSurvivesDeclarationReplacement(t *testing.T) {
 				Type: llvm.FunctionType(void, nil, false), ReturnType: void,
 				ClosureContextIndex: -1,
 			}
-			// Linker identity is independent of the logical name used by models.
+			// The model is looked up using the actual encoded IR name.
 			name := "runtime.Goexit"
 			reference := name + goobj.LinknameSymbolSuffix
-			fn := llvmFunctions.getOrInsert(name, reference, provisional, goABIInternalCallConv)
+			fn := getOrInsertLLVMFunction(reference, provisional, goABIInternalCallConv)
 			builder := GlobalCtxt.NewBuilder()
 			defer builder.Dispose()
 			caller := llvm.AddFunction(module, "caller", provisional.Type)
@@ -44,14 +44,14 @@ func TestLLVMFunctionModelSurvivesDeclarationReplacement(t *testing.T) {
 
 			final := provisional
 			final.Type = llvm.FunctionType(void, []llvm.Type{GlobalCtxt.PointerType(0)}, false)
-			fn = llvmFunctions.getOrInsert(name, reference, final, goABIInternalCallConv)
+			fn = getOrInsertLLVMFunction(reference, final, goABIInternalCallConv)
 			if fn.GetEnumFunctionAttribute(llvm.AttributeKindID("noreturn")).C == nil {
 				t.Fatal("replacement declaration lost its noreturn model")
 			}
 			if got := module.NamedFunction(reference); got != fn {
 				t.Fatal("manager did not return the current module's replacement declaration")
 			}
-			if got := llvmFunctions.getOrInsert(name, reference, final, goABIInternalCallConv); got != fn {
+			if got := getOrInsertLLVMFunction(reference, final, goABIInternalCallConv); got != fn {
 				t.Fatal("repeated lookup created a different declaration")
 			}
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -76,21 +76,41 @@ func TestLLVMFunctionModelsKeepGCLeafOnCalls(t *testing.T) {
 	caller := llvm.AddFunction(module, "caller", sig.Type)
 	builder.SetInsertPointAtEnd(llvm.AddBasicBlock(caller, "entry"))
 	for _, cc := range []llvm.CallConv{goABIInternalCallConv, goABI0CallConv} {
-		for _, name := range []string{"runtime.memmove", "runtime.memequal", "runtime.wbMove", "runtime.wbZero", "runtime.mallocgc", "runtime.memmoveLike"} {
-			reference := name
-			if encoded, ok := goobj.BuiltinSymbolName(name, int(obj.ABIInternal)); ok {
-				reference = encoded
+		for _, test := range []struct {
+			name string
+			leaf bool
+		}{
+			{"runtime.memmove", true},
+			{"runtime.memequal", true},
+			{"runtime.wbMove", true},
+			{"runtime.wbZero", true},
+			{"runtime.mallocgc", false},
+			{"runtime.memmoveLike", false},
+			// Neither an arbitrary suffix nor a wrong builtin index identifies
+			// a registered IR function, even with a recognized name prefix.
+			{"runtime.memmove<unknown>", false},
+			{"runtime.memmove<builtin.999999>", false},
+		} {
+			references := []string{test.name, test.name + goobj.LinknameSymbolSuffix}
+			abi := obj.ABIInternal
+			if cc == goABI0CallConv {
+				abi = obj.ABI0
 			}
-			fn := llvmFunctions.getOrInsert(name, reference, sig, cc)
-			call := builder.CreateCall(sig.Type, fn, nil, "")
-			call.SetInstructionCallConv(cc)
-			llvmFunctions.configureCall(name, call)
-			wantLeaf := cc == goABIInternalCallConv && name != "runtime.mallocgc" && name != "runtime.memmoveLike"
-			if got := call.GetCallSiteStringAttribute(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != wantLeaf {
-				t.Errorf("%s: GC-leaf call = %v, want %v", name, got, wantLeaf)
+			if encoded, ok := goobj.BuiltinSymbolName(test.name, int(abi)); ok {
+				references = append(references, encoded)
 			}
-			if fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil {
-				t.Errorf("%s: call-only GC-leaf contract leaked to the declaration", name)
+			for _, reference := range references {
+				fn := getOrInsertLLVMFunction(reference, sig, cc)
+				call := builder.CreateCall(sig.Type, fn, nil, "")
+				call.SetInstructionCallConv(cc)
+				llvmFunctions.configureCall(call)
+				wantLeaf := cc == goABIInternalCallConv && test.leaf
+				if got := call.GetCallSiteStringAttribute(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != wantLeaf {
+					t.Errorf("%s: GC-leaf call = %v, want %v", fn.Name(), got, wantLeaf)
+				}
+				if fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil {
+					t.Errorf("%s: call-only GC-leaf contract leaked to the declaration", fn.Name())
+				}
 			}
 		}
 	}

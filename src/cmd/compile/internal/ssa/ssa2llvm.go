@@ -413,7 +413,7 @@ func llvmFunctionStorageName(name string, cc llvm.CallConv) string {
 }
 
 func getOrInsertLLVMFunction(name string, sig llvmFuncSignature, cc llvm.CallConv) llvm.Value {
-	return llvmFunctions.getOrInsert(name, name, sig, cc)
+	return llvmFunctions.getOrInsert(llvmFunctionStorageName(name, cc), sig, cc)
 }
 
 func getOrInsertLLVMIntrinsic(name string, typ llvm.Type) llvm.Value {
@@ -1293,7 +1293,7 @@ func (lfc *LLVMFuncContext) llvmRuntimeMemmove(dst, src, length llvm.Value) llvm
 	fn := getOrInsertLLVMABISymbolRef("runtime.memmove", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{dst, src, length}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall("runtime.memmove", call)
+	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -1380,7 +1380,7 @@ func (lfc *LLVMFuncContext) llvmMemEq(v *Value) llvm.Value {
 	fn := getOrInsertLLVMABISymbolRef("runtime.memequal", obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{left, right, size}, v.String())
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall("runtime.memequal", call)
+	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -3448,7 +3448,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	configureLLVMCall(call, sig)
 	lfc.requireCPUFeature(v, call)
 	lfc.materializeAddressedResults(v, call, aux)
-	llvmFunctions.configureCall(aux.Fn.Name, call)
+	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -3614,7 +3614,7 @@ func (lfc *LLVMFuncContext) panicBounds(v *Value) llvm.Value {
 	fn := getOrInsertLLVMABISymbolRef(llvmBoundsPanicNames[kind], obj.ABIInternal, sig, goABIInternalCallConv)
 	call := lfc.b.CreateCall(sig.Type, fn, []llvm.Value{x, y}, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall(llvmBoundsPanicNames[kind], call)
+	llvmFunctions.configureCall(call)
 	return call
 }
 
@@ -4606,7 +4606,7 @@ func (lfc *LLVMFuncContext) emitOpenDeferRecovery() {
 	lfc.setDebugLocation(frontendFunc.Endlineno)
 	call := lfc.b.CreateCall(deferReturnSig.Type, deferReturn, nil, "")
 	call.SetInstructionCallConv(goABIInternalCallConv)
-	llvmFunctions.configureCall("runtime.deferreturn", call)
+	llvmFunctions.configureCall(call)
 	lfc.b.ClearCurrentDebugLocation()
 
 	outParams := lfc.F.OwnAux.ABIInfo().OutParams()
