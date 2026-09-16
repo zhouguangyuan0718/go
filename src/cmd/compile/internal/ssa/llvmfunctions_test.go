@@ -116,7 +116,7 @@ func TestLLVMFunctionModelsBindGCLeafToFunctions(t *testing.T) {
 				fn := getOrInsertLLVMFunction(reference, callSig, cc)
 				call := builder.CreateCall(callSig.Type, fn, args, "")
 				call.SetInstructionCallConv(cc)
-				wantLeaf := cc == goABIInternalCallConv && test.leaf
+				wantLeaf := test.leaf
 				if got := fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != wantLeaf {
 					t.Errorf("%s: GC-leaf function = %v, want %v", fn.Name(), got, wantLeaf)
 				}

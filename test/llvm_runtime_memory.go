@@ -17,7 +17,50 @@ func rawClear(dst unsafe.Pointer, n uintptr)
 //go:linkname rawEqual runtime.memequal
 func rawEqual(a, b unsafe.Pointer, n uintptr) bool
 
+//go:linkname rawCompare runtime.cmpstring
+func rawCompare(a, b string) int
+
+//go:noinline
+func equalInterfaces(a, b any) bool { return a == b }
+
 func main() {
+	// Exercise lexicographic comparison across short and vector-sized inputs.
+	for _, a := range []string{"", "a", "ab", "b", "0123456789012345678901234567890123456789", "\x00\xff"} {
+		for _, b := range []string{"", "a", "abc", "z", "0123456789012345678901234567890123456788", "\xff"} {
+			want := 0
+			for i := 0; i < len(a) && i < len(b); i++ {
+				if a[i] < b[i] {
+					want = -1
+					break
+				}
+				if a[i] > b[i] {
+					want = 1
+					break
+				}
+			}
+			if want == 0 {
+				if len(a) < len(b) {
+					want = -1
+				}
+				if len(a) > len(b) {
+					want = 1
+				}
+			}
+			if rawCompare(a, b) != want {
+				panic("string comparison")
+			}
+		}
+	}
+	// Non-specialized array sizes use the variable-length equality closure.
+	a, b := [17]byte{1, 2, 3}, [17]byte{1, 2, 3}
+	if !equalInterfaces(a, b) {
+		panic("variable-length equal")
+	}
+	b[16] = 1
+	if equalInterfaces(a, b) {
+		panic("variable-length unequal")
+	}
+
 	// Zero-sized operations accept nil pointers: the attribute model must not
 	// imply nonnull or unconditional dereferenceability.
 	rawMove(nil, nil, 0)

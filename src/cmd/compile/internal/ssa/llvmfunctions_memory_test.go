@@ -21,6 +21,7 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 	defer func() { CurrentModule = oldModule; module.Dispose() }()
 	ptr := GlobalCtxt.PointerType(0)
 	size := GlobalCtxt.IntType(int(types.PtrSize * 8))
+	str := llvm.StructType([]llvm.Type{ptr, size}, false)
 	for _, test := range []struct {
 		name   string
 		result llvm.Type
@@ -30,16 +31,38 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 		{"runtime.memmove", GlobalCtxt.VoidType(), []llvm.Type{ptr, ptr, size}, []string{"writeonly", "readonly"}},
 		{"runtime.memequal", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr, size}, []string{"readonly", "readonly"}},
 		{"runtime.memclrNoHeapPointers", GlobalCtxt.VoidType(), []llvm.Type{ptr, size}, []string{"writeonly"}},
+		{"runtime.memequal_varlen", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr}, []string{"readonly", "readonly"}},
+		{"runtime.cmpstring", size, []llvm.Type{str, str}, nil},
 	} {
 		for _, cc := range []llvm.CallConv{goABIInternalCallConv, goABI0CallConv} {
 			sig := llvmFuncSignature{
 				Type: llvm.FunctionType(test.result, test.params, false), ClosureContextIndex: -1,
 			}
+			// Model the actual ABI0 stack carriers, including the result home.
+			if cc == goABI0CallConv {
+				params := make([]llvm.Type, len(test.params))
+				for i, typ := range test.params {
+					params[i] = ptr
+					sig.Params = append(sig.Params, llvmParamSignature{ValueType: typ, Alignment: int(types.PtrSize), ByVal: true})
+				}
+				if test.result.TypeKind() != llvm.VoidTypeKind {
+					sig.Results = []llvmResultSignature{{ValueType: test.result, Alignment: 1, InMemory: true, ParamIndex: len(params)}}
+					params = append(params, ptr)
+				}
+				sig.Type = llvm.FunctionType(GlobalCtxt.VoidType(), params, false)
+			}
+			if test.name == "runtime.memequal_varlen" {
+				sig.ReturnType = sig.Type.ReturnType()
+				sig = sig.withClosureContext()
+			}
 			fn := getOrInsertLLVMFunction(test.name, sig, cc)
 			want := cc == goABIInternalCallConv
+			if fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C == nil {
+				t.Errorf("%s: missing GC-leaf contract", fn.Name())
+			}
 			for _, attr := range []string{"nofree", "nocallback", "nounwind"} {
-				if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID(attr)).C != nil; got != want {
-					t.Errorf("%s: %s = %v, want %v", fn.Name(), attr, got, want)
+				if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID(attr)).C != nil; !got {
+					t.Errorf("%s: missing %s", fn.Name(), attr)
 				}
 			}
 			for i, access := range test.access {
@@ -52,9 +75,9 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 					t.Errorf("%s: overlapping memory must remain valid", fn.Name())
 				}
 			}
-			// Size is an integer; pointer-only attributes must never reach it.
-			if fn.GetEnumAttributeAtIndex(len(test.params), llvm.AttributeKindID("captures")).C != nil {
-				t.Errorf("%s: pointer attribute attached to size", fn.Name())
+			// Integer and aggregate arguments do not get pointer attributes.
+			if len(test.access) < len(test.params) && fn.GetEnumAttributeAtIndex(len(test.params), llvm.AttributeKindID("captures")).C != nil {
+				t.Errorf("%s: pointer attribute attached to non-pointer argument", fn.Name())
 			}
 			if fn.GetEnumFunctionAttribute(llvm.AttributeKindID("memory")).C != nil {
 				t.Errorf("%s: global/runtime memory effects were restricted", fn.Name())

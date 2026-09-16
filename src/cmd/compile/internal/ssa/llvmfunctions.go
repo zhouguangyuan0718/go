@@ -78,8 +78,17 @@ func newLLVMFunctionManager() llvmFunctionManager {
 			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
 			parameters: [][]llvm.Attribute{writePointer},
 		},
-		"runtime.wbMove": {gcLeaf: true},
-		"runtime.wbZero": {gcLeaf: true},
+		// The variable-length equality entry reads its size from the closure
+		// context and tail-calls the same assembly comparison body.
+		"runtime.memequal_varlen": {
+			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
+			parameters: [][]llvm.Attribute{readPointer, readPointer},
+		},
+		// String arguments are aggregate values in LLVM IR, not pointer
+		// parameters. The assembly only compares bytes (and may read CPU flags).
+		"runtime.cmpstring": {gcLeaf: true, noFree: true, noCallback: true, noUnwind: true},
+		"runtime.wbMove":    {gcLeaf: true},
+		"runtime.wbZero":    {gcLeaf: true},
 
 		// These APIs terminate the goroutine or process. Do not use the inliner's
 		// NeverReturns heuristic: a callee can recover its own panic and return.
@@ -140,20 +149,22 @@ func (m *llvmFunctionManager) getOrInsert(name string, sig llvmFuncSignature, cc
 	if model.noReturn {
 		fn.AddFunctionAttr(llvmNoReturnAttribute)
 	}
-	// The leaf contract belongs to the ABIInternal entry, not its ABI0 wrapper.
-	if model.gcLeaf && cc == goABIInternalCallConv {
+	// These contracts also hold for the NOSPLIT ABI wrappers.
+	if model.gcLeaf {
 		fn.AddFunctionAttr(llvmGCLeafAttribute)
 	}
+	if model.noFree {
+		fn.AddFunctionAttr(llvmNoFreeAttribute)
+	}
+	if model.noCallback {
+		fn.AddFunctionAttr(llvmNoCallbackAttribute)
+	}
+	if model.noUnwind {
+		fn.AddFunctionAttr(llvmNoUnwindAttribute)
+	}
+	// ABI0 pointer parameters denote byval argument slots, not the original
+	// pointees. Only ABIInternal uses the parameter contracts below.
 	if cc == goABIInternalCallConv {
-		if model.noFree {
-			fn.AddFunctionAttr(llvmNoFreeAttribute)
-		}
-		if model.noCallback {
-			fn.AddFunctionAttr(llvmNoCallbackAttribute)
-		}
-		if model.noUnwind {
-			fn.AddFunctionAttr(llvmNoUnwindAttribute)
-		}
 		for i, parameter := range model.parameters {
 			for _, attribute := range parameter {
 				fn.AddAttributeAtIndex(i+1, attribute)
