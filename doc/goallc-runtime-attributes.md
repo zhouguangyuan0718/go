@@ -1,8 +1,8 @@
 # Compiler-known runtime LLVM contracts
 
 The registry in `src/cmd/compile/internal/ssa/llvmfunctions.go` binds contracts
-by exact IR name, with independent function flags and precreated LLVM parameter
-attributes. It does not classify names by prefix at lookup time.
+by exact IR name, with independent function properties and precreated LLVM
+parameter and result attributes. It does not classify names by prefix at lookup time.
 
 ## Audit scope
 
@@ -10,7 +10,7 @@ The current audit covers the 285 distinct function names declared in
 `src/cmd/compile/internal/typecheck/_builtin/runtime.go` or referenced by literal
 `LookupRuntimeFunc` calls in `src/cmd/compile/internal/ssagen/ssa.go`, plus the
 function entries in `src/cmd/internal/goobj/mkbuiltin.go` (excluding the TLS variable).
-124 have an explicit model; the remaining 161 are listed below.
+136 have an explicit model; the remaining 149 are listed below.
 Also modeled are `Goexit`, `memequal_varlen`, `memhash_varlen`, `panicmem`, `panicmemAddr`, `throw`, plus the existing
 `os.Exit` and testing termination methods. Generated `mallocgcSmallNoScanSC*`
 and `mallocgcSmallScanNoHeaderSC*` entries share the allocation exclusions below.
@@ -64,8 +64,22 @@ for those wrappers.
 Other helpers retain unrestricted memory effects: arm64 zeroing updates a
 cache, floating-point and complex hashes update random state for NaNs, and bulk
 barriers update GC metadata. Barrier destinations are not `writeonly`: old
-pointers must be read before overwriting them. No nonnull, noalias, allocation
-result, or dereferenceability promise is introduced.
+pointers must be read before overwriting them.
+
+ABIInternal allocation and boxing results have `nonnull`: successful calls
+return either allocated storage or a non-null static object, including zerobase.
+`convT16`, `convT32` and `convT64` additionally return `dereferenceable(2/4/8)`.
+Their static caches preclude a general fresh-allocation/noalias contract.
+`mallocgc` has `allocsize(0)`, describing its byte-size parameter without
+promising clearing, purity or allocation elision. The nullable type argument is
+unchanged. `newobject` and slice allocation sizes depend on type metadata and
+cannot be expressed by an `allocsize` parameter index.
+
+`cmpstring` returns `range(-1, 2)`. `chanlen`, `chancap` and `countrunes` return
+nonnegative Go ints. Range attributes are precreated at 32 and 64 bits and bound
+using the actual IR return width. ABI0 returns through slots and receives none
+of these return or allocation-size attributes. No noalias or allockind promise
+is introduced. Non-leaf allocations still require statepoints.
 
 The LLVM definitions of these attributes are in the
 [LLVM language reference](https://llvm.org/docs/LangRef.html#function-attributes).
@@ -119,7 +133,7 @@ The checks inspect pointer addresses, runtime allocation metadata and failure pa
 
 These helpers allocate, may run GC/instrumentation/error paths, retain type/data pointers, or return aliases of scratch/input storage. `slicecopy` and `typedslicecopy` also call sanitizer hooks. A contract common to all supported build modes is not inferred from the fast path.
 
-`concatbyte2`, `concatbyte3`, `concatbyte4`, `concatbyte5`, `concatbytes`, `concatstring2`, `concatstring3`, `concatstring4`, `concatstring5`, `concatstrings`, `convT`, `convT16`, `convT32`, `convT64`, `convTnoptr`, `convTslice`, `convTstring`, `growslice`, `growsliceBuf`, `growsliceBufNoAlias`, `growsliceNoAlias`, `intstring`, `makeslice`, `makeslice64`, `makeslicecopy`, `mallocgc`, `mallocgcTinySC2`, `moveSlice`, `moveSliceNoCap`, `moveSliceNoCapNoScan`, `moveSliceNoScan`, `newobject`, `slicebytetostring`, `slicebytetostringtmp`, `slicecopy`, `slicerunetostring`, `stringtoslicebyte`, `stringtoslicerune`, `typedslicecopy`.
+`concatbyte2`, `concatbyte3`, `concatbyte4`, `concatbyte5`, `concatbytes`, `concatstring2`, `concatstring3`, `concatstring4`, `concatstring5`, `concatstrings`, `growslice`, `growsliceBuf`, `growsliceBufNoAlias`, `growsliceNoAlias`, `intstring`, `mallocgcTinySC2`, `moveSlice`, `moveSliceNoCap`, `moveSliceNoCapNoScan`, `moveSliceNoScan`, `slicebytetostring`, `slicebytetostringtmp`, `slicecopy`, `slicerunetostring`, `stringtoslicebyte`, `stringtoslicerune`, `typedslicecopy`.
 
 ### Scheduling and defer
 

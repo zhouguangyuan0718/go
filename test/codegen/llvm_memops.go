@@ -116,7 +116,7 @@ func llvmStringLess(a, b string) bool {
 // GC-leaf contracts belong to the runtime declarations, not individual calls.
 // LLVM-DAG: declare goabiinternal i8 @"runtime.memequal<builtin.{{[0-9]+}}>"(ptr readonly captures(none), ptr readonly captures(none), i64) #[[COMPARE:[0-9]+]]
 // LLVM-DAG: declare goabiinternal void @"runtime.memmove<builtin.{{[0-9]+}}>"(ptr writeonly captures(none), ptr readonly captures(none), i64) #[[RAW_MEMORY:[0-9]+]]
-// LLVM-DAG: declare goabiinternal i64 @"runtime.cmpstring<builtin.{{[0-9]+}}>"({ ptr, i64 }, { ptr, i64 }) #[[COMPARE]]
+// LLVM-DAG: declare goabiinternal range(i64 -1, 2) i64 @"runtime.cmpstring<builtin.{{[0-9]+}}>"({ ptr, i64 }, { ptr, i64 }) #[[COMPARE]]
 // LLVM-DAG: attributes #[[RAW_MEMORY]] = { nocallback nofree nounwind "gc-leaf-function" }
 
 // LLVM-DAG: attributes #[[COMPARE]] = { nocallback nofree nosync nounwind willreturn memory(read) "gc-leaf-function" }

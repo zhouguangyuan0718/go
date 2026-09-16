@@ -112,6 +112,13 @@ func TestLLVMFunctionModelsBindGCLeafToFunctions(t *testing.T) {
 				callSig.Type = llvm.FunctionType(result, []llvm.Type{ptr, ptr, size}, false)
 				args = []llvm.Value{llvm.ConstNull(ptr), llvm.ConstNull(ptr), llvm.ConstInt(size, 0, false)}
 			}
+			if test.name == "runtime.mallocgc" && cc == goABIInternalCallConv {
+				ptr := GlobalCtxt.PointerType(0)
+				size := GlobalCtxt.IntType(int(types.PtrSize * 8))
+				i8 := GlobalCtxt.Int8Type()
+				callSig.Type = llvm.FunctionType(ptr, []llvm.Type{size, ptr, i8}, false)
+				args = []llvm.Value{llvm.ConstInt(size, 0, false), llvm.ConstNull(ptr), llvm.ConstInt(i8, 1, false)}
+			}
 			for _, reference := range references {
 				fn := getOrInsertLLVMFunction(reference, callSig, cc)
 				call := builder.CreateCall(callSig.Type, fn, args, "")
