@@ -35,6 +35,10 @@ type llvmFunctionModel struct {
 	// Attributes for the known ABIInternal signature. Parameter entries use
 	// zero-based argument positions; the binding below uses LLVM's 1-based indices.
 	parameters [][]llvm.Attribute
+	result     []llvm.Attribute
+	// Go int result ranges are precreated for each supported integer width.
+	resultRange map[int]llvm.Attribute
+	allocSize   llvm.Attribute
 }
 
 // llvmFunctionManager owns the association between exact LLVM function names,
@@ -71,6 +75,17 @@ func newLLVMFunctionManager() llvmFunctionManager {
 	// parameter access modes do not imply an argmem-only function effect.
 	readPointer := []llvm.Attribute{llvmCapturesNoneAttribute, llvmReadOnlyAttribute}
 	writePointer := []llvm.Attribute{llvmCapturesNoneAttribute, llvmWriteOnlyAttribute}
+	nonnull := llvmModelAttribute("nonnull")
+	nonnullResult := []llvm.Attribute{nonnull}
+	boxedResult := func(bytes uint64) []llvm.Attribute {
+		return []llvm.Attribute{nonnull, GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("dereferenceable"), bytes)}
+	}
+	comparisonRange := make(map[int]llvm.Attribute)
+	lengthRange := make(map[int]llvm.Attribute)
+	for _, bits := range []uint{32, 64} {
+		comparisonRange[int(bits)] = GlobalCtxt.CreateConstantRangeAttribute(llvm.AttributeKindID("range"), bits, []uint64{^uint64(0)}, []uint64{2})
+		lengthRange[int(bits)] = GlobalCtxt.CreateConstantRangeAttribute(llvm.AttributeKindID("range"), bits, []uint64{0}, []uint64{uint64(1) << (bits - 1)})
+	}
 	models := map[string]llvmFunctionModel{
 		// These raw helpers already have a GC-leaf call contract in both the SSA
 		// static-call path and the dedicated memory-operation lowering paths.
@@ -96,9 +111,25 @@ func newLLVMFunctionManager() llvmFunctionManager {
 		},
 		// String arguments are aggregate values in LLVM IR, not pointer
 		// parameters. The assembly only compares bytes (and may read CPU flags).
-		"runtime.cmpstring": {gcLeaf: true, noFree: true, noCallback: true, noUnwind: true, willReturn: true, noSync: true, readOnlyMemory: true},
+		"runtime.cmpstring": {resultRange: comparisonRange, gcLeaf: true, noFree: true, noCallback: true, noUnwind: true, willReturn: true, noSync: true, readOnlyMemory: true},
 		"runtime.wbMove":    {gcLeaf: true, noUnwind: true},
 		"runtime.wbZero":    {gcLeaf: true, noUnwind: true},
+
+		// Successful allocation returns a non-null pointer, including zerobase
+		// for zero bytes. These attributes imply neither GC leaf nor purity.
+		"runtime.mallocgc":      {result: nonnullResult, allocSize: GlobalCtxt.CreateAllocSizeAttribute(0)},
+		"runtime.newobject":     {result: nonnullResult},
+		"runtime.makeslice":     {result: nonnullResult},
+		"runtime.makeslice64":   {result: nonnullResult},
+		"runtime.makeslicecopy": {result: nonnullResult},
+		"runtime.convT":         {result: nonnullResult},
+		"runtime.convTnoptr":    {result: nonnullResult},
+		// Small values can use staticuint64s: readable, but not fresh/noalias.
+		"runtime.convT16":     {result: boxedResult(2)},
+		"runtime.convT32":     {result: boxedResult(4)},
+		"runtime.convT64":     {result: boxedResult(8)},
+		"runtime.convTstring": {result: nonnullResult},
+		"runtime.convTslice":  {result: nonnullResult},
 
 		// These contracts describe logical memory effects. Stack relocation is
 		// handled by statepoints; these Go helpers are deliberately not GC leaf.
@@ -132,7 +163,7 @@ func newLLVMFunctionManager() llvmFunctionManager {
 
 		// Aggregate and scalar operands need no pointer parameter attributes.
 		"runtime.decoderune":      {noUnwind: true, willReturn: true, readOnlyMemory: true},
-		"runtime.countrunes":      {noUnwind: true, willReturn: true, readOnlyMemory: true},
+		"runtime.countrunes":      {resultRange: lengthRange, noUnwind: true, willReturn: true, readOnlyMemory: true},
 		"runtime.complex128div":   {noUnwind: true, willReturn: true, noMemory: true},
 		"runtime.float64toint64":  {noUnwind: true, willReturn: true, noMemory: true},
 		"runtime.float64touint64": {noUnwind: true, willReturn: true, noMemory: true},
@@ -176,8 +207,8 @@ func newLLVMFunctionManager() llvmFunctionManager {
 
 		// Channel queries only inspect the header, including timer-channel
 		// handling. They neither retain the channel nor perform send/receive.
-		"runtime.chanlen": {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.chancap": {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.chanlen": {resultRange: lengthRange, noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.chancap": {resultRange: lengthRange, noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
 
 		// The bulk barriers and cgo pointer checks run without safe points,
 		// including their system-stack slow paths. Barrier destinations must
@@ -337,6 +368,15 @@ func (m *llvmFunctionManager) getOrInsert(name string, sig llvmFuncSignature, cc
 	// ABI0 pointer parameters denote byval argument slots, not the original
 	// pointees. Only ABIInternal uses the parameter contracts below.
 	if cc == goABIInternalCallConv {
+		for _, attribute := range model.result {
+			fn.AddAttributeAtIndex(0, attribute)
+		}
+		if model.resultRange != nil {
+			fn.AddAttributeAtIndex(0, model.resultRange[sig.Type.ReturnType().IntTypeWidth()])
+		}
+		if model.allocSize.C != nil {
+			fn.AddFunctionAttr(model.allocSize)
+		}
 		for i, parameter := range model.parameters {
 			for _, attribute := range parameter {
 				fn.AddAttributeAtIndex(i+1, attribute)

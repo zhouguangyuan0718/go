@@ -22,6 +22,10 @@
 
 using namespace llvm;
 
+LLVMAttributeRef LLVMGoCreateAllocSizeAttribute(LLVMContextRef C, unsigned SizeArg) {
+  return wrap(Attribute::getWithAllocSizeArgs(*unwrap(C), SizeArg, std::nullopt));
+}
+
 LLVMAttributeRef LLVMGoCreateReadOnlyMemoryAttribute(LLVMContextRef C) {
   return wrap(Attribute::getWithMemoryEffects(*unwrap(C), MemoryEffects::readOnly()));
 }
