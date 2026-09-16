@@ -27,12 +27,22 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 		result llvm.Type
 		params []llvm.Type
 		access []string
+		leaf   bool
+		raw    bool
 	}{
-		{"runtime.memmove", GlobalCtxt.VoidType(), []llvm.Type{ptr, ptr, size}, []string{"writeonly", "readonly"}},
-		{"runtime.memequal", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr, size}, []string{"readonly", "readonly"}},
-		{"runtime.memclrNoHeapPointers", GlobalCtxt.VoidType(), []llvm.Type{ptr, size}, []string{"writeonly"}},
-		{"runtime.memequal_varlen", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr}, []string{"readonly", "readonly"}},
-		{"runtime.cmpstring", size, []llvm.Type{str, str}, nil},
+		{"runtime.memmove", GlobalCtxt.VoidType(), []llvm.Type{ptr, ptr, size}, []string{"writeonly", "readonly"}, true, true},
+		{"runtime.memequal", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr, size}, []string{"readonly", "readonly"}, true, true},
+		{"runtime.memclrNoHeapPointers", GlobalCtxt.VoidType(), []llvm.Type{ptr, size}, []string{"writeonly"}, true, true},
+		{"runtime.memequal_varlen", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr}, []string{"readonly", "readonly"}, true, true},
+		{"runtime.cmpstring", size, []llvm.Type{str, str}, nil, true, true},
+		{"runtime.memequal64", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr}, []string{"readonly", "readonly"}, false, false},
+		{"runtime.memhash", size, []llvm.Type{ptr, size, size}, []string{"readonly"}, false, false},
+		{"runtime.f64hash", size, []llvm.Type{ptr, size}, []string{"readonly"}, false, false},
+		{"runtime.chanlen", size, []llvm.Type{ptr}, []string{"readonly"}, false, false},
+		{"runtime.selectsetpc", GlobalCtxt.VoidType(), []llvm.Type{ptr}, []string{"writeonly"}, false, false},
+		{"runtime.typedmemmove", GlobalCtxt.VoidType(), []llvm.Type{ptr, ptr, ptr}, nil, true, false},
+		{"runtime.typedmemclr", GlobalCtxt.VoidType(), []llvm.Type{ptr, ptr}, nil, true, false},
+		{"runtime.cgoCheckPtrWrite", GlobalCtxt.VoidType(), []llvm.Type{ptr, ptr}, nil, true, false},
 	} {
 		for _, cc := range []llvm.CallConv{goABIInternalCallConv, goABI0CallConv} {
 			sig := llvmFuncSignature{
@@ -57,12 +67,13 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 			}
 			fn := getOrInsertLLVMFunction(test.name, sig, cc)
 			want := cc == goABIInternalCallConv
-			if fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C == nil {
-				t.Errorf("%s: missing GC-leaf contract", fn.Name())
+			if got := fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != test.leaf {
+				t.Errorf("%s: GC leaf = %v, want %v", fn.Name(), got, test.leaf)
 			}
 			for _, attr := range []string{"nofree", "nocallback", "nounwind"} {
-				if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID(attr)).C != nil; !got {
-					t.Errorf("%s: missing %s", fn.Name(), attr)
+				want := test.raw || attr == "nounwind"
+				if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID(attr)).C != nil; got != want {
+					t.Errorf("%s: %s = %v, want %v", fn.Name(), attr, got, want)
 				}
 			}
 			for i, access := range test.access {
@@ -92,7 +103,7 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 // The source of a raw comparison or copy remains unchanged, but an alias of a
 // copy's destination does not. Check the optimization rather than only attrs.
 func TestLLVMFunctionMemoryModelLoadForwarding(t *testing.T) {
-	for _, helper := range []string{"runtime.memequal", "runtime.memmove", "runtime.memclrNoHeapPointers"} {
+	for _, helper := range []string{"runtime.memequal", "runtime.memmove", "runtime.memclrNoHeapPointers", "runtime.memequal64", "runtime.f64equal", "runtime.memhash"} {
 		for _, modeled := range []bool{false, true} {
 			for _, alias := range []bool{false, true} {
 				t.Run(helper+"/"+map[bool]string{false: "baseline", true: "modeled"}[modeled]+"/"+map[bool]string{false: "distinct", true: "alias"}[alias], func(t *testing.T) {
@@ -104,8 +115,13 @@ func TestLLVMFunctionMemoryModelLoadForwarding(t *testing.T) {
 					size := GlobalCtxt.IntType(int(types.PtrSize * 8))
 					result := GlobalCtxt.VoidType()
 					params := []llvm.Type{ptr, ptr, size}
-					if helper == "runtime.memequal" {
+					if helper == "runtime.memequal" || helper == "runtime.memequal64" || helper == "runtime.f64equal" {
 						result = GlobalCtxt.Int8Type()
+						if helper != "runtime.memequal" {
+							params = []llvm.Type{ptr, ptr}
+						}
+					} else if helper == "runtime.memhash" {
+						result, params = size, []llvm.Type{ptr, size, size}
 					} else if helper == "runtime.memclrNoHeapPointers" {
 						params = []llvm.Type{ptr, size}
 					}
@@ -128,7 +144,11 @@ func TestLLVMFunctionMemoryModelLoadForwarding(t *testing.T) {
 						other = local
 					}
 					args := []llvm.Value{other, local, llvm.ConstInt(size, 8, false)}
-					if helper == "runtime.memclrNoHeapPointers" {
+					if helper == "runtime.memequal64" || helper == "runtime.f64equal" {
+						args = args[:2]
+					} else if helper == "runtime.memhash" {
+						args = []llvm.Value{local, llvm.ConstInt(size, 0, false), llvm.ConstInt(size, 8, false)}
+					} else if helper == "runtime.memclrNoHeapPointers" {
 						args = []llvm.Value{local, llvm.ConstInt(size, 8, false)}
 					}
 					call := b.CreateCall(sig.Type, callee, args, "")
@@ -140,7 +160,7 @@ func TestLLVMFunctionMemoryModelLoadForwarding(t *testing.T) {
 					if err := module.RunPasses("function(instcombine,gvn)", llvm.TargetMachine{}, options); err != nil {
 						t.Fatal(err)
 					}
-					wantForward := modeled && (helper == "runtime.memequal" || helper == "runtime.memmove" && !alias)
+					wantForward := modeled && helper != "runtime.memclrNoHeapPointers" && (helper != "runtime.memmove" || !alias)
 					if got := strings.Contains(caller.String(), "ret i64 7"); got != wantForward {
 						t.Fatalf("load forwarded = %v, want %v\n%s", got, wantForward, module.String())
 					}

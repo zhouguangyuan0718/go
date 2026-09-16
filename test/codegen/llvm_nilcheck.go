@@ -17,7 +17,7 @@ package codegen
 // LLVM: br i1 {{%.*}}, label {{%.*}}, label {{%.*}}, {{.*}}!make.implicit [[GO_NILCHECK:![0-9]+]]
 // LLVM: call goabiinternal void @runtime.panicmem()
 // LLVM-NEXT: unreachable
-// LLVM: declare goabiinternal void @runtime.panicmem()
+// LLVM: declare goabiinternal void @runtime.panicmem() #[[PANIC_ATTR:[0-9]+]]
 //
 // LLVM-LABEL: define goabiinternal i64 @codegen.llvmExplicitNilcheckGoObj(ptr %p)
 // LLVM: call goabiinternal void @runtime.panicmem(), !dbg ![[PANIC_LOC:[0-9]+]]
@@ -47,7 +47,7 @@ package codegen
 // LLVM-NOT: !goallc.nilcheck
 // LLVM-NOT: !annotation
 // LLVM: load i64, ptr %p
-// LLVM-NOT: "gc-leaf-function"
+// LLVM: attributes #[[PANIC_ATTR]] = { noreturn }{{$}}
 // LLVM-NOT: llvm.goallc.nilcheck
 //
 // LLVM-OPT-LABEL: define goabiinternal i64 @codegen.llvmExplicitNilcheck(
