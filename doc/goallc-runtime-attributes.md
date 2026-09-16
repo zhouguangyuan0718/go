@@ -94,8 +94,9 @@ their unconditional contracts. The tiny and fourteen size-class entries share
 `nonnull` and `allocsize(0)`, and are registered by exact name.
 
 A `newobject` call whose type argument is an SSA `OpAddr` of a static type symbol
-with a known nonzero `TypeInfo.Type.Size()` receives `noalias` and
-`allockind("alloc,zeroed")`. This reuses the type metadata used by Go's fixed-load
+with a known nonzero `TypeInfo.Type.Size()` receives return `noalias`,
+`dereferenceable(N)` for that size, and `allockind("alloc,zeroed")`. The
+size-dependent LLVM attributes are cached by size and reused across calls. This reuses the type metadata used by Go's fixed-load
 rewriting, rather than guessing the allocation size from a pointer result type.
 Zero-sized or dynamic type descriptors remain unannotated. The runtime
 signature is unchanged; `allocsize` cannot describe a size loaded from type

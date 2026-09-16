@@ -28,7 +28,7 @@ func llvmAllocReadZero() uint64 { return *(*uint64)(llvmAllocate(8, nil, true)) 
 // LLVM-DAG: call goabiinternal noalias ptr @runtime.mallocgcTinySC2(i64 1, ptr {{.*}}, i8 1) #[[ZERO]]
 // LLVM-DAG: call goabiinternal noalias ptr @runtime.mallocgcSmallNoScanSC7(i64 80, ptr {{.*}}, i8 1) #[[ZERO]]
 // LLVM-DAG: call goabiinternal noalias ptr @runtime.mallocgcSmallScanNoHeaderSC7(i64 80, ptr {{.*}}, i8 1) #[[ZERO]]
-// LLVM-DAG: call goabiinternal noalias ptr @"runtime.newobject<builtin.{{[0-9]+}}>"(ptr @"type:[128]uint8") #[[ZERO]]
+// LLVM-DAG: call goabiinternal noalias dereferenceable(128) ptr @"runtime.newobject<builtin.{{[0-9]+}}>"(ptr @"type:[128]uint8") #[[ZERO]]
 // LLVM-DAG: call goabiinternal ptr @"runtime.newobject<builtin.{{[0-9]+}}>"(ptr %typ), !dbg
 // LLVM-DAG: declare goabiinternal nonnull ptr @runtime.mallocgcTinySC2(i64, ptr, i8) #[[SIZE:[0-9]+]]
 // LLVM-DAG: declare goabiinternal nonnull ptr @runtime.mallocgcSmallNoScanSC7(i64, ptr, i8) #[[SIZE]]

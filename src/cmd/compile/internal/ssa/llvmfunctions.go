@@ -51,6 +51,8 @@ type llvmFunctionModel struct {
 // handle can outlive a module or survive replacement of a provisional signature.
 type llvmFunctionManager struct {
 	models map[string]llvmFunctionModel
+	// Size-dependent attributes belong to GlobalCtxt and are shared by calls.
+	dereferenceable map[uint64]llvm.Attribute
 }
 
 // Attributes belong to GlobalCtxt and can be reused across modules. Unlike
@@ -454,6 +456,16 @@ func (m *llvmFunctionManager) bindCall(call, fn llvm.Value, args []llvm.Value, c
 		if typ.Size() <= 0 {
 			return
 		}
+		if m.dereferenceable == nil {
+			m.dereferenceable = make(map[uint64]llvm.Attribute)
+		}
+		size := uint64(typ.Size())
+		attribute, ok := m.dereferenceable[size]
+		if !ok {
+			attribute = GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("dereferenceable"), size)
+			m.dereferenceable[size] = attribute
+		}
+		call.AddCallSiteAttribute(0, attribute)
 		kind = llvmZeroAllocAttribute
 	default:
 		return
