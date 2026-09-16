@@ -22,6 +22,13 @@
 
 using namespace llvm;
 
+LLVMAttributeRef LLVMGoCreateAllocKindAttribute(LLVMContextRef C, LLVMBool Zeroed) {
+  AllocFnKind Kind = AllocFnKind::Alloc;
+  if (Zeroed)
+    Kind |= AllocFnKind::Zeroed;
+  return wrap(Attribute::getWithAllocKind(*unwrap(C), Kind));
+}
+
 LLVMAttributeRef LLVMGoCreateAllocSizeAttribute(LLVMContextRef C, unsigned SizeArg) {
   return wrap(Attribute::getWithAllocSizeArgs(*unwrap(C), SizeArg, std::nullopt));
 }

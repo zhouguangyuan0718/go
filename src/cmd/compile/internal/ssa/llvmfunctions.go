@@ -8,6 +8,7 @@ package ssa
 
 import (
 	"cmd/compile/internal/base"
+	"cmd/compile/internal/types"
 	"cmd/internal/goobj"
 	"cmd/internal/obj"
 
@@ -39,6 +40,9 @@ type llvmFunctionModel struct {
 	// Go int result ranges are precreated for each supported integer width.
 	resultRange map[int]llvm.Attribute
 	allocSize   llvm.Attribute
+	// Audited mallocgc-family call contract: (byte size, type, needzero).
+	allocation bool
+	newObject  bool
 }
 
 // llvmFunctionManager owns the association between exact LLVM function names,
@@ -47,6 +51,8 @@ type llvmFunctionModel struct {
 // handle can outlive a module or survive replacement of a provisional signature.
 type llvmFunctionManager struct {
 	models map[string]llvmFunctionModel
+	// Size-dependent attributes belong to GlobalCtxt and are shared by calls.
+	dereferenceable map[uint64]llvm.Attribute
 }
 
 // Attributes belong to GlobalCtxt and can be reused across modules. Unlike
@@ -64,6 +70,10 @@ var (
 	llvmNoSyncAttribute         = llvmModelAttribute("nosync")
 	llvmReadOnlyMemoryAttribute = GlobalCtxt.CreateReadOnlyMemoryAttribute()
 	llvmNoMemoryAttribute       = llvmModelAttribute("memory")
+	llvmNoAliasAttribute        = llvmModelAttribute("noalias")
+	llvmAllocAttribute          = GlobalCtxt.CreateAllocKindAttribute(false)
+	llvmZeroAllocAttribute      = GlobalCtxt.CreateAllocKindAttribute(true)
+	llvmAllocFamilyAttribute    = GlobalCtxt.CreateStringAttribute("alloc-family", "runtime.mallocgc")
 	llvmFunctions               = newLLVMFunctionManager()
 )
 
@@ -85,6 +95,9 @@ func newLLVMFunctionManager() llvmFunctionManager {
 	for _, bits := range []uint{32, 64} {
 		comparisonRange[int(bits)] = GlobalCtxt.CreateConstantRangeAttribute(llvm.AttributeKindID("range"), bits, []uint64{^uint64(0)}, []uint64{2})
 		lengthRange[int(bits)] = GlobalCtxt.CreateConstantRangeAttribute(llvm.AttributeKindID("range"), bits, []uint64{0}, []uint64{uint64(1) << (bits - 1)})
+	}
+	mallocModel := llvmFunctionModel{
+		result: nonnullResult, allocSize: GlobalCtxt.CreateAllocSizeAttribute(0), allocation: true,
 	}
 	models := map[string]llvmFunctionModel{
 		// These raw helpers already have a GC-leaf call contract in both the SSA
@@ -117,8 +130,24 @@ func newLLVMFunctionManager() llvmFunctionManager {
 
 		// Successful allocation returns a non-null pointer, including zerobase
 		// for zero bytes. These attributes imply neither GC leaf nor purity.
-		"runtime.mallocgc":      {result: nonnullResult, allocSize: GlobalCtxt.CreateAllocSizeAttribute(0)},
-		"runtime.newobject":     {result: nonnullResult},
+		"runtime.mallocgc":                     mallocModel,
+		"runtime.mallocgcTinySC2":              mallocModel,
+		"runtime.mallocgcSmallNoScanSC1":       mallocModel,
+		"runtime.mallocgcSmallNoScanSC2":       mallocModel,
+		"runtime.mallocgcSmallNoScanSC3":       mallocModel,
+		"runtime.mallocgcSmallNoScanSC4":       mallocModel,
+		"runtime.mallocgcSmallNoScanSC5":       mallocModel,
+		"runtime.mallocgcSmallNoScanSC6":       mallocModel,
+		"runtime.mallocgcSmallNoScanSC7":       mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC1": mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC2": mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC3": mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC4": mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC5": mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC6": mallocModel,
+		"runtime.mallocgcSmallScanNoHeaderSC7": mallocModel,
+
+		"runtime.newobject":     {result: nonnullResult, newObject: true},
 		"runtime.makeslice":     {result: nonnullResult},
 		"runtime.makeslice64":   {result: nonnullResult},
 		"runtime.makeslicecopy": {result: nonnullResult},
@@ -393,4 +422,55 @@ func llvmModelAttribute(name string) llvm.Attribute {
 	}
 	// captures is an integer-valued attribute; zero is captures(none).
 	return GlobalCtxt.CreateEnumAttribute(kind, 0)
+}
+
+// bindCall adds argument-dependent contracts without strengthening a shared
+// declaration or definition. A zero-byte mallocgc returns the shared zerobase;
+// preserve that identity until zero-sized allocation provenance is modeled.
+func (m *llvmFunctionManager) bindCall(call, fn llvm.Value, args []llvm.Value, cc llvm.CallConv, source *Value) {
+	if cc != goABIInternalCallConv {
+		return
+	}
+	model := m.models[fn.Name()]
+	kind := llvmAllocAttribute
+	switch {
+	case model.allocation:
+		size := args[0]
+		if size.IsAConstantInt().IsNil() || size.ZExtValue() == 0 {
+			return
+		}
+		if zero := args[2]; !zero.IsAConstantInt().IsNil() && zero.ZExtValue() != 0 {
+			kind = llvmZeroAllocAttribute
+		}
+	case model.newObject:
+		// Use the same static type-symbol information as Go's fixed-load
+		// rewriting. A pointer result type alone does not prove allocation size.
+		if source == nil || len(source.Args) == 0 || source.Args[0].Op != OpAddr {
+			return
+		}
+		sym, ok := source.Args[0].Aux.(*obj.LSym)
+		if !ok || sym.TypeInfo() == nil {
+			return
+		}
+		typ := sym.TypeInfo().Type.(*types.Type)
+		if typ.Size() <= 0 {
+			return
+		}
+		if m.dereferenceable == nil {
+			m.dereferenceable = make(map[uint64]llvm.Attribute)
+		}
+		size := uint64(typ.Size())
+		attribute, ok := m.dereferenceable[size]
+		if !ok {
+			attribute = GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("dereferenceable"), size)
+			m.dereferenceable[size] = attribute
+		}
+		call.AddCallSiteAttribute(0, attribute)
+		kind = llvmZeroAllocAttribute
+	default:
+		return
+	}
+	call.AddCallSiteAttribute(0, llvmNoAliasAttribute)
+	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, kind)
+	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, llvmAllocFamilyAttribute)
 }

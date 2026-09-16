@@ -3444,6 +3444,7 @@ func (lfc *LLVMFuncContext) staticCall(v *Value) llvm.Value {
 	call := lfc.b.CreateCall(sig.Type, fn, args, name)
 	call.SetInstructionCallConv(cc)
 	configureLLVMCall(call, sig)
+	llvmFunctions.bindCall(call, fn, args, cc, v)
 	lfc.requireCPUFeature(v, call)
 	lfc.materializeAddressedResults(v, call, aux)
 	return call
