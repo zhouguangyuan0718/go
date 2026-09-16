@@ -458,16 +458,41 @@ func (st *loadState) addSym(name string, ver int, r *oReader, li uint32, kind in
 	sz := int64(r.Sym(li).Siz())
 	oldr, oldli := l.toLocal(oldi)
 	oldsym := oldr.Sym(oldli)
-	if osym.Dupok() {
-		if oldsym.Dupok() {
-			if l.flags&FlagStrictDups != 0 {
-				l.checkdup(name, r, li, oldi)
-			}
-			if oldsz < sz {
-				// new symbol overwrites old symbol.
-				l.objSyms[oldi] = objSym{r.objidx, li}
-			}
+	if osym.Dupok() && oldsym.Dupok() {
+		if l.flags&FlagStrictDups != 0 {
+			l.checkdup(name, r, li, oldi)
 		}
+		if oldsz < sz {
+			// new symbol overwrites old symbol.
+			l.objSyms[oldi] = objSym{r.objidx, li}
+		}
+		return oldi
+	}
+	oldtyp := sym.AbiSymKindToSymKind[objabi.SymKind(oldsym.Type())]
+	newtyp := sym.AbiSymKindToSymKind[objabi.SymKind(osym.Type())]
+	oldHasContent := oldr.DataSize(oldli) != 0
+	newHasContent := r.DataSize(li) != 0
+	oldIsBSS := oldtyp.IsData() && !oldHasContent
+	newIsBSS := newtyp.IsData() && !newHasContent
+	// A BSS declaration can be used to take the address of a function:
+	//
+	//	//go:linkname fn
+	//	var fn uintptr
+	//	var fnAddr = uintptr(unsafe.Pointer(&fn))
+	//
+	// TODO: maybe limit this case to just pointer sized variable?
+	//
+	// A TEXT/BSS pair with at least one non-Dupok definition keeps the TEXT's
+	// size and linkname permissions, regardless of load order. In particular,
+	// a non-Dupok BSS must not replace a Dupok ABI wrapper.
+	if oldtyp.IsText() && newIsBSS {
+		return oldi
+	}
+	if newtyp.IsText() && oldIsBSS {
+		l.objSyms[oldi] = objSym{r.objidx, li}
+		return oldi
+	}
+	if osym.Dupok() {
 		return oldi
 	}
 	if oldsym.Dupok() {
@@ -480,38 +505,18 @@ func (st *loadState) addSym(name string, ver int, r *oReader, li uint32, kind in
 	// including RODATA) and the other is BSS, the one with content wins.
 	// If both are BSS, the one with larger size wins.
 	//
-	// For a special case, we allow a TEXT symbol overwrites a BSS symbol
-	// even if the BSS symbol has larger size. This is because there is
-	// code like below to take the address of a function
-	//
-	//	//go:linkname fn
-	//	var fn uintptr
-	//	var fnAddr = uintptr(unsafe.Pointer(&fn))
-	//
-	// TODO: maybe limit this case to just pointer sized variable?
-	//
 	// In summary, the "overwrite" variable and the final result are
 	//
 	// new sym       old sym       result
 	// -------------------------------------------------------
-	// TEXT          BSS           new wins
 	// DATA          DATA          ERROR
 	// DATA lg/eq    BSS  sm/eq    new wins
 	// DATA small    BSS  large    merge: new with larger size
 	// BSS  large    DATA small    merge: old with larger size
 	// BSS  large    BSS  small    new wins
 	// BSS  sm/eq    D/B  lg/eq    old wins
-	// BSS           TEXT          old wins
-	oldtyp := sym.AbiSymKindToSymKind[objabi.SymKind(oldsym.Type())]
-	newtyp := sym.AbiSymKindToSymKind[objabi.SymKind(osym.Type())]
-	newIsText := newtyp.IsText()
-	oldHasContent := oldr.DataSize(oldli) != 0
-	newHasContent := r.DataSize(li) != 0
-	oldIsBSS := oldtyp.IsData() && !oldHasContent
-	newIsBSS := newtyp.IsData() && !newHasContent
 	switch {
-	case newIsText && oldIsBSS,
-		newHasContent && oldIsBSS,
+	case newHasContent && oldIsBSS,
 		newIsBSS && oldIsBSS && sz > oldsz:
 		// new symbol overwrites old symbol.
 		l.objSyms[oldi] = objSym{r.objidx, li}
