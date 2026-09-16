@@ -10,10 +10,10 @@ The current audit covers the 285 distinct function names declared in
 `src/cmd/compile/internal/typecheck/_builtin/runtime.go` or referenced by literal
 `LookupRuntimeFunc` calls in `src/cmd/compile/internal/ssagen/ssa.go`, plus the
 function entries in `src/cmd/internal/goobj/mkbuiltin.go` (excluding the TLS variable).
-136 have an explicit model; the remaining 149 are listed below.
+137 have an explicit model; the remaining 148 are listed below.
 Also modeled are `Goexit`, `memequal_varlen`, `memhash_varlen`, `panicmem`, `panicmemAddr`, `throw`, plus the existing
-`os.Exit` and testing termination methods. Generated `mallocgcSmallNoScanSC*`
-and `mallocgcSmallScanNoHeaderSC*` entries share the allocation exclusions below.
+`os.Exit` and testing termination methods. The fourteen generated `mallocgcSmallNoScanSC1..7` and
+`mallocgcSmallScanNoHeaderSC1..7` entries also have allocation models.
 LLVM intrinsics and the private write-barrier record intrinsic retain their
 separate lowering contracts.
 
@@ -83,13 +83,23 @@ require statepoints.
 
 ### Conditional allocation calls
 
-A direct ABIInternal `mallocgc` call with a constant nonzero byte size receives
+A direct ABIInternal `mallocgc`, `mallocgcTinySC2`, or modeled size-class
+allocation call with a constant nonzero byte size receives
 return `noalias`, `allockind("alloc")`, and `"alloc-family"="runtime.mallocgc"`.
 If `needzero` is a constant true value, the call instead receives
 `allockind("alloc,zeroed")`. Unknown or false zeroing flags do not promise either
 zeroed or uninitialized contents. These attributes are precreated and attached
 only to the call; the shared function declaration and runtime definition retain
-their unconditional contracts.
+their unconditional contracts. The tiny and fourteen size-class entries share
+`nonnull` and `allocsize(0)`, and are registered by exact name.
+
+A `newobject` call whose type argument is an SSA `OpAddr` of a static type symbol
+with a known nonzero `TypeInfo.Type.Size()` receives `noalias` and
+`allockind("alloc,zeroed")`. This reuses the type metadata used by Go's fixed-load
+rewriting, rather than guessing the allocation size from a pointer result type.
+Zero-sized or dynamic type descriptors remain unannotated. The runtime
+signature is unchanged; `allocsize` cannot describe a size loaded from type
+metadata, so no allocsize attribute is attached to newobject.
 
 LLVM may elide such allocations even though the allocator updates runtime
 metadata. Optimizer regressions cover unused allocations, zero-load folding,
@@ -162,7 +172,7 @@ The checks inspect pointer addresses, runtime allocation metadata and failure pa
 
 These helpers allocate, may run GC/instrumentation/error paths, retain type/data pointers, or return aliases of scratch/input storage. `slicecopy` and `typedslicecopy` also call sanitizer hooks. A contract common to all supported build modes is not inferred from the fast path.
 
-`concatbyte2`, `concatbyte3`, `concatbyte4`, `concatbyte5`, `concatbytes`, `concatstring2`, `concatstring3`, `concatstring4`, `concatstring5`, `concatstrings`, `growslice`, `growsliceBuf`, `growsliceBufNoAlias`, `growsliceNoAlias`, `intstring`, `mallocgcTinySC2`, `moveSlice`, `moveSliceNoCap`, `moveSliceNoCapNoScan`, `moveSliceNoScan`, `slicebytetostring`, `slicebytetostringtmp`, `slicecopy`, `slicerunetostring`, `stringtoslicebyte`, `stringtoslicerune`, `typedslicecopy`.
+`concatbyte2`, `concatbyte3`, `concatbyte4`, `concatbyte5`, `concatbytes`, `concatstring2`, `concatstring3`, `concatstring4`, `concatstring5`, `concatstrings`, `growslice`, `growsliceBuf`, `growsliceBufNoAlias`, `growsliceNoAlias`, `intstring`, `moveSlice`, `moveSliceNoCap`, `moveSliceNoCapNoScan`, `moveSliceNoScan`, `slicebytetostring`, `slicebytetostringtmp`, `slicecopy`, `slicerunetostring`, `stringtoslicebyte`, `stringtoslicerune`, `typedslicecopy`.
 
 ### Scheduling and defer
 
