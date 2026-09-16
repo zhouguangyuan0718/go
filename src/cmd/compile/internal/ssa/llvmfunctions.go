@@ -22,13 +22,15 @@ import (
 // Future argument-dependent properties belong on the call, never on the shared
 // declaration. Parameter properties must use the lowered ABI signature.
 type llvmFunctionModel struct {
-	noReturn bool
-	gcLeaf   bool
+	noReturn   bool
+	gcLeaf     bool
+	noFree     bool
+	noCallback bool
+	noUnwind   bool
 
 	// Attributes for the known ABIInternal signature. Parameter entries use
 	// zero-based argument positions; the binding below uses LLVM's 1-based indices.
-	attributes []string
-	parameters [][]string
+	parameters [][]llvm.Attribute
 }
 
 // llvmFunctionManager owns the association between exact LLVM function names,
@@ -39,7 +41,19 @@ type llvmFunctionManager struct {
 	models map[string]llvmFunctionModel
 }
 
-var llvmFunctions = newLLVMFunctionManager()
+// Attributes belong to GlobalCtxt and can be reused across modules. Unlike
+// function handles, they survive declaration replacement and module disposal.
+var (
+	llvmNoReturnAttribute     = llvmModelAttribute("noreturn")
+	llvmGCLeafAttribute       = GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, "")
+	llvmNoFreeAttribute       = llvmModelAttribute("nofree")
+	llvmNoCallbackAttribute   = llvmModelAttribute("nocallback")
+	llvmNoUnwindAttribute     = llvmModelAttribute("nounwind")
+	llvmCapturesNoneAttribute = llvmModelAttribute("captures")
+	llvmReadOnlyAttribute     = llvmModelAttribute("readonly")
+	llvmWriteOnlyAttribute    = llvmModelAttribute("writeonly")
+	llvmFunctions             = newLLVMFunctionManager()
+)
 
 func newLLVMFunctionManager() llvmFunctionManager {
 	// The raw assembly helpers in runtime/memmove_*.s, memclr_*.s and
@@ -47,23 +61,22 @@ func newLLVMFunctionManager() llvmFunctionManager {
 	// call back into Go, nor unwind through LLVM EH. Their implementations may
 	// read CPU flags, and arm64 memclr updates its cached ZVA block size, so
 	// parameter access modes do not imply an argmem-only function effect.
-	rawMemory := []string{"nofree", "nocallback", "nounwind"}
-	readPointer := []string{"captures", "readonly"}
-	writePointer := []string{"captures", "writeonly"}
+	readPointer := []llvm.Attribute{llvmCapturesNoneAttribute, llvmReadOnlyAttribute}
+	writePointer := []llvm.Attribute{llvmCapturesNoneAttribute, llvmWriteOnlyAttribute}
 	models := map[string]llvmFunctionModel{
 		// These raw helpers already have a GC-leaf call contract in both the SSA
 		// static-call path and the dedicated memory-operation lowering paths.
 		"runtime.memmove": {
-			gcLeaf: true, attributes: rawMemory,
-			parameters: [][]string{writePointer, readPointer},
+			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
+			parameters: [][]llvm.Attribute{writePointer, readPointer},
 		},
 		"runtime.memequal": {
-			gcLeaf: true, attributes: rawMemory,
-			parameters: [][]string{readPointer, readPointer},
+			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
+			parameters: [][]llvm.Attribute{readPointer, readPointer},
 		},
 		"runtime.memclrNoHeapPointers": {
-			gcLeaf: true, attributes: rawMemory,
-			parameters: [][]string{writePointer},
+			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
+			parameters: [][]llvm.Attribute{writePointer},
 		},
 		"runtime.wbMove": {gcLeaf: true},
 		"runtime.wbZero": {gcLeaf: true},
@@ -125,19 +138,25 @@ func (m *llvmFunctionManager) getOrInsert(name string, sig llvmFuncSignature, cc
 	configureLLVMFunction(fn, sig, cc)
 	model := m.models[fn.Name()]
 	if model.noReturn {
-		fn.AddFunctionAttr(GlobalCtxt.CreateEnumAttribute(llvm.AttributeKindID("noreturn"), 0))
+		fn.AddFunctionAttr(llvmNoReturnAttribute)
 	}
 	// The leaf contract belongs to the ABIInternal entry, not its ABI0 wrapper.
 	if model.gcLeaf && cc == goABIInternalCallConv {
-		fn.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, ""))
+		fn.AddFunctionAttr(llvmGCLeafAttribute)
 	}
 	if cc == goABIInternalCallConv {
-		for _, name := range model.attributes {
-			fn.AddFunctionAttr(llvmModelAttribute(name))
+		if model.noFree {
+			fn.AddFunctionAttr(llvmNoFreeAttribute)
+		}
+		if model.noCallback {
+			fn.AddFunctionAttr(llvmNoCallbackAttribute)
+		}
+		if model.noUnwind {
+			fn.AddFunctionAttr(llvmNoUnwindAttribute)
 		}
 		for i, parameter := range model.parameters {
-			for _, name := range parameter {
-				fn.AddAttributeAtIndex(i+1, llvmModelAttribute(name))
+			for _, attribute := range parameter {
+				fn.AddAttributeAtIndex(i+1, attribute)
 			}
 		}
 	}
