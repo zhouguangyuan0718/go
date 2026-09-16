@@ -7,6 +7,7 @@
 package ssa
 
 import (
+	"cmd/compile/internal/types"
 	"cmd/internal/goobj"
 	"cmd/internal/obj"
 	"testing"
@@ -99,9 +100,21 @@ func TestLLVMFunctionModelsBindGCLeafToFunctions(t *testing.T) {
 			if encoded, ok := goobj.BuiltinSymbolName(test.name, int(abi)); ok {
 				references = append(references, encoded)
 			}
+			callSig := sig
+			var args []llvm.Value
+			if test.name == "runtime.memmove" || test.name == "runtime.memequal" {
+				ptr := GlobalCtxt.PointerType(0)
+				size := GlobalCtxt.IntType(int(types.PtrSize * 8))
+				result := void
+				if test.name == "runtime.memequal" {
+					result = GlobalCtxt.Int8Type()
+				}
+				callSig.Type = llvm.FunctionType(result, []llvm.Type{ptr, ptr, size}, false)
+				args = []llvm.Value{llvm.ConstNull(ptr), llvm.ConstNull(ptr), llvm.ConstInt(size, 0, false)}
+			}
 			for _, reference := range references {
-				fn := getOrInsertLLVMFunction(reference, sig, cc)
-				call := builder.CreateCall(sig.Type, fn, nil, "")
+				fn := getOrInsertLLVMFunction(reference, callSig, cc)
+				call := builder.CreateCall(callSig.Type, fn, args, "")
 				call.SetInstructionCallConv(cc)
 				wantLeaf := cc == goABIInternalCallConv && test.leaf
 				if got := fn.GetStringAttributeAtIndex(llvmAttributeFunctionIndex, goGCLeafFunctionAttr).C != nil; got != wantLeaf {

@@ -8,7 +8,6 @@ package ssa
 
 import (
 	"cmd/compile/internal/base"
-	"cmd/compile/internal/types"
 	"cmd/internal/goobj"
 	"cmd/internal/obj"
 
@@ -26,60 +25,10 @@ type llvmFunctionModel struct {
 	noReturn bool
 	gcLeaf   bool
 
-	// Additional ABIInternal contracts are applied only to an exact signature.
-	// A late builtin can initially have a provisional void() declaration.
+	// Attributes for the known ABIInternal signature. Parameter entries use
+	// zero-based argument positions; the binding below uses LLVM's 1-based indices.
 	attributes []string
-	result     llvmModelType
-	parameters []llvmParameterModel
-}
-
-type llvmModelType uint8
-
-const (
-	llvmModelVoid llvmModelType = iota
-	llvmModelPointer
-	llvmModelUintptr
-	llvmModelBool
-)
-
-type llvmParameterModel struct {
-	typ        llvmModelType
-	attributes []string
-}
-
-func (t llvmModelType) matches(actual llvm.Type) bool {
-	switch t {
-	case llvmModelVoid:
-		return actual.TypeKind() == llvm.VoidTypeKind
-	case llvmModelPointer:
-		return actual.TypeKind() == llvm.PointerTypeKind
-	case llvmModelUintptr:
-		return actual.TypeKind() == llvm.IntegerTypeKind && actual.IntTypeWidth() == int(types.PtrSize*8)
-	case llvmModelBool:
-		return actual.TypeKind() == llvm.IntegerTypeKind && actual.IntTypeWidth() == 8
-	}
-	return false
-}
-
-func (m llvmFunctionModel) matches(sig llvmFuncSignature) bool {
-	if sig.HasClosureContext || sig.Type.IsFunctionVarArg() || !m.result.matches(sig.Type.ReturnType()) {
-		return false
-	}
-	params := sig.Type.ParamTypes()
-	if len(params) != len(m.parameters) {
-		return false
-	}
-	for i, p := range params {
-		if !m.parameters[i].typ.matches(p) {
-			return false
-		}
-	}
-	for _, p := range sig.Params {
-		if p.ByVal {
-			return false
-		}
-	}
-	return true
+	parameters [][]string
 }
 
 // llvmFunctionManager owns the association between exact LLVM function names,
@@ -99,23 +48,22 @@ func newLLVMFunctionManager() llvmFunctionManager {
 	// read CPU flags, and arm64 memclr updates its cached ZVA block size, so
 	// parameter access modes do not imply an argmem-only function effect.
 	rawMemory := []string{"nofree", "nocallback", "nounwind"}
-	readPointer := llvmParameterModel{llvmModelPointer, []string{"captures", "readonly"}}
-	writePointer := llvmParameterModel{llvmModelPointer, []string{"captures", "writeonly"}}
-	size := llvmParameterModel{typ: llvmModelUintptr}
+	readPointer := []string{"captures", "readonly"}
+	writePointer := []string{"captures", "writeonly"}
 	models := map[string]llvmFunctionModel{
 		// These raw helpers already have a GC-leaf call contract in both the SSA
 		// static-call path and the dedicated memory-operation lowering paths.
 		"runtime.memmove": {
-			gcLeaf: true, attributes: rawMemory, result: llvmModelVoid,
-			parameters: []llvmParameterModel{writePointer, readPointer, size},
+			gcLeaf: true, attributes: rawMemory,
+			parameters: [][]string{writePointer, readPointer},
 		},
 		"runtime.memequal": {
-			gcLeaf: true, attributes: rawMemory, result: llvmModelBool,
-			parameters: []llvmParameterModel{readPointer, readPointer, size},
+			gcLeaf: true, attributes: rawMemory,
+			parameters: [][]string{readPointer, readPointer},
 		},
 		"runtime.memclrNoHeapPointers": {
-			gcLeaf: true, attributes: rawMemory, result: llvmModelVoid,
-			parameters: []llvmParameterModel{writePointer, size},
+			gcLeaf: true, attributes: rawMemory,
+			parameters: [][]string{writePointer},
 		},
 		"runtime.wbMove": {gcLeaf: true},
 		"runtime.wbZero": {gcLeaf: true},
@@ -183,12 +131,12 @@ func (m *llvmFunctionManager) getOrInsert(name string, sig llvmFuncSignature, cc
 	if model.gcLeaf && cc == goABIInternalCallConv {
 		fn.AddFunctionAttr(GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, ""))
 	}
-	if cc == goABIInternalCallConv && len(model.attributes) != 0 && model.matches(sig) {
+	if cc == goABIInternalCallConv {
 		for _, name := range model.attributes {
 			fn.AddFunctionAttr(llvmModelAttribute(name))
 		}
 		for i, parameter := range model.parameters {
-			for _, name := range parameter.attributes {
+			for _, name := range parameter {
 				fn.AddAttributeAtIndex(i+1, llvmModelAttribute(name))
 			}
 		}

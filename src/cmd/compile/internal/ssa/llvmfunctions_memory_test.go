@@ -14,7 +14,7 @@ import (
 	"github.com/goallc/go-llvm"
 )
 
-func TestLLVMFunctionMemoryModelSignatures(t *testing.T) {
+func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 	oldModule := CurrentModule
 	module := GlobalCtxt.NewModule("memory_model_signatures")
 	CurrentModule = module
@@ -32,14 +32,10 @@ func TestLLVMFunctionMemoryModelSignatures(t *testing.T) {
 		{"runtime.memclrNoHeapPointers", GlobalCtxt.VoidType(), []llvm.Type{ptr, size}, []string{"writeonly"}},
 	} {
 		for _, cc := range []llvm.CallConv{goABIInternalCallConv, goABI0CallConv} {
-			// A provisional declaration must not acquire parameter contracts.
-			sig := llvmFuncSignature{Type: llvm.FunctionType(GlobalCtxt.VoidType(), nil, false), ClosureContextIndex: -1}
-			fn := getOrInsertLLVMFunction(test.name, sig, cc)
-			if fn.GetEnumFunctionAttribute(llvm.AttributeKindID("nofree")).C != nil {
-				t.Fatalf("%s: modeled a provisional signature", test.name)
+			sig := llvmFuncSignature{
+				Type: llvm.FunctionType(test.result, test.params, false), ClosureContextIndex: -1,
 			}
-			sig.Type = llvm.FunctionType(test.result, test.params, false)
-			fn = getOrInsertLLVMFunction(test.name, sig, cc)
+			fn := getOrInsertLLVMFunction(test.name, sig, cc)
 			want := cc == goABIInternalCallConv
 			for _, attr := range []string{"nofree", "nocallback", "nounwind"} {
 				if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID(attr)).C != nil; got != want {
