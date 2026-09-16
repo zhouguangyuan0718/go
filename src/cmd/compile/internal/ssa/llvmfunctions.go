@@ -39,6 +39,8 @@ type llvmFunctionModel struct {
 	// Go int result ranges are precreated for each supported integer width.
 	resultRange map[int]llvm.Attribute
 	allocSize   llvm.Attribute
+	// Audited mallocgc call contract: (byte size, type, needzero).
+	allocation bool
 }
 
 // llvmFunctionManager owns the association between exact LLVM function names,
@@ -64,6 +66,10 @@ var (
 	llvmNoSyncAttribute         = llvmModelAttribute("nosync")
 	llvmReadOnlyMemoryAttribute = GlobalCtxt.CreateReadOnlyMemoryAttribute()
 	llvmNoMemoryAttribute       = llvmModelAttribute("memory")
+	llvmNoAliasAttribute        = llvmModelAttribute("noalias")
+	llvmAllocAttribute          = GlobalCtxt.CreateAllocKindAttribute(false)
+	llvmZeroAllocAttribute      = GlobalCtxt.CreateAllocKindAttribute(true)
+	llvmAllocFamilyAttribute    = GlobalCtxt.CreateStringAttribute("alloc-family", "runtime.mallocgc")
 	llvmFunctions               = newLLVMFunctionManager()
 )
 
@@ -117,7 +123,7 @@ func newLLVMFunctionManager() llvmFunctionManager {
 
 		// Successful allocation returns a non-null pointer, including zerobase
 		// for zero bytes. These attributes imply neither GC leaf nor purity.
-		"runtime.mallocgc":      {result: nonnullResult, allocSize: GlobalCtxt.CreateAllocSizeAttribute(0)},
+		"runtime.mallocgc":      {result: nonnullResult, allocSize: GlobalCtxt.CreateAllocSizeAttribute(0), allocation: true},
 		"runtime.newobject":     {result: nonnullResult},
 		"runtime.makeslice":     {result: nonnullResult},
 		"runtime.makeslice64":   {result: nonnullResult},
@@ -393,4 +399,24 @@ func llvmModelAttribute(name string) llvm.Attribute {
 	}
 	// captures is an integer-valued attribute; zero is captures(none).
 	return GlobalCtxt.CreateEnumAttribute(kind, 0)
+}
+
+// bindCall adds argument-dependent contracts without strengthening a shared
+// declaration or definition. A zero-byte mallocgc returns the shared zerobase;
+// preserve that identity until zero-sized allocation provenance is modeled.
+func (m *llvmFunctionManager) bindCall(call, fn llvm.Value, args []llvm.Value, cc llvm.CallConv) {
+	if cc != goABIInternalCallConv || !m.models[fn.Name()].allocation {
+		return
+	}
+	size := args[0]
+	if size.IsAConstantInt().IsNil() || size.ZExtValue() == 0 {
+		return
+	}
+	call.AddCallSiteAttribute(0, llvmNoAliasAttribute)
+	kind := llvmAllocAttribute
+	if zero := args[2]; !zero.IsAConstantInt().IsNil() && zero.ZExtValue() != 0 {
+		kind = llvmZeroAllocAttribute
+	}
+	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, kind)
+	call.AddCallSiteAttribute(llvmAttributeFunctionIndex, llvmAllocFamilyAttribute)
 }

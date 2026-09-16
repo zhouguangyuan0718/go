@@ -442,6 +442,16 @@ func (c Context) CreateConstantRangeAttribute(kind uint, bits uint, lower, upper
 	return
 }
 
+// CreateAllocKindAttribute describes a new allocation, optionally zero-initialized.
+func (c Context) CreateAllocKindAttribute(zeroed bool) (a Attribute) {
+	var zero C.LLVMBool
+	if zeroed {
+		zero = 1
+	}
+	a.C = C.LLVMGoCreateAllocKindAttribute(c.C, zero)
+	return
+}
+
 // CreateAllocSizeAttribute describes an allocation sized by one integer argument.
 func (c Context) CreateAllocSizeAttribute(sizeArg uint) (a Attribute) {
 	a.C = C.LLVMGoCreateAllocSizeAttribute(c.C, C.unsigned(sizeArg))

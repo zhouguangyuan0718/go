@@ -78,8 +78,37 @@ cannot be expressed by an `allocsize` parameter index.
 `cmpstring` returns `range(-1, 2)`. `chanlen`, `chancap` and `countrunes` return
 nonnegative Go ints. Range attributes are precreated at 32 and 64 bits and bound
 using the actual IR return width. ABI0 returns through slots and receives none
-of these return or allocation-size attributes. No noalias or allockind promise
-is introduced. Non-leaf allocations still require statepoints.
+of these return or allocation-size attributes. Non-leaf allocations still
+require statepoints.
+
+### Conditional allocation calls
+
+A direct ABIInternal `mallocgc` call with a constant nonzero byte size receives
+return `noalias`, `allockind("alloc")`, and `"alloc-family"="runtime.mallocgc"`.
+If `needzero` is a constant true value, the call instead receives
+`allockind("alloc,zeroed")`. Unknown or false zeroing flags do not promise either
+zeroed or uninitialized contents. These attributes are precreated and attached
+only to the call; the shared function declaration and runtime definition retain
+their unconditional contracts.
+
+LLVM may elide such allocations even though the allocator updates runtime
+metadata. Optimizer regressions cover unused allocations, zero-load folding,
+and independent memory accesses; surviving calls retain their statepoints.
+The executable regression keeps adjacent tiny allocations alive across GC and
+checks their independent contents. Sharing a physical tiny block does not make
+non-overlapping logical allocations alias.
+
+Zero-byte and dynamic-size calls are currently excluded. An LLVM experiment
+folded equality of two marked zero-byte allocation results to false, whereas
+these concrete runtime calls both return zerobase. This does not settle Go's
+freedom to compare pointers to distinct zero-sized variables; the current
+runtime-call IR contract is preserved until that distinction is modeled.
+Shared scalar/empty boxing caches and conversions returning input/scratch
+storage are not marked as fresh allocations. In an executable LLVM probe,
+marking a shared-cache helper as noalias plus allockind changed its address
+comparison from true to false after O2. Modeling immutable boxes as independent
+logical objects would require a matching representation and address-observation
+contract, not just attributes on the existing shared-pointer implementation.
 
 The LLVM definitions of these attributes are in the
 [LLVM language reference](https://llvm.org/docs/LangRef.html#function-attributes).

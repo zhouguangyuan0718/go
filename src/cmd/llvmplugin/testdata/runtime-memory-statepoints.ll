@@ -52,14 +52,14 @@ declare goabiinternal nonnull ptr @runtime.mallocgc(i64, ptr, i8) allocsize(0)
 ; CHECK: call goabiinternal token {{.*}}@llvm.experimental.gc.statepoint
 ; CHECK-SAME: @runtime.mallocgc
 ; CHECK-SAME: "gc-live"(ptr %live)
-; CHECK: [[NEW:%.*]] = call ptr @llvm.experimental.gc.result
+; CHECK: [[NEW:%.*]] = call noalias ptr @llvm.experimental.gc.result
 ; CHECK: [[OLD:%.*]] = call coldcc ptr @llvm.experimental.gc.relocate
 ; CHECK: [[VALUE:%.*]] = load i64, ptr [[OLD]]
 ; CHECK: store i64 [[VALUE]], ptr [[NEW]]
 ; CHECK: ret ptr [[NEW]]
 define goabiinternal ptr @allocation_caller(ptr %live) gc "goallc" {
 entry:
-  %p = call goabiinternal ptr @runtime.mallocgc(i64 8, ptr null, i8 1)
+  %p = call goabiinternal noalias ptr @runtime.mallocgc(i64 8, ptr null, i8 1) allockind("alloc,zeroed") "alloc-family"="runtime.mallocgc"
   %v = load i64, ptr %live
   store i64 %v, ptr %p
   ret ptr %p
