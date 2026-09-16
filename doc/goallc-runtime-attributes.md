@@ -31,19 +31,38 @@ separate lowering contracts.
 | Typed copy/clear, pointer-containing clear, cgo pointer checks, write-barrier entry points | GC leaf and `nounwind`. Audit follows `mbarrier.go`, `mbitmap.go`, `mwbbuf.go`, `cgocheck.go` and assembly entry points. Their slow paths operate on the system stack without a goroutine safe point. |
 | Panic helpers, bounds failures, signal panic, `throw`, `block`, Goexit and existing termination APIs | `noreturn`. Recovery resumes an older frame; the helper does not return to its call site. No callback-free or GC-leaf promise follows. |
 
-Function contracts apply to both ABIInternal and ABI0 entries. Their NOSPLIT
+Function contracts other than memory-effect restrictions apply to both ABIInternal and ABI0 entries. Their NOSPLIT
 ABI wrappers preserve these contracts. Parameter attributes only apply to
 ABIInternal: ABI0 byval parameters denote argument slots, not the original
 pointees, and return homes are additional parameters.
 
-A short Go implementation is not sufficient evidence for GC leaf, `nofree` or
-`nocallback`. Stack checks and transitive calls still matter. In particular,
-`rand` explicitly permits stack splitting during refill, and the NOSPLIT
-`runtime.memhash` wrapper calls Go implementations in `internal/runtime/maps`.
-No new GC-leaf assertion depends on inlining or inferred frame size.
+Memory effects describe the logical operation visible to callers. Stack growth,
+stack-map processing and pointer relocation are implemented by the Go calling
+convention and statepoints. They do not by themselves turn a logical read-only
+operation into a writer. These contracts apply to both declarations and
+runtime definitions: definition creation uses the same function manager before
+adding basic blocks.
 
-No function-wide memory restriction is added. CPU flags and hash seeds are
-read, arm64 zeroing updates a cache, NaN hashing updates random state, and bulk
+Concrete equality, deterministic memory/string hashes, rune scanning and channel
+queries have `memory(read)` on ABIInternal entries. Pure numeric/soft-float
+helpers and zero-width equality/hash helpers have `memory(none)`. These finite
+operations also have `willreturn`. Reads are not restricted to argument memory:
+hash seeds, CPU flags, string payloads and closure contexts must remain visible.
+The three raw assembly comparisons additionally have `nosync`.
+
+Go helpers remain non-leaf unless independently justified. The statepoint pass
+does not use `memory(read)` or `memory(none)` as evidence of GC leaf. Surviving
+calls still relocate live pointers, and the rewrite does not copy these memory
+restrictions onto the statepoint intrinsic. Optimization tests verify repeated
+call elimination and dead-call removal, while a backend regression verifies
+that surviving hash/numeric calls still produce statepoints and relocations.
+
+ABI0 wrappers keep unrestricted memory effects because their result homes are
+caller-owned memory that must be written. Logical `willreturn` remains valid
+for those wrappers.
+
+Other helpers retain unrestricted memory effects: arm64 zeroing updates a
+cache, floating-point and complex hashes update random state for NaNs, and bulk
 barriers update GC metadata. Barrier destinations are not `writeonly`: old
 pointers must be read before overwriting them. No nonnull, noalias, allocation
 result, or dereferenceability promise is introduced.

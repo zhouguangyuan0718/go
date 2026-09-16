@@ -22,11 +22,15 @@ import (
 // Future argument-dependent properties belong on the call, never on the shared
 // declaration. Parameter properties must use the lowered ABI signature.
 type llvmFunctionModel struct {
-	noReturn   bool
-	gcLeaf     bool
-	noFree     bool
-	noCallback bool
-	noUnwind   bool
+	noReturn       bool
+	gcLeaf         bool
+	noFree         bool
+	noCallback     bool
+	noUnwind       bool
+	willReturn     bool
+	noSync         bool
+	readOnlyMemory bool
+	noMemory       bool
 
 	// Attributes for the known ABIInternal signature. Parameter entries use
 	// zero-based argument positions; the binding below uses LLVM's 1-based indices.
@@ -44,15 +48,19 @@ type llvmFunctionManager struct {
 // Attributes belong to GlobalCtxt and can be reused across modules. Unlike
 // function handles, they survive declaration replacement and module disposal.
 var (
-	llvmNoReturnAttribute     = llvmModelAttribute("noreturn")
-	llvmGCLeafAttribute       = GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, "")
-	llvmNoFreeAttribute       = llvmModelAttribute("nofree")
-	llvmNoCallbackAttribute   = llvmModelAttribute("nocallback")
-	llvmNoUnwindAttribute     = llvmModelAttribute("nounwind")
-	llvmCapturesNoneAttribute = llvmModelAttribute("captures")
-	llvmReadOnlyAttribute     = llvmModelAttribute("readonly")
-	llvmWriteOnlyAttribute    = llvmModelAttribute("writeonly")
-	llvmFunctions             = newLLVMFunctionManager()
+	llvmNoReturnAttribute       = llvmModelAttribute("noreturn")
+	llvmGCLeafAttribute         = GlobalCtxt.CreateStringAttribute(goGCLeafFunctionAttr, "")
+	llvmNoFreeAttribute         = llvmModelAttribute("nofree")
+	llvmNoCallbackAttribute     = llvmModelAttribute("nocallback")
+	llvmNoUnwindAttribute       = llvmModelAttribute("nounwind")
+	llvmCapturesNoneAttribute   = llvmModelAttribute("captures")
+	llvmReadOnlyAttribute       = llvmModelAttribute("readonly")
+	llvmWriteOnlyAttribute      = llvmModelAttribute("writeonly")
+	llvmWillReturnAttribute     = llvmModelAttribute("willreturn")
+	llvmNoSyncAttribute         = llvmModelAttribute("nosync")
+	llvmReadOnlyMemoryAttribute = GlobalCtxt.CreateReadOnlyMemoryAttribute()
+	llvmNoMemoryAttribute       = llvmModelAttribute("memory")
+	llvmFunctions               = newLLVMFunctionManager()
 )
 
 func newLLVMFunctionManager() llvmFunctionManager {
@@ -72,6 +80,7 @@ func newLLVMFunctionManager() llvmFunctionManager {
 		},
 		"runtime.memequal": {
 			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
+			willReturn: true, noSync: true, readOnlyMemory: true,
 			parameters: [][]llvm.Attribute{readPointer, readPointer},
 		},
 		"runtime.memclrNoHeapPointers": {
@@ -82,93 +91,93 @@ func newLLVMFunctionManager() llvmFunctionManager {
 		// context and tail-calls the same assembly comparison body.
 		"runtime.memequal_varlen": {
 			gcLeaf: true, noFree: true, noCallback: true, noUnwind: true,
+			willReturn: true, noSync: true, readOnlyMemory: true,
 			parameters: [][]llvm.Attribute{readPointer, readPointer},
 		},
 		// String arguments are aggregate values in LLVM IR, not pointer
 		// parameters. The assembly only compares bytes (and may read CPU flags).
-		"runtime.cmpstring": {gcLeaf: true, noFree: true, noCallback: true, noUnwind: true},
+		"runtime.cmpstring": {gcLeaf: true, noFree: true, noCallback: true, noUnwind: true, willReturn: true, noSync: true, readOnlyMemory: true},
 		"runtime.wbMove":    {gcLeaf: true, noUnwind: true},
 		"runtime.wbZero":    {gcLeaf: true, noUnwind: true},
 
-		// These Go helpers only read their pointer operands. They may still
-		// split the stack (including in callees), so do not infer GC leaf,
-		// nofree or nocallback from their source-level computation.
-		"runtime.memequal0":   {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.memequal8":   {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.memequal16":  {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.memequal32":  {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.memequal64":  {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.memequal128": {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.f32equal":    {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.f64equal":    {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.c64equal":    {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.c128equal":   {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
-		"runtime.strequal":    {noUnwind: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		// These contracts describe logical memory effects. Stack relocation is
+		// handled by statepoints; these Go helpers are deliberately not GC leaf.
+		"runtime.memequal0":   {noUnwind: true, willReturn: true, noMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.memequal8":   {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.memequal16":  {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.memequal32":  {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.memequal64":  {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.memequal128": {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.f32equal":    {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.f64equal":    {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.c64equal":    {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.c128equal":   {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
+		"runtime.strequal":    {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer, readPointer}},
 
 		// Hashing also reads global seeds; floating-point hashes can update
-		// the per-M random state for NaNs. No function-wide memory restriction.
-		"runtime.memhash":        {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash0":       {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash8":       {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash16":      {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash32":      {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash64":      {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash128":     {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.memhash_varlen": {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.strhash":        {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
+		// the per-M random state for NaNs, so those hashes remain unrestricted.
+		"runtime.memhash":        {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash0":       {noUnwind: true, willReturn: true, noMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash8":       {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash16":      {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash32":      {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash64":      {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash128":     {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.memhash_varlen": {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.strhash":        {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
 		"runtime.f32hash":        {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
 		"runtime.f64hash":        {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
 		"runtime.c64hash":        {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
 		"runtime.c128hash":       {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
 
 		// Aggregate and scalar operands need no pointer parameter attributes.
-		"runtime.decoderune":      {noUnwind: true},
-		"runtime.countrunes":      {noUnwind: true},
-		"runtime.complex128div":   {noUnwind: true},
-		"runtime.float64toint64":  {noUnwind: true},
-		"runtime.float64touint64": {noUnwind: true},
-		"runtime.float64touint32": {noUnwind: true},
-		"runtime.int64tofloat64":  {noUnwind: true},
-		"runtime.int64tofloat32":  {noUnwind: true},
-		"runtime.uint64tofloat64": {noUnwind: true},
-		"runtime.uint64tofloat32": {noUnwind: true},
-		"runtime.uint32tofloat64": {noUnwind: true},
+		"runtime.decoderune":      {noUnwind: true, willReturn: true, readOnlyMemory: true},
+		"runtime.countrunes":      {noUnwind: true, willReturn: true, readOnlyMemory: true},
+		"runtime.complex128div":   {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.float64toint64":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.float64touint64": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.float64touint32": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.int64tofloat64":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.int64tofloat32":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.uint64tofloat64": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.uint64tofloat32": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.uint32tofloat64": {noUnwind: true, willReturn: true, noMemory: true},
 		"runtime.rand":            {noUnwind: true},
 		"runtime.rand32":          {noUnwind: true},
 		"runtime.selectsetpc":     {noUnwind: true, parameters: [][]llvm.Attribute{writePointer}},
 
 		// Software floating-point entry points use scalar bit-pattern operands.
-		"runtime.f32to64":     {noUnwind: true},
-		"runtime.f32toint32":  {noUnwind: true},
-		"runtime.f32toint64":  {noUnwind: true},
-		"runtime.f32touint64": {noUnwind: true},
-		"runtime.f64to32":     {noUnwind: true},
-		"runtime.f64toint32":  {noUnwind: true},
-		"runtime.f64toint64":  {noUnwind: true},
-		"runtime.f64touint64": {noUnwind: true},
-		"runtime.fadd32":      {noUnwind: true},
-		"runtime.fadd64":      {noUnwind: true},
-		"runtime.fdiv32":      {noUnwind: true},
-		"runtime.fdiv64":      {noUnwind: true},
-		"runtime.feq32":       {noUnwind: true},
-		"runtime.feq64":       {noUnwind: true},
-		"runtime.fge32":       {noUnwind: true},
-		"runtime.fge64":       {noUnwind: true},
-		"runtime.fgt32":       {noUnwind: true},
-		"runtime.fgt64":       {noUnwind: true},
-		"runtime.fint32to32":  {noUnwind: true},
-		"runtime.fint32to64":  {noUnwind: true},
-		"runtime.fint64to32":  {noUnwind: true},
-		"runtime.fint64to64":  {noUnwind: true},
-		"runtime.fmul32":      {noUnwind: true},
-		"runtime.fmul64":      {noUnwind: true},
-		"runtime.fuint64to32": {noUnwind: true},
-		"runtime.fuint64to64": {noUnwind: true},
+		"runtime.f32to64":     {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f32toint32":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f32toint64":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f32touint64": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f64to32":     {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f64toint32":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f64toint64":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.f64touint64": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fadd32":      {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fadd64":      {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fdiv32":      {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fdiv64":      {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.feq32":       {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.feq64":       {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fge32":       {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fge64":       {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fgt32":       {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fgt64":       {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fint32to32":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fint32to64":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fint64to32":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fint64to64":  {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fmul32":      {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fmul64":      {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fuint64to32": {noUnwind: true, willReturn: true, noMemory: true},
+		"runtime.fuint64to64": {noUnwind: true, willReturn: true, noMemory: true},
 
 		// Channel queries only inspect the header, including timer-channel
 		// handling. They neither retain the channel nor perform send/receive.
-		"runtime.chanlen": {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
-		"runtime.chancap": {noUnwind: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.chanlen": {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
+		"runtime.chancap": {noUnwind: true, willReturn: true, readOnlyMemory: true, parameters: [][]llvm.Attribute{readPointer}},
 
 		// The bulk barriers and cgo pointer checks run without safe points,
 		// including their system-stack slow paths. Barrier destinations must
@@ -308,6 +317,22 @@ func (m *llvmFunctionManager) getOrInsert(name string, sig llvmFuncSignature, cc
 	}
 	if model.noUnwind {
 		fn.AddFunctionAttr(llvmNoUnwindAttribute)
+	}
+	if model.willReturn {
+		fn.AddFunctionAttr(llvmWillReturnAttribute)
+	}
+	if model.noSync {
+		fn.AddFunctionAttr(llvmNoSyncAttribute)
+	}
+	// ABI0 returns through caller-owned slots, so its wrapper writes memory
+	// even when the underlying comparison is read-only.
+	if cc == goABIInternalCallConv {
+		if model.readOnlyMemory {
+			fn.AddFunctionAttr(llvmReadOnlyMemoryAttribute)
+		}
+		if model.noMemory {
+			fn.AddFunctionAttr(llvmNoMemoryAttribute)
+		}
 	}
 	// ABI0 pointer parameters denote byval argument slots, not the original
 	// pointees. Only ABIInternal uses the parameter contracts below.

@@ -22,6 +22,10 @@
 
 using namespace llvm;
 
+LLVMAttributeRef LLVMGoCreateReadOnlyMemoryAttribute(LLVMContextRef C) {
+  return wrap(Attribute::getWithMemoryEffects(*unwrap(C), MemoryEffects::readOnly()));
+}
+
 LLVMMetadataRef LLVMConstantAsMetadata(LLVMValueRef C) {
   return wrap(ConstantAsMetadata::get(unwrap<Constant>(C)));
 }

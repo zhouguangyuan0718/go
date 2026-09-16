@@ -36,6 +36,7 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 		{"runtime.memequal_varlen", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr}, []string{"readonly", "readonly"}, true, true},
 		{"runtime.cmpstring", size, []llvm.Type{str, str}, nil, true, true},
 		{"runtime.memequal64", GlobalCtxt.Int8Type(), []llvm.Type{ptr, ptr}, []string{"readonly", "readonly"}, false, false},
+		{"runtime.fint32to32", GlobalCtxt.Int32Type(), []llvm.Type{GlobalCtxt.Int32Type()}, nil, false, false},
 		{"runtime.memhash", size, []llvm.Type{ptr, size, size}, []string{"readonly"}, false, false},
 		{"runtime.f64hash", size, []llvm.Type{ptr, size}, []string{"readonly"}, false, false},
 		{"runtime.chanlen", size, []llvm.Type{ptr}, []string{"readonly"}, false, false},
@@ -90,8 +91,23 @@ func TestLLVMFunctionMemoryModelAttributes(t *testing.T) {
 			if len(test.access) < len(test.params) && fn.GetEnumAttributeAtIndex(len(test.params), llvm.AttributeKindID("captures")).C != nil {
 				t.Errorf("%s: pointer attribute attached to non-pointer argument", fn.Name())
 			}
-			if fn.GetEnumFunctionAttribute(llvm.AttributeKindID("memory")).C != nil {
-				t.Errorf("%s: global/runtime memory effects were restricted", fn.Name())
+			comparison := test.name == "runtime.memequal" || test.name == "runtime.memequal_varlen" || test.name == "runtime.cmpstring"
+			for _, attr := range []string{"willreturn", "nosync"} {
+				want := comparison || attr == "willreturn" && (test.name == "runtime.memequal64" || test.name == "runtime.memhash" || test.name == "runtime.fint32to32" || test.name == "runtime.chanlen")
+				if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID(attr)).C != nil; got != want {
+					t.Errorf("%s: %s=%v want=%v", fn.Name(), attr, got, want)
+				}
+			}
+			wantRead := cc == goABIInternalCallConv && (comparison || test.name == "runtime.memequal64" || test.name == "runtime.memhash" || test.name == "runtime.chanlen")
+			wantNone := cc == goABIInternalCallConv && test.name == "runtime.fint32to32"
+			if wantNone && !strings.Contains(fn.String(), "memory(none)") {
+				t.Errorf("%s: missing memory(none)", fn.Name())
+			}
+			if wantRead && !strings.Contains(fn.String(), "memory(read)") {
+				t.Errorf("%s: incorrect memory encoding: %s", fn.Name(), fn.String())
+			}
+			if got := fn.GetEnumFunctionAttribute(llvm.AttributeKindID("memory")).C != nil; got != (wantRead || wantNone) {
+				t.Errorf("%s: memory attribute = %v, want %v", fn.Name(), got, wantRead || wantNone)
 			}
 		}
 	}
@@ -168,4 +184,85 @@ func TestLLVMFunctionMemoryModelLoadForwarding(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Check effects on calls themselves, not just pointer-argument load forwarding.
+// A write to the compared bytes must prevent commoning the two comparisons.
+func TestLLVMFunctionComparisonEffects(t *testing.T) {
+	for _, helper := range []string{"runtime.memequal", "runtime.memhash", "runtime.fint32to32", "runtime.f64hash"} {
+		for _, modeled := range []bool{false, true} {
+			for _, mutate := range []bool{false, true} {
+				for _, discard := range []bool{false, true} {
+					oldModule := CurrentModule
+					module := GlobalCtxt.NewModule("comparison_effects")
+					CurrentModule = module
+					func() {
+						defer func() { CurrentModule = oldModule; module.Dispose() }()
+						ptr, i8 := GlobalCtxt.PointerType(0), GlobalCtxt.Int8Type()
+						size := GlobalCtxt.IntType(int(types.PtrSize * 8))
+						result, params := i8, []llvm.Type{ptr, ptr, size}
+						if helper == "runtime.memhash" {
+							result, params = size, []llvm.Type{ptr, size, size}
+						}
+						if helper == "runtime.f64hash" {
+							result, params = size, []llvm.Type{ptr, size}
+						}
+						if helper == "runtime.fint32to32" {
+							result, params = GlobalCtxt.Int32Type(), []llvm.Type{GlobalCtxt.Int32Type()}
+						}
+						sig := llvmFuncSignature{Type: llvm.FunctionType(result, params, false)}
+						var callee llvm.Value
+						if modeled {
+							callee = getOrInsertLLVMFunction(helper, sig, goABIInternalCallConv)
+						} else {
+							callee = llvm.AddFunction(module, helper, sig.Type)
+							callee.SetFunctionCallConv(goABIInternalCallConv)
+						}
+						caller := llvm.AddFunction(module, "probe", llvm.FunctionType(result, []llvm.Type{ptr, ptr}, false))
+						b := GlobalCtxt.NewBuilder()
+						defer b.Dispose()
+						b.SetInsertPointAtEnd(llvm.AddBasicBlock(caller, "entry"))
+						args := []llvm.Value{caller.Param(0), caller.Param(1), llvm.ConstInt(size, 1, false)}
+						if helper == "runtime.memhash" {
+							args = []llvm.Value{caller.Param(0), llvm.ConstInt(size, 0, false), llvm.ConstInt(size, 8, false)}
+						}
+						if helper == "runtime.f64hash" {
+							args = []llvm.Value{caller.Param(0), llvm.ConstInt(size, 0, false)}
+						}
+						if helper == "runtime.fint32to32" {
+							args = []llvm.Value{llvm.ConstInt(result, 13, false)}
+						}
+						first := b.CreateCall(sig.Type, callee, args, "first")
+						first.SetInstructionCallConv(goABIInternalCallConv)
+						if mutate {
+							b.CreateStore(llvm.ConstInt(i8, 42, false), caller.Param(0))
+						}
+						second := b.CreateCall(sig.Type, callee, args, "second")
+						second.SetInstructionCallConv(goABIInternalCallConv)
+						if discard {
+							b.CreateRet(llvm.ConstInt(result, 0, false))
+						} else {
+							b.CreateRet(b.CreateAdd(first, second, "sum"))
+						}
+						opts := llvm.NewPassBuilderOptions()
+						defer opts.Dispose()
+						opts.SetVerifyEach(true)
+						if err := module.RunPasses("function(instcombine,gvn,dce)", llvm.TargetMachine{}, opts); err != nil {
+							t.Fatal(err)
+						}
+						want := 2
+						if modeled && helper != "runtime.f64hash" && discard {
+							want = 0
+						} else if modeled && helper != "runtime.f64hash" && (!mutate || helper == "runtime.fint32to32") {
+							want = 1
+						}
+						if got := strings.Count(caller.String(), "call goabiinternal "); got != want {
+							t.Fatalf("helper=%s modeled=%v mutate=%v discard=%v: calls=%d want=%d\n%s", helper, modeled, mutate, discard, got, want, module.String())
+						}
+					}()
+				}
+			}
+		}
+	}
+
 }
