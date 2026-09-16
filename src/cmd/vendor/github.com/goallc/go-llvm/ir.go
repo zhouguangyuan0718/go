@@ -432,6 +432,12 @@ func AttributeKindID(name string) (id uint) {
 	return
 }
 
+// CreateReadOnlyMemoryAttribute creates memory(read) using LLVM's native encoding.
+func (c Context) CreateReadOnlyMemoryAttribute() (a Attribute) {
+	a.C = C.LLVMGoCreateReadOnlyMemoryAttribute(c.C)
+	return
+}
+
 func (c Context) CreateEnumAttribute(kind uint, val uint64) (a Attribute) {
 	a.C = C.LLVMCreateEnumAttribute(c.C, C.unsigned(kind), C.uint64_t(val))
 	return

@@ -462,6 +462,12 @@ if(BUILD_TESTING)
   )
 
   goallc_add_ir_filecheck_test(
+    GoALLCStatepoints.RuntimeMemoryEffects
+    "${CMAKE_CURRENT_SOURCE_DIR}/testdata/runtime-memory-statepoints.ll"
+    CHECK
+  )
+
+  goallc_add_ir_filecheck_test(
     GoALLCStatepoints.GCLeafDefinition
     "${CMAKE_CURRENT_SOURCE_DIR}/testdata/gc-leaf-definition.ll"
     CHECK
