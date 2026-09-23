@@ -16,12 +16,6 @@ import (
 // operand when either operand is NaN or both are zero. Compare bits to check
 // signed zeros and NaN payloads, including when opposite operand orders occur
 // in the same function.
-type floatMinMaxCase struct {
-	name string
-	x, y uint64
-	want [4]uint64 // Min(x,y), Min(y,x), Max(x,y), Max(y,x)
-}
-
 func TestFloatMinMax32AMD64(t *testing.T) {
 	const (
 		one     = 0x3f800000
@@ -59,7 +53,8 @@ func TestFloatMinMax32AMD64(t *testing.T) {
 			if tc.lanes == 16 && !archsimd.X86.AVX512() {
 				t.Skip("requires AVX512")
 			}
-			testFloatMinMax(t, tc.lanes, cases, fromBits, toBits, tc.run)
+			testFloatMinMax(t, tc.lanes, cases, fromBits, toBits, tc.run,
+				floatMinMaxConfig{allowMasked: archsimd.X86.AVX512()})
 		})
 	}
 }
@@ -99,52 +94,8 @@ func TestFloatMinMax64AMD64(t *testing.T) {
 			if tc.lanes == 8 && !archsimd.X86.AVX512() {
 				t.Skip("requires AVX512")
 			}
-			testFloatMinMax(t, tc.lanes, cases, math.Float64frombits, math.Float64bits, tc.run)
-		})
-	}
-}
-
-func testFloatMinMax[T float](t *testing.T, lanes int, cases []floatMinMaxCase,
-	fromBits func(uint64) T, toBits func(T) uint64,
-	run func([]T, []T, [4][]T, bool, bool)) {
-	t.Helper()
-	for _, form := range []struct {
-		name            string
-		reverse, masked bool
-	}{
-		{"forward", false, false},
-		{"reverse", true, false},
-		{"masked-forward", false, true},
-		{"masked-reverse", true, true},
-	} {
-		t.Run(form.name, func(t *testing.T) {
-			if form.masked && !archsimd.X86.AVX512() {
-				t.Skip("requires AVX512")
-			}
-			for _, c := range cases {
-				t.Run(c.name, func(t *testing.T) {
-					x, y := make([]T, lanes), make([]T, lanes)
-					var out [4][]T
-					for i := range out {
-						out[i] = make([]T, lanes)
-					}
-					for i := range x {
-						x[i], y[i] = fromBits(c.x), fromBits(c.y)
-					}
-					run(x, y, out, form.reverse, form.masked)
-					for j, name := range []string{"Min(x,y)", "Min(y,x)", "Max(x,y)", "Max(y,x)"} {
-						for i, v := range out[j] {
-							want := c.want[j]
-							if form.masked && i%2 != 0 {
-								want = 0
-							}
-							if got := toBits(v); got != want {
-								t.Errorf("%s lane %d: got %#x, want %#x", name, i, got, want)
-							}
-						}
-					}
-				})
-			}
+			testFloatMinMax(t, tc.lanes, cases, math.Float64frombits, math.Float64bits, tc.run,
+				floatMinMaxConfig{allowMasked: archsimd.X86.AVX512()})
 		})
 	}
 }
