@@ -7,22 +7,12 @@
 package simd_test
 
 import (
-	"math"
 	"runtime"
 	"simd/archsimd"
-	"testing"
 )
 
-func TestFloatMinMax32_128(t *testing.T) {
-	fromBits := func(x uint64) float32 { return math.Float32frombits(uint32(x)) }
-	toBits := func(x float32) uint64 { return uint64(math.Float32bits(x)) }
-	testFloatMinMax(t, 4, floatMinMax32Cases(), fromBits, toBits, floatMinMax32x4,
-		floatMinMaxConfig{allowMasked: true, allowAnyNaN: runtime.GOARCH == "wasm"})
-}
-
-func TestFloatMinMax64_128(t *testing.T) {
-	testFloatMinMax(t, 2, floatMinMax64Cases(), math.Float64frombits, math.Float64bits, floatMinMax64x2,
-		floatMinMaxConfig{allowMasked: true, allowAnyNaN: runtime.GOARCH == "wasm"})
+func floatMinMaxPlatformConfig() floatMinMaxConfig {
+	return floatMinMaxConfig{allowMasked: true, allowAnyNaN: runtime.GOARCH == "wasm"}
 }
 
 func floatMinMaxMask32x4() archsimd.Mask32x4 {

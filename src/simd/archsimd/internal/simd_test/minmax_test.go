@@ -13,6 +13,26 @@ import (
 	"testing"
 )
 
+func TestFloatMinMax32_128(t *testing.T) {
+	testFloatMinMax32(t, 4, floatMinMax32x4)
+}
+
+func TestFloatMinMax64_128(t *testing.T) {
+	testFloatMinMax64(t, 2, floatMinMax64x2)
+}
+
+func testFloatMinMax32(t *testing.T, lanes int, run func([]float32, []float32, [4][]float32, bool, bool)) {
+	t.Helper()
+	fromBits := func(x uint64) float32 { return math.Float32frombits(uint32(x)) }
+	toBits := func(x float32) uint64 { return uint64(math.Float32bits(x)) }
+	testFloatMinMax(t, lanes, floatMinMax32Cases(), fromBits, toBits, run, floatMinMaxPlatformConfig())
+}
+
+func testFloatMinMax64(t *testing.T, lanes int, run func([]float64, []float64, [4][]float64, bool, bool)) {
+	t.Helper()
+	testFloatMinMax(t, lanes, floatMinMax64Cases(), math.Float64frombits, math.Float64bits, run, floatMinMaxPlatformConfig())
+}
+
 // AMD64 selects the second operand for NaNs and equal zeros. ARM64 propagates
 // NaNs, preferring the first operand when both are quiet NaNs. Wasm uses the
 // ARM64 expectations for numbers and signed zeros, but permits any NaN payload.

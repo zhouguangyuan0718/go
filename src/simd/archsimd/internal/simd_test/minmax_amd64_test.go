@@ -7,21 +7,16 @@
 package simd_test
 
 import (
-	"math"
 	"simd/archsimd"
 	"testing"
 )
 
 func TestFloatMinMax32AMD64(t *testing.T) {
-	cases := floatMinMax32Cases()
-	fromBits := func(x uint64) float32 { return math.Float32frombits(uint32(x)) }
-	toBits := func(x float32) uint64 { return uint64(math.Float32bits(x)) }
 	for _, tc := range []struct {
 		name  string
 		lanes int
 		run   func([]float32, []float32, [4][]float32, bool, bool)
 	}{
-		{"Float32x4", 4, floatMinMax32x4},
 		{"Float32x8", 8, floatMinMax32x8},
 		{"Float32x16", 16, floatMinMax32x16},
 	} {
@@ -29,20 +24,17 @@ func TestFloatMinMax32AMD64(t *testing.T) {
 			if tc.lanes == 16 && !archsimd.X86.AVX512() {
 				t.Skip("requires AVX512")
 			}
-			testFloatMinMax(t, tc.lanes, cases, fromBits, toBits, tc.run,
-				floatMinMaxConfig{allowMasked: archsimd.X86.AVX512()})
+			testFloatMinMax32(t, tc.lanes, tc.run)
 		})
 	}
 }
 
 func TestFloatMinMax64AMD64(t *testing.T) {
-	cases := floatMinMax64Cases()
 	for _, tc := range []struct {
 		name  string
 		lanes int
 		run   func([]float64, []float64, [4][]float64, bool, bool)
 	}{
-		{"Float64x2", 2, floatMinMax64x2},
 		{"Float64x4", 4, floatMinMax64x4},
 		{"Float64x8", 8, floatMinMax64x8},
 	} {
@@ -50,10 +42,13 @@ func TestFloatMinMax64AMD64(t *testing.T) {
 			if tc.lanes == 8 && !archsimd.X86.AVX512() {
 				t.Skip("requires AVX512")
 			}
-			testFloatMinMax(t, tc.lanes, cases, math.Float64frombits, math.Float64bits, tc.run,
-				floatMinMaxConfig{allowMasked: archsimd.X86.AVX512()})
+			testFloatMinMax64(t, tc.lanes, tc.run)
 		})
 	}
+}
+
+func floatMinMaxPlatformConfig() floatMinMaxConfig {
+	return floatMinMaxConfig{allowMasked: archsimd.X86.AVX512()}
 }
 
 func floatMinMaxMask32x4() archsimd.Mask32x4 {
